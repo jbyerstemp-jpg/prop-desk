@@ -355,6 +355,15 @@
     if (!risk) return null;
     return dir(p) * (price - p.entry) / risk;
   }
+  /* Owner's rule (Nov 1, 2026): a closed trade is a WIN if its net result after fees is above 0, a LOSS if below 0, BREAKEVEN at
+     exactly 0. R = net ÷ risk has the same sign, so counting by R or by dollars always agrees. A close (or partial close) taken
+     from the platform without its result on screen is UNKNOWN until he enters it; the daily loss stop counts it as a loss. */
+  const outcomeOf = v => v == null || !isFinite(v) ? 'unknown' : v > 0 ? 'win' : v < 0 ? 'loss' : 'even';
+  function tradeOutcome(p) {
+    if (!p || !p.closed) return null;
+    if ((p.closed.synced && !p.closed.resultKnown) || (p.partials || []).some(x => x.resultKnown === false)) return 'unknown';
+    return outcomeOf(realizedOfPos(p));
+  }
   const realizedOfPos = p => (p.partials || []).reduce((s, x) => s + (x.realized || 0), 0)
     + (p.closed ? (p.closed.realized || 0) : 0);
 
@@ -445,10 +454,13 @@
     const targetBal = a.targetEq > 0 ? a.targetEq : start * (1 + pl.target);
     const isFunded = a.phase === 'funded';
     const equityIfStopped = equity - riskToStops;
-    // A loss = a position fully closed after the reset whose total result is negative.
-    // "Reset my day" restarts the app's own counters (never the platform's loss limits).
+    // A loss = a position fully closed after the reset whose net result after fees is below 0 (tradeOutcome). A close with an
+    // unknown result counts as a loss here until he enters it (safe side). "Reset my day" restarts the app's own counters only.
     const countFrom = Math.max(reset, a.dayResetAt || 0);
-    const lossesToday = positions.filter(p => p.acct === a.id && p.closed && p.closed.t > countFrom && realizedOfPos(p) < 0).length;
+    const closedToday = positions.filter(p => p.acct === a.id && p.closed && p.closed.t > countFrom);
+    const unknownToday = closedToday.filter(p => tradeOutcome(p) === 'unknown').length;
+    const winsToday = closedToday.filter(p => tradeOutcome(p) === 'win').length;
+    const lossesToday = closedToday.filter(p => tradeOutcome(p) === 'loss').length + unknownToday;
     const tradesToday = (a.fills && a.fills.length) ? a.fills.filter(f => f.action === 'open' && f.t != null && f.t > countFrom).length
       : positions.filter(p => p.acct === a.id && p.opened > countFrom && !p.openedUnknown).length;
     const prof = profileById(a.profile);
@@ -471,6 +483,7 @@
       warnings.push({ lvl: 'bad', text: isFinite(riskToStops) ? 'If every stop fills, the account breaches. Stops sit past the breach line.' : 'Risk is unlimited until every position has a stop.' });
     if (isFinite(riskToStops) && riskToStops > maxOpen + 0.01)
       warnings.push({ lvl: 'warn', text: `Open risk ${fmtUsd(riskToStops)} is over your ${prof.name} max of ${fmtUsd(maxOpen)}.` });
+    if (unknownToday) warnings.push({ lvl: 'warn', text: `${unknownToday} trade(s) closed today with no result on the screenshot: counted as losses until you enter the result (Positions → Closed).` });
     if (lossesToday >= prof.stopAfterLosses)
       warnings.push({ lvl: 'warn', text: `${lossesToday} losses today. Your ${prof.name} rule says done for the day.` });
     if (tradesToday >= prof.maxTrades)
@@ -487,7 +500,7 @@
       priceComplete: missingPx === 0,
       profRisk, maxOpen, nextRisk, lossesToBreach: profRisk > 0 ? Math.floor(Math.max(0, room) / profRisk) : null,
       winsToPass: (!isFunded && profRisk > 0) ? (r => Math.max(0, Math.ceil((targetBal - equity) / (profRisk * r)))) : null,
-      lossesToday, tradesToday, reset, nextReset: reset + 86400000,
+      lossesToday, winsToday, unknownToday, tradesToday, reset, nextReset: reset + 86400000,
       cost, paid, net: paid - cost, notional, leverage: notional / Math.max(1, equity), usedMargin,
       availMargin: Math.max(0, equity - usedMargin), marginUnknown, breached, warnings, openRiskAtEntry,
       openBySym: open.reduce((m, p) => (m[p.sym] = (m[p.sym] || 0) + p.entry * openQty(p), m), {}),
@@ -1470,7 +1483,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
