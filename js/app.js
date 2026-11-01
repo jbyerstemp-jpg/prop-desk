@@ -180,7 +180,7 @@
   // ---------- Chart ----------
   const TFS = [5, 15, 60, 240, 1440];
   const LAYERS = { levels: 'Day/week levels', vwap: 'VWAP', sessions: 'Sessions', orb: 'Opening range', fvg: 'Fair value gaps', marks: 'BOS / CHoCH marks', fib: 'Impulse legs + fib retracements',
-    pos: 'My trades (entry/stop/target)', ema9: 'EMA 9', ema21: 'EMA 21', ema50: 'EMA 50', ema200: 'EMA 200', volume: 'Volume' };
+    pos: 'My trades and orders (entry/stop/target)', ema9: 'EMA 9', ema21: 'EMA 21', ema50: 'EMA 50', ema200: 'EMA 200', volume: 'Volume' };
   const LAYER_DEF = { fib: true, levels: true, vwap: true, sessions: true, orb: true, fvg: true, marks: true, pos: true, ema9: false, ema21: false, ema50: false, ema200: false, volume: false };
   const CTYPES = { candles: 'Candles', hollow: 'Hollow candles', heikin: 'Heikin Ashi', bars: 'Bars (OHLC)', line: 'Line', area: 'Area' };
   const EMA_COL = { ema9: '#f0b90b', ema21: '#2962ff', ema50: '#e040fb', ema200: '#ff9800' };
@@ -296,6 +296,14 @@
       if (p.stop != null) pl(p.stop, 'stop', '#ff4d4d', 0, 2);   // stops stay red in every theme
       if (p.tp1 != null) pl(p.tp1, 'TP1', PAL.tp, 0, 1);
       if (p.tp2 != null) pl(p.tp2, 'TP2', PAL.tp, 1, 1);
+    }
+    // Working limit orders and plans not placed yet (owner's request, Nov 1): dashed = working on the platform, dotted = planned only.
+    if (L.pos) for (const o of S.planned.filter(x => x.sym === sym)) {
+      const working = o.status === 'placed', st = working ? 2 : 4, what = o.orderType === 'market' ? 'market' : 'limit';
+      const tag = `${working ? '' : 'planned '}${what} ${o.side === 'long' ? 'buy' : 'sell'} ${+(+o.qty).toPrecision(4)}`;
+      pl(o.entry, tag, PAL.entry, st, 2);
+      if (o.stop != null) pl(o.stop, (working ? 'order' : 'plan') + ' stop', '#ff4d4d', st, 1);
+      if (o.tp1 != null) pl(o.tp1, (working ? 'order' : 'plan') + ' TP', PAL.tp, st, 1);
     }
     // markers: structure events on this TF
     const st = cs.length > 10 ? C.structure(cs) : null;
