@@ -1261,6 +1261,34 @@
       .replace(/\b\d{6,}\b/g, '[number]')
       .slice(0, 20000);
   }
+  /* Automatic reader samples (owner's choice, Nov 1 2026). When the reader misses something, the app sends only the
+     screen's LAYOUT: identifiers removed and every digit turned into 9, so no amount, size, price or account number
+     leaves the phone. Never the picture. Reviewed by hand and turned into reader fixes and tests. */
+  const SAMPLE_REASONS = ['nothing-read', 'warnings', 'general-reader', 'ledger-mismatch', 'position-unread'];
+  function sampleReasons(r) {
+    const why = [];
+    const A = r.account || {};
+    const nothing = !r.positions.length && !r.details.length && !(r.fills || []).length && A.equity == null && A.balance == null && !(r.ledger || []).length && !r.flat;
+    if (nothing) why.push('nothing-read');
+    if ((r.ledger || []).length && r.ledgerOk === false) why.push('ledger-mismatch');
+    if (r.warnings.some(w => /Could not read a position/.test(w))) why.push('position-unread');
+    if (r.warnings.some(w => /general reader/.test(w))) why.push('general-reader');
+    if (!why.length && r.warnings.some(w => !/screenshots are \d+ min old/.test(w))) why.push('warnings');
+    return why;
+  }
+  function layoutSample(text) {
+    const t = redactSample(text).replace(/[0-9]/g, '9').replace(/\[number\]/g, '999999').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    return t.slice(0, 8000);
+  }
+  function sampleFor(r, text, edition) {
+    const reasons = sampleReasons(r); if (!reasons.length) return null;
+    const layout = layoutSample(text); if (layout.length < 20) return null;
+    return { v: 1, edition: edition === 'private' ? 'private' : 'public', reasons, layout,
+      counts: { positions: r.positions.length, details: r.details.length, fills: (r.fills || []).length, ledger: (r.ledger || []).length, warnings: r.warnings.length } };
+  }
+  /* Short fingerprint so the same layout is only sent once from a device. */
+  function fnv(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); }
+
   /* A prefilled "new issue" link on GitHub. Links over ~7,500 characters break in some browsers, so a long body is left
      out and the app copies it to the clipboard for pasting instead. */
   function issueLink(repo, title, body) {
@@ -1310,7 +1338,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { redactSample, issueLink, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
