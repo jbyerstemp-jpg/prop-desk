@@ -521,34 +521,42 @@
     const [list, i] = (b.dataset.sp || b.dataset.sl).split(':'), u = (SETUP_LISTS[list] && SETUP_LISTS[list]() || [])[+i]; if (!u) return;
     if (b.dataset.sp) paperAdd(u); else takeLive(u);
   });
-  function takeLive(u) {
+  const pxIn = v => v == null ? '' : +(+v).toFixed(Math.abs(v) >= 1000 ? 1 : Math.abs(v) >= 1 ? 4 : 6);   // price as the platform shows it
+  function takeLive(u, fromPaper) {
     const accts = liveAccts(); if (!accts.length) { alert('Add your prop account on the Desk first.'); return; }
-    if (!okToUse(u)) return;
+    if (!fromPaper && !okToUse(u)) return;
     const now = Date.now(), P = prices();
-    const sizeIn = a => { const A = C.accountState(a, S.positions, P, now); return C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }); };
+    const sizeIn = (a, entry) => { const A = C.accountState(a, S.positions, P, now); return C.weighIdea(Object.assign({}, u, { entry }), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }); };
+    const price = pnlPrice(u.sym), atr1 = (analyses[u.sym] && analyses[u.sym].atr[60]) || (analyze(u.sym).atr || {})[60];
+    const op = C.orderPlan(u.entry, price, u.stop, u.dir, atr1);
     showModal(`<h3>Take it live: ${esc(u.sym)} ${u.dir.toUpperCase()}</h3>
-      <p class=small>${esc(u.text)}</p>
+      <p class=small>${fromPaper ? `From your open paper trade (opened ${fmtTime(fromPaper.opened, true)} at ${px(fromPaper.entry)}). The paper trade keeps running for reference, but once this is live only the live trade counts on the Scorecard.<br>` : ''}${esc(u.text)}</p>
       <div class=form><label style="grid-column:1/-1">Which account<select id=tlA>${accts.map(a => { const A = C.accountState(a, S.positions, P, now); return `<option value="${a.id}">${esc(acctName(a.id))} · ${esc(a.phase)} · room ${usd(A.room)}</option>`; }).join('')}</select></label>
-        <label>Entry (limit at the zone)<input id=tlE type=number step=any value="${+u.entry.toFixed(6)}"></label>
-        <label>Stop<input id=tlS type=number step=any value="${+u.stop.toFixed(6)}"></label>
-        <label>Target<input id=tlT type=number step=any value="${u.target != null ? +u.target.toFixed(6) : ''}"></label>
+        <label>Order<select id=tlType><option value=market ${op && op.type === 'market' ? 'selected' : ''}>Market</option><option value=limit ${!op || op.type !== 'market' ? 'selected' : ''}>Limit</option></select></label>
+        <label>Entry<input id=tlE type=number step=any value="${pxIn((op && op.entry) || u.entry)}"></label>
+        <div class=small style="grid-column:1/-1">${op ? `<b class="${op.type === 'none' ? 'dn' : 'up'}">${op.type === 'none' ? 'No trade' : op.type === 'market' ? 'Market' : 'Limit'}</b>: ${esc(op.why)}.` : ''} Level ${px(u.entry)}${price != null ? ' · price now ' + px(price) : ''}.</div>
+        <label>Stop<input id=tlS type=number step=any value="${pxIn(u.stop)}"></label>
+        <label>Target<input id=tlT type=number step=any value="${pxIn(u.target)}"></label>
         <label>Size<input id=tlQ type=number step=any></label>
         <label style="grid-column:1/-1">Plan (why, and what makes you get out)<input id=tlTh value="${esc(u.text)}"></label></div>
       <div id=tlOut class=small></div>
       <p class="small mu">This saves a <b>planned</b> trade. Nothing counts on the Desk until you place it on your platform and tap <b>It's live</b> on the Positions tab (or import the screenshot, which picks it up by itself).</p>
       <div class=row><button class="btn pri" id=tlOk>Save plan</button><button class=btn data-close>Cancel</button></div>`);
-    const upd = fill => { const a = acctById($('#tlA').value), w = sizeIn(a); const z = w.size;
+    $('#tlType').onchange = () => { $('#tlE').value = $('#tlType').value === 'market' && pnlPrice(u.sym) != null ? pxIn(pnlPrice(u.sym)) : pxIn(u.entry); upd(true); };
+    $('#tlE').addEventListener('change', () => upd(true));
+    const upd = fill => { const a = acctById($('#tlA').value), w = sizeIn(a, num($('#tlE').value) || u.entry); const z = w.size;
       if (fill && z && z.qty > 0) $('#tlQ').value = z.qty;
       $('#tlOut').innerHTML = (z && z.qty > 0 ? `Your ${esc(C.profileById(a.profile).name)} pace: <b>${z.qty} ${esc(C.base(u.sym))}</b>, about ${usd(z.lossAtStop)} at the stop${z.levUnknown ? ' · <span class=warn>leverage unknown</span>' : ''}.` : '<b class=warn>Your account says size 0 right now.</b>')
         + (w.rules.some(r => !r.ok) ? `<div class=warn>Not passing: ${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ')}</div>` : '<div class=up>Every account rule passes.</div>'); };
     $('#tlA').onchange = () => upd(true); upd(true);
     $('#tlOk').onclick = () => {
       const q = num($('#tlQ').value), e0 = num($('#tlE').value), st = num($('#tlS').value), d = u.dir === 'short' ? -1 : 1;
+      if (op && op.type === 'none' && !confirm('Price is already past the stop. Save the plan anyway?')) return;
       if (!(q > 0) || !(e0 > 0)) { alert('Entry and size are required.'); return; }
       if (st == null || d * (e0 - st) <= 0) { alert('Every trade needs a stop on the right side of the entry.'); return; }
       if (!$('#tlTh').value.trim()) { alert('Every trade needs a plan: write one line.'); return; }
       S.planned.push({ id: uid(), acct: $('#tlA').value, sym: u.sym, side: u.dir, entry: e0, stop: st, tp1: num($('#tlT').value), qty: q, tf: u.tf,
-        setup: u.kind === 'sweep' ? 'Liquidity sweep' : 'FVG', thesis: $('#tlTh').value.trim(), ref: { key: C.setupKey(u.kind, u.tf), model: C.MODEL }, setupKey: u.key, created: Date.now() });
+        setup: u.kind === 'sweep' ? 'Liquidity sweep' : 'FVG', thesis: $('#tlTh').value.trim(), ref: { key: C.setupKey(u.kind, u.tf), model: C.MODEL }, setupKey: u.key, created: Date.now(), fromPaper: fromPaper ? fromPaper.id : undefined, orderType: $('#tlType').value });
       markUsed(u.key, 'planned', $('#tlA').value); save(); closeModal(); switchTab('pos');
     };
   }
@@ -571,6 +579,7 @@
     };
   }
   function liveFromPlan(pl, o) {
+    if (pl.fromPaper) { const t = S.paper.find(x => x.id === pl.fromPaper); if (t) { t.wentLive = true; (t.log = t.log || []).push({ t: Date.now(), what: 'taken live' }); } }
     if (pl.setupKey) S.usedSetups[pl.setupKey] = { t: Date.now(), how: 'live', acct: pl.acct };
     return { id: uid(), acct: pl.acct, sym: pl.sym, side: pl.side, qty: o.qty, entry: o.entry, stop: o.stop, origStop: o.stop, tp1: o.tp1 != null ? o.tp1 : pl.tp1, tp2: null,
       tf: pl.tf, setup: pl.setup, thesis: pl.thesis, opened: o.opened, openedUnknown: !!o.openedUnknown, partials: [], stopHist: [{ t: Date.now(), stop: o.stop, why: 'live from plan' }],
@@ -579,7 +588,7 @@
   function plannedHtml() {
     if (!S.planned.length) return '';
     return `<div class=card id=posPlanned><h3>Planned: place these on your platform</h3>${S.planned.map(pl => { const a = acctById(pl.acct);
-      return `<div style="margin:6px 0"><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${esc(pl.sym)} ${pl.side.toUpperCase()}</b> ${pl.qty} @ ${px(pl.entry)} · stop ${px(pl.stop)}${pl.tp1 != null ? ' · target ' + px(pl.tp1) : ''} <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span>
+      return `<div style="margin:6px 0"><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${esc(pl.sym)} ${pl.side.toUpperCase()}</b> ${pl.qty} · <b>${pl.orderType === 'market' ? 'Market' : 'Limit @ ' + px(pl.entry)}</b>${pl.orderType === 'market' ? ' (~' + px(pl.entry) + ')' : ''} · stop ${px(pl.stop)}${pl.tp1 != null ? ' · target ' + px(pl.tp1) : ''} <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span>
         <div class="small mu">${esc(pl.thesis)} · planned ${fmtTime(pl.created, true)}</div>
         <div class=row><button class="btn sm pri" data-golive="${pl.id}">✅ It's live</button><button class="btn sm" data-dropplan="${pl.id}">Cancel plan</button></div></div>`; }).join('')}
       <p class="small mu">Not counted on the Desk until it's live. Importing a screenshot that shows it marks it live by itself.</p></div>`;
@@ -645,7 +654,7 @@
       <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
       <div class=card><h3>Open (${open.length})</h3>${open.length ? `<table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${fmtTime(t.opened, true)}</div></td>
         <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(t.openR)}">${r(t.openR)}${t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
-        <td><button class="btn sm" data-pp="edit" data-id="${esc(t.id)}">Edit</button> <button class="btn sm" data-pp="close" data-id="${esc(t.id)}">Close</button></td></tr>`).join('')}</table>` : '<p class=mu>None. Add one from the setups lists.</p>'}</div>
+        <td>${(use => use && (use.state === 'planned' || use.state === 'live') ? `<span class="tag ${use.state === 'live' ? 'up' : 'warn'}">${use.state === 'live' ? '✅ Live' : '⏳ Planned'}${use.acct && acctName(use.acct) ? ' · ' + esc(acctName(use.acct)) : ''}</span> ` : `<button class="btn sm pri" data-pp="live" data-id="${esc(t.id)}">Take it live</button> `)(t.setupKey ? C.setupUse(t.setupKey, S.paper, S.positions, S.planned, S.usedSetups) : null)}<button class="btn sm" data-pp="edit" data-id="${esc(t.id)}">Edit</button> <button class="btn sm" data-pp="close" data-id="${esc(t.id)}">Close</button></td></tr>`).join('')}</table>` : '<p class=mu>None. Add one from the setups lists.</p>'}</div>
       <div class=card><h3>Record</h3>${srows ? `<table><tr><th>Group</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Total</th></tr>${srows}</table><p class="small mu">Small samples mean little: 20+ trades per group before reading anything into it.</p>` : '<p class=mu>No closed paper trades yet.</p>'}</div>
       <div class=card><h3>Closed (${closed.length})</h3>${closed.length ? `<table><tr><th>Trade</th><th>Exit</th><th class=num>R</th><th class=num>Best / worst</th></tr>${closed.slice(0, 40).map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}<div class=mu>${fmtTime(t.opened, true)} → ${fmtTime(t.closed, true)}</div></td><td class=small>${esc(t.why)} @ ${px(t.exit)}</td><td class="num ${cls(t.R)}">${r(t.R)}${t.qty ? `<div class=small>${usd(C.paperPositions([Object.assign({}, t, { acct: 'x' })], 'x')[0].closed.realized)}</div>` : ''}</td><td class="num small">+${(t.mfe || 0).toFixed(1)} / -${(t.mae || 0).toFixed(1)}</td></tr>`).join('')}</table>` : '<p class=mu>None yet.</p>'}
         <div class=row style="margin-top:8px"><button class="btn sm" data-pp="clear">Delete all paper trades</button></div></div>`;
@@ -656,6 +665,9 @@
     if (e.target.id === 'ppNew') { const a = paperAcct(); if (a && !confirm('End this paper account and start a new one? Its result is kept in the list.')) return; newPaperAcct($('#ppPlan').value, +$('#ppSize').value, $('#ppProf').value); renderPaper(); return; }
     const b = e.target.closest('[data-pp]'); if (!b) return;
     const t = S.paper.find(x => x.id === b.dataset.id), now = Date.now();
+    if (b.dataset.pp === 'live' && t) {
+      const p0 = pnlPrice(t.sym); if (!t.setupKey) t.setupKey = 'paper|' + t.id;
+      takeLive({ sym: t.sym, dir: t.side, entry: t.plannedEntry > 0 ? t.plannedEntry : t.entry, stop: t.stop, target: t.target, kind: t.kind, tf: t.tf, text: t.text || `${t.kind} ${C.tfName(t.tf)}`, key: t.setupKey }, t); return; }
     if (b.dataset.pp === 'close' && t) { const p0 = pnlPrice(t.sym); if (p0 == null) return; Object.assign(t, { status: 'closed', exit: p0, closed: now, why: 'closed by you', R: C.paperR(t, p0, now) }); t.log.push({ t: now, what: 'closed by you at ' + px(p0) }); savePaper('closed by hand'); renderPaper(); }
     if (b.dataset.pp === 'edit' && t) { const ns = prompt('Stop (paper):', t.stop); if (ns === null) return; const nt = prompt('Target (paper, blank = none):', t.target == null ? '' : t.target);
       const sv = num(ns), tv = nt === '' ? null : num(nt), d = t.side === 'short' ? -1 : 1, p0 = pnlPrice(t.sym);

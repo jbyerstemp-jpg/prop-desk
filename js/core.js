@@ -1376,7 +1376,8 @@
   /* All closed trades as one list: {id, src, key, model, R, tag, t, session}. */
   function tradeRecords(paper, positions) {
     const out = [], sess = ms => { const m = tzParts(Math.floor(ms / 1000), 'America/New_York').min; const s = SESSIONS.find(x => m >= x.from && m < x.to); return s ? s.name : 'Other hours'; };
-    for (const t of paper || []) if (t.status === 'closed' && t.R != null && isFinite(t.R))
+    // A paper trade he then took live is counted once, as the live trade (wentLive), never twice.
+    for (const t of paper || []) if (t.status === 'closed' && t.R != null && isFinite(t.R) && !t.wentLive)
       out.push({ id: t.id, src: 'paper', key: setupKey(t.kind, t.tf), model: t.model || modelAt(t.opened), R: t.R, tag: 'plan', t: t.opened, closed: t.closed, session: sess(t.opened), sym: t.sym });
     for (const p of positions || []) { const R = p.closed ? liveR(p) : null; if (R == null) continue;
       out.push({ id: p.id, src: 'live', key: p.ref && p.ref.key ? p.ref.key : setupKey(p.setup, p.tf), model: (p.ref && p.ref.model) || modelAt(p.opened), R, tag: p.tag || 'plan', t: p.opened, closed: p.closed.t, session: sess(p.opened), sym: p.sym }); }
@@ -1460,6 +1461,18 @@
     if (u) return { state: 'used', acct: u.acct, text: `Used ${u.how === 'paper' ? 'on paper' : u.how === 'planned' ? 'as a live plan' : 'live'} ${new Date(u.t).toISOString().slice(5, 10).replace('-', '/')} (trade since removed)` };
     return null;
   }
+  /* Order type (owner's rule, Nov 1 2026): MARKET when price is within 0.25 x 1h ATR of the setup's level (the same "at the zone"
+     distance the setup rules use) or already past the level on the good side (a limit there would fill at once); otherwise a
+     LIMIT at the level. Price past the stop: no trade. */
+  function orderPlan(level, price, stop, dir, atr1h) {
+    const d = dir === 'short' ? -1 : 1;
+    if (!(level > 0)) return null;
+    if (price == null || !isFinite(price)) return { type: 'limit', entry: level, why: 'no live price: limit at the level' };
+    if (stop != null && d * (price - stop) <= 0) return { type: 'none', entry: null, why: 'price is already past the stop: no trade' };
+    const near = (atr1h > 0 ? atr1h : price * 0.004) * 0.25, away = d * (price - level);   // > 0: price still above a long's level
+    if (away <= near) return { type: 'market', entry: price, why: away <= 0 ? 'price is already through the level: market now' : 'price is at the level: market now' };
+    return { type: 'limit', entry: level, why: `price is ${fmtPx(Math.abs(price - level))} from the level (more than 0.25 x 1h ATR): limit at the level` };
+  }
   /* A planned live trade the platform screenshot now shows: same coin and side, and the same size or an entry within 0.5% of the plan. */
   function matchPlanned(planned, q) {
     const c = (planned || []).filter(x => x.sym === q.sym && x.side === q.side);
@@ -1506,7 +1519,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
