@@ -45,7 +45,7 @@ input[type=range]{padding:0;accent-color:var(--acc);width:100%}
 .seg button:last-child{border-right:0}.seg button.on{background:var(--line);color:var(--acc)}
 .chartwrap{position:relative;height:56vh;min-height:320px;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--bg)}
 #chart{position:absolute;inset:0}
-#overlay{position:absolute;inset:0;pointer-events:none}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:3}
 .fsx,.fsinfo{display:none}
 .chartwrap.fs{position:fixed;inset:0;height:100vh;height:100dvh;z-index:50;border-radius:0;border:0}
 .chartwrap.fs .fsx{display:block;position:absolute;top:max(8px,env(safe-area-inset-top));right:70px;z-index:3}

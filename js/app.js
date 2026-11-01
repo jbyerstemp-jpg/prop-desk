@@ -17,7 +17,7 @@
   let S;
   try { S = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { S = {}; }
   const savedV = (S.settings && S.settings.v) || 0;
-  S = Object.assign({ calib: [] }, DEF, S); if (!Array.isArray(S.calib)) S.calib = []; S.settings = Object.assign({}, DEF.settings, S.settings || {});
+  S = Object.assign({ calib: [], paper: [] }, DEF, S); if (!Array.isArray(S.calib)) S.calib = []; if (!Array.isArray(S.paper)) S.paper = []; if (!Array.isArray(S.paperAccts)) S.paperAccts = []; S.settings = Object.assign({}, DEF.settings, S.settings || {});
   S.settings.layers = Object.assign({}, DEF.settings.layers, S.settings.layers || {});
   if (savedV < 2) { S.settings.priceBasis = 'usdt'; S.settings.v = 2; }
   // v3: no personal defaults in the shared app. Existing installs keep the monitor repo they were using.
@@ -102,7 +102,8 @@
     const orb = intr.length ? C.openingRange(intr, T().orbAnchor, T().orbMin) : null;
     const sessions = intr.length ? C.sessionRanges(intr, 'America/New_York') : {};
     const q = pnlQuote(sym), price = q.price, ageSec = q.price != null ? q.age : null;
-    return { sym, struct, fvg, atr: at, levels, orb, sessions, price, ageSec };
+    const impulse = {}; for (const iv of [15, 60, 240]) { const cc = c(iv); if (cc.length > 40) impulse[iv] = C.impulseLegs(cc, { price }); }
+    return { sym, struct, fvg, atr: at, levels, orb, sessions, price, ageSec, impulse, c: { 15: c(15), 60: c(60) } };
   }
 
   // ---------- Header ----------
@@ -135,9 +136,9 @@
 
   // ---------- Chart ----------
   const TFS = [5, 15, 60, 240, 1440];
-  const LAYERS = { levels: 'Day/week levels', vwap: 'VWAP', sessions: 'Sessions', orb: 'Opening range', fvg: 'Fair value gaps', marks: 'BOS / CHoCH marks',
+  const LAYERS = { levels: 'Day/week levels', vwap: 'VWAP', sessions: 'Sessions', orb: 'Opening range', fvg: 'Fair value gaps', marks: 'BOS / CHoCH marks', fib: 'Impulse legs + fib retracements',
     pos: 'My trades (entry/stop/target)', ema9: 'EMA 9', ema21: 'EMA 21', ema50: 'EMA 50', ema200: 'EMA 200', volume: 'Volume' };
-  const LAYER_DEF = { levels: true, vwap: true, sessions: true, orb: true, fvg: true, marks: true, pos: true, ema9: false, ema21: false, ema50: false, ema200: false, volume: false };
+  const LAYER_DEF = { fib: true, levels: true, vwap: true, sessions: true, orb: true, fvg: true, marks: true, pos: true, ema9: false, ema21: false, ema50: false, ema200: false, volume: false };
   const CTYPES = { candles: 'Candles', hollow: 'Hollow candles', heikin: 'Heikin Ashi', bars: 'Bars (OHLC)', line: 'Line', area: 'Area' };
   const EMA_COL = { ema9: '#f0b90b', ema21: '#2962ff', ema50: '#e040fb', ema200: '#ff9800' };
   let extra = {}, curType = null;
@@ -281,6 +282,17 @@
       g.fillStyle = PAL.mu; g.font = '10px ' + (PAL.mode === 'pip' ? 'monospace' : 'sans-serif'); g.fillText(s.name, x0 + 2, y1 - 3);
     }
     if (T().layers.orb && curA.orb) { const o = curA.orb; box(o.from, o.high, o.low, PAL.upFill, PAL.orb); }
+    // Impulse legs on this timeframe: the leg, its fib lines from the leg's end to the right edge, OTE (0.618-0.786) shaded.
+    if (T().layers.fib && curA.impulse && curA.impulse[tf]) for (const L of curA.impulse[tf]) {
+      const col = L.dir === 'up' ? PAL.up : PAL.dn, xs = x(L.start.time), xe = x(L.end.time), ys = y(L.start.price), ye = y(L.end.price);
+      if (ys == null || ye == null) continue;
+      g.strokeStyle = col; g.lineWidth = 2; g.setLineDash(L.end.provisional ? [5, 4] : []); g.beginPath(); g.moveTo(xs, ys); g.lineTo(xe, ye); g.stroke(); g.setLineDash([]); g.lineWidth = 1;
+      box(L.end.time, L.ote.top, L.ote.bottom, L.dir === 'up' ? PAL.upFill : PAL.dnFill);
+      g.font = '10px ' + (PAL.mode === 'pip' ? 'monospace' : 'sans-serif');
+      for (const f of L.fibs) { const yy = y(f.price); if (yy == null) continue;
+        g.strokeStyle = col; g.globalAlpha = f.r === 0.618 || f.r === 0.786 ? 0.9 : 0.45; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(xe, yy); g.lineTo(right, yy); g.stroke(); g.setLineDash([]);
+        g.globalAlpha = 1; g.fillStyle = col; g.fillText(f.r.toFixed(3).replace(/0+$/, ''), right - 34, yy - 2); }
+    }
   }
   function renderDataCheck() {
     if (document.activeElement && document.activeElement.id === 'calIn') return;   // don't wipe what he's typing
@@ -322,12 +334,255 @@
     fv.sort((a, b) => Math.abs((a.top + a.bottom) / 2 - p) - Math.abs((b.top + b.bottom) / 2 - p));
     $('#fvgBox').innerHTML = fv.length ? `<table><tr><th>TF</th><th>Side</th><th class=num>Zone</th><th>State</th></tr>${fv.slice(0, 8).map(g => `<tr><td>${C.tfName(g.iv)}</td><td class="${g.dir}">${g.dir}</td><td class=num>${px(g.bottom)}–${px(g.top)}</td><td class=small>${g.status}</td></tr>`).join('')}</table>
       <p class="small mu">FVG = 3-candle gap ≥0.15 ATR, closed candles only. Filled ones are dropped.</p>` : '<p class=mu>None open near price (or still loading).</p>';
-    const ups = C.setupsToWatch(A.sym, A, { minRR: 2 });
-    $('#setupBox').innerHTML = ups.length ? ups.map(u => `<div class=small style="margin:6px 0"><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> ${esc(u.text)} ${u.aligned1h ? '' : '<span class=warn>1h not aligned.</span>'}
-      <button class="btn sm" data-plan='${esc(JSON.stringify({ sym: u.sym, side: u.dir, entry: +u.entry.toFixed(6), stop: +u.stop.toFixed(6), tp1: +u.target.toFixed(6), tf: u.tf, setup: 'FVG' }))}'>Plan it</button></div>`).join('')
-      + '<p class="small mu">Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
-      : `<p class=mu>Nothing clean: ${A.struct[240] && A.struct[240].bias === 'range' ? '4h is ranging.' : 'no open FVG in the 4h direction within 2 ATR with 2R+ to the 4h swing.'} No trade is a valid answer.</p>`;
+    const ups = C.scanSetups(A.sym, A, Date.now());
+    $('#setupBox').innerHTML = ups.length ? ups.map((u, i) => `<div class=small style="margin:6px 0"><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> ${u.kind === 'sweep' ? '<span class=tag>sweep</span> ' : ''}${(g => g.ok ? '<span class="tag up">alert grade</span> ' : `<span class="tag mu" title="${esc(g.why.join('; '))}">below alert grade</span> `)(C.alertGrade(u))}${esc(u.text)}
+      <div>${u.rules.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>
+      <button class="btn sm" data-weigh="${i}">Weigh it</button> <button class="btn sm" data-paper="${i}">Paper trade</button> <span data-weighout="${i}"></span>
+      <button class="btn sm" data-plan='${esc(JSON.stringify({ sym: u.sym, side: u.dir, entry: +u.entry.toFixed(6), stop: +u.stop.toFixed(6), tp1: u.target != null ? +u.target.toFixed(6) : null, tf: u.tf, setup: u.kind === 'sweep' ? 'Sweep' : 'FVG' }))}'>Plan it</button></div>`).join('')
+      + '<p class="small mu">Scanned both ways, all the time, without your account. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
+      : `<p class=mu>Nothing clean: no open FVG either way within 2 ATR with 2R+ to the next swing, and no fresh liquidity sweep. No trade is a valid answer.</p>`;
+    lastUps = ups;
+    renderResearch(A.sym);
+    renderProfile(A.sym);
+    renderTraits(A.sym);
+    const VR = { continuation_signs: 'continuation signs', reversal_warning: 'reversal warning', unclear: 'unclear', unknown: 'unknown (no volume)' };
+    const ST = { extending: 'still extending', at_high: 'at the extreme', retracing: 'retracing', in_ote: 'IN OTE (0.618-0.786)', deep: 'past 0.786' };
+    const legs = [15, 60, 240].flatMap(iv => (A.impulse && A.impulse[iv] || []).map(L => Object.assign({ iv }, L)));
+    $('#fibBox').innerHTML = legs.length ? `<table><tr><th>TF</th><th>Leg</th><th class=num>Now</th><th>0.5 · 0.618 · 0.786</th></tr>${legs.map(L => `<tr><td>${C.tfName(L.iv)}</td>
+      <td class=small><b class="${L.dir === 'up' ? 'bull' : 'bear'}">${L.dir}</b> ${px(L.start.price)}→${px(L.end.price)}${L.end.provisional ? '*' : ''}<div class=mu>${L.atrMult.toFixed(1)}× ATR, ${L.bars} bars, broke ${px(L.broke)}</div><div class="${L.vol.read === 'continuation_signs' ? 'up' : L.vol.read === 'reversal_warning' ? 'warn' : 'mu'}">Volume: ${esc(VR[L.vol.read])}${L.vol.leg != null ? ` (leg ${L.vol.leg.toFixed(1)}×${L.vol.pull != null ? ', pullback ' + L.vol.pull.toFixed(1) + '×' : ''}${L.vol.climax ? ', climax bar' : ''})` : ''}</div></td>
+      <td class="num small ${L.status === 'in_ote' ? 'up' : L.status === 'deep' ? 'warn' : ''}">${Math.round(Math.max(0, L.retraceNow) * 100)}%<div>${esc(ST[L.status] || L.status)}</div></td>
+      <td class=small>${[0.5, 0.618, 0.786].map(r => px(L.fibs.find(f => f.r === r).price)).join(' · ')}</td></tr>`).join('')}</table>
+      <p class="small mu">Impulse = ≥3× ATR, mostly one-way (≥50% efficiency), ≤60 bars, broke the last swing. * = end not confirmed yet (may extend). Leg disappears if price trades back through its start. Volume (Kraken only): × = vs the median of the 20 bars before; continuation signs = heavy leg + light pullback; reversal warning = pullback as heavy as the leg, or a 2×+ bar closing against it near the turn. Untested: fib and volume reads are not backtested.</p>`
+      : '<p class=mu>No clean impulse leg on 15m / 1h / 4h right now.</p>';
   }
+  let lastUps = [];
+  // ---------- Scan all coins: the full model on every coin (FVG + sweeps, both ways, alert grade, traits, profile) ----------
+  let scanAll = { at: 0, running: false, rows: [], errors: [] };
+  async function runScanAll(manual) {
+    if (scanAll.running) return; scanAll.running = true; renderScanAll();
+    const rows = [], errors = [], now = () => Date.now();
+    for (const sym of T().symbols) {
+      try {
+        await F.want(sym, [15, 60, 240, 1440]);
+        for (const iv of [15, 60, 240, 1440]) if (F.candles(sym, iv).length < 50 && !F.demo) await F.reloadSeries(sym, iv);
+        const A = analyses[sym] = analyze(sym);
+        if (A.price == null) { errors.push(sym + ': no live price yet'); continue; }
+        const h = F.candles(sym, 60).slice(0, -1), d = F.candles(sym, 1440).slice(0, -1);
+        let x = null; try { x = window.PDTraits && h.length > 240 ? PDTraits.ctxAt(h, d, h.length - 1) : null; } catch (e) { }
+        const sh = x && PDProfile.shardName(x.f), prof = sh && PROF[sh] ? { keys: PROF[sh], minN: PDProfile.MIN_N } : null;
+        for (const u of C.scanSetups(sym, A, now())) {
+          const g = C.alertGrade(u), agree = x ? PDTraits.TRAITS.filter(t => t.side(x, prof) === u.dir).map(t => t.id) : [];
+          rows.push(Object.assign({}, u, { grade: g, agree }));
+        }
+      } catch (e) { errors.push(sym + ': ' + (e.message || e)); }
+    }
+    rows.sort((a, b) => (b.ready - a.ready) || (b.grade.ok - a.grade.ok) || (b.rr - a.rr));
+    scanAll = { at: Date.now(), running: false, rows, errors, manual: !!manual };
+    renderScanAll();
+  }
+  function renderScanAll() {
+    const box = $('#scanAllBox'); if (!box) return;
+    const sa = scanAll, top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
+    const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
+      <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
+    const body = top.length ? `<table><tr><th>Setup</th><th>Grade</th><th></th></tr>${top.map((u, i) => `<tr><td class=small><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${esc(u.sym)} ${u.dir.toUpperCase()}</b> ${u.kind} ${C.tfName(u.tf)}${u.open ? ' · ' + esc(u.open) : ''}<div class=mu>${esc(u.text)}</div>${u.agree.length ? `<div>traits agreeing: ${esc(u.agree.join(', '))}${chosen.length ? (chosen.every(c => u.agree.includes(c)) ? ' <span class=up>(your filters pass)</span>' : ' <span class=warn>(your filters don\'t)</span>') : ''}</div>` : ''}</td>
+      <td class=small>${u.grade.ok ? '<span class="tag up">alert grade</span>' : `<span class="tag mu" title="${esc(u.grade.why.join('; '))}">below</span>`}${u.ready ? '' : '<div class=warn>not ready</div>'}</td>
+      <td><button class="btn sm" data-sapaper="${i}">Paper</button> <button class="btn sm" data-saweigh="${i}">Weigh</button><div class=small data-saout="${i}"></div></td></tr>`).join('')}</table>`
+      : (sa.at ? '<p class=mu>No setups on any coin right now. No trade is a valid answer.</p>' : '');
+    box.innerHTML = head + body + (sa.errors.length ? `<p class="small warn">${esc(sa.errors.join(' · '))}</p>` : '') +
+      '<p class="small mu">Sorted: ready first, then alert grade, then best R. Same model as the 24/7 monitor and the replay test, which found no proven edge yet: use these as a watchlist and for paper trades.</p>';
+  }
+  $('#scanAllBox').addEventListener('click', e => {
+    if (e.target.id === 'scanAllGo') { runScanAll(true); return; }
+    const pb = e.target.closest('[data-sapaper]'); if (pb) { const u = scanAll.rows[+pb.dataset.sapaper]; if (u) paperAdd(u); return; }
+    const wb = e.target.closest('[data-saweigh]'); if (!wb) return; const u = scanAll.rows[+wb.dataset.saweigh]; if (!u) return;
+    const now = Date.now(), P = prices();
+    const out = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: a.leverage });
+      return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${esc(a.label || 'Account')}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${esc(a.label || 'Account')}: not now</b> (${esc(w.rules.filter(r => !r.ok).map(r => r.t).join(', ') || 'size 0')})`; });
+    $(`[data-saout="${wb.dataset.saweigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>';
+  });
+  setTimeout(() => runScanAll(false), 8000);
+  setInterval(() => { if (document.visibilityState !== 'hidden') runScanAll(false); }, 300e3);
+  // ---------- Paper trading: try setups with no money; same rules as the replay; record saved to monitor/paper.json ----------
+  let paperPushTimer = null, paperMsg = '';
+  function savePaper(why) { save(); clearTimeout(paperPushTimer); paperPushTimer = setTimeout(async () => { const r = await pushFile('monitor/paper.json', { v: 2, updated: Date.now(), accounts: S.paperAccts, trades: S.paper }, 'paper trades: ' + why); paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)'); if (tab === 'paper') renderPaper(); }, 4000); }
+  function paperMeta(u) {
+    const m = { alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
+    try { const h = F.candles(u.sym, 60).slice(0, -1), d = F.candles(u.sym, 1440).slice(0, -1), x = window.PDTraits && h.length > 240 ? PDTraits.ctxAt(h, d, h.length - 1) : null;
+      if (x) { const sh = PDProfile.shardName(x.f), prof = PROF[sh] ? { keys: PROF[sh], minN: PDProfile.MIN_N } : null; m.traits = {}; for (const t of PDTraits.TRAITS) m.traits[t.id] = t.side(x, prof); m.profile = x.f;
+        const pm = prof && PDProfile.match(prof, x.f); if (pm) m.profileMatch = { n: pm.n, upShare24: pm.upShare24, med24: pm.med24 }; } } catch (e) { }
+    return m;
+  }
+  function paperAdd(u) {
+    const px = pnlPrice(u.sym); if (px == null) { alert('No live price yet.'); return; }
+    if (S.paper.some(t => t.status === 'open' && t.setupKey === u.key)) { alert('Already paper trading this setup.'); return; }
+    const t = C.paperOpen(u, px, Date.now(), paperMeta(u)); if (!t) { alert('Price is already past this setup\'s stop. No paper trade.'); return; }
+    const pa = paperAcct();
+    if (pa) {
+      const z = C.paperSize(pa, S.paper, u, px, Date.now(), prices());
+      if (z.ok) { t.acct = pa.id; t.qty = z.size.qty; t.riskUsd = z.size.lossAtStop; }
+      else if (!confirm('Your paper prop account says not now: ' + z.rules.filter(r => !r.ok).map(r => r.t).join(', ') + '.\n\nOpen it as an R-only paper trade (no $ P&L) anyway?')) return;
+    }
+    t.setupKey = u.key; S.paper.push(t); savePaper('open ' + u.sym + ' ' + u.dir); switchTab('paper');
+  }
+  function paperTick() {
+    let changed = false;
+    S.paper = S.paper.map(t => { if (t.status !== 'open') return t; const u = C.paperStep(t, F.candles(t.sym, 15), 900, pnlPrice(t.sym), Date.now()); if (u.status !== t.status) changed = true; return u; });
+    if (changed) { savePaper('closed by price'); if (T().notify) for (const t of S.paper.filter(t => t.status === 'closed' && t.closed > Date.now() - 60e3)) ntSend(`Paper ${t.sym} ${t.side}: ${t.why}`, `${t.R >= 0 ? '+' : ''}${t.R.toFixed(2)}R after fees. Paper only.`, 2); }
+    if (tab === 'paper') renderPaper();
+  }
+  setInterval(() => { try { paperTick(); } catch (e) { console.warn(e); } }, 15000);
+  // ---------- Simulated prop account for paper trades (same accountState as the Desk) ----------
+  const paperAcct = () => S.paperAccts.find(a => a.status === 'active') || null;
+  function paperAcctState(a) { return C.accountState(a, C.paperPositions(S.paper, a.id), prices(), Date.now()); }
+  function newPaperAcct(plan, size, profile) {
+    for (const a of S.paperAccts) if (a.status === 'active') { const st = paperAcctState(a); a.status = 'ended'; a.ended = Date.now(); a.final = { equity: st.equity, net: st.equity - a.size }; }
+    S.paperAccts.push({ id: 'pa' + Date.now().toString(36), label: 'Paper ' + C.PLANS[plan].name + ' ' + usd(size), plan, size, phase: 'eval', profile, created: Date.now(), status: 'active', paper: true });
+    savePaper('new paper account');
+  }
+  function paperAcctCard() {
+    const a = paperAcct();
+    const form = `<div class=row style="margin-top:6px"><select id=ppPlan>${Object.keys(C.PLANS).filter(k => k !== 'custom').map(k => `<option value=${k} ${a && a.plan === k ? 'selected' : k === 'advanced' && !a ? 'selected' : ''}>${esc(C.PLANS[k].name)}</option>`).join('')}</select>
+      <select id=ppSize>${C.SIZES.map(z => `<option value=${z} ${a && a.size === z ? 'selected' : ''}>${usd(z)}</option>`).join('')}</select>
+      <select id=ppProf>${C.PROFILES.map(p => `<option value=${p.id} ${(a ? a.profile : 'steady') === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      <button class="btn sm" id=ppNew>${a ? 'Start over' : 'Start paper account'}</button></div>`;
+    if (!a) return `<div class=card><h3>Simulated prop account</h3><p class=small>Paper trades get sized and tracked like a real evaluation: same plan rules, daily loss limit, max drawdown, profit target and fees as your Desk. Pick a plan:</p>${form}</div>`;
+    const st = paperAcctState(a), status = st.breached ? '<b class=dn>BREACHED</b>' : st.reachedTarget ? '<b class=up>PASSED (target reached)</b>' : 'Evaluation running';
+    const past = S.paperAccts.filter(x => x.status === 'ended').slice(-5).reverse();
+    return `<div class=card><h3>${esc(a.label)} <span class=tag>simulated</span></h3><p class=small>${status} · started ${fmtTime(a.created, true)} · ${esc(C.profileById(a.profile).name)} pace</p>
+      <div class=kv><div><span>Equity</span><b class="${st.equity >= a.size ? 'up' : 'dn'}">${usd(st.equity)}</b></div><div><span>P&amp;L</span><b class="${st.equity >= a.size ? 'up' : 'dn'}">${usd(st.equity - a.size)}</b></div>
+      <div><span>Balance</span>${usd(st.balance)}</div><div><span>Open P&amp;L (before closing fees)</span>${usd(st.upnl)}</div>
+      <div><span>Room to breach (${esc(st.binding)})</span><b class="${st.room < st.profRisk * 2 ? 'dn' : ''}">${usd(st.room)}</b></div><div><span>To target</span>${usd(st.toTarget)} (${Math.round(st.progress * 100)}%)</div>
+      <div><span>Daily floor</span>${usd(st.dailyFloor)}</div><div><span>Max floor</span>${usd(st.maxFloor)}</div><div><span>Next trade risk</span>${usd(st.nextRisk)}</div><div><span>Trades today</span>${st.tradesToday}</div></div>
+      <div class=warns>${st.warnings.map(w => `<div class="${w.lvl === 'bad' ? 'bad' : 'warn'}">${esc(w.text)}</div>`).join('')}</div>
+      ${past.length ? `<p class="small mu">Earlier paper accounts: ${past.map(x => `${esc(x.label)} ${x.final ? usd(x.final.net) : ''}`).join(' · ')}</p>` : ''}
+      ${form}</div>`;
+  }
+  function renderPaper() {
+    const box = $('#paperBox'); if (!box) return;
+    const open = S.paper.filter(t => t.status === 'open'), closed = S.paper.filter(t => t.status === 'closed').sort((a, b) => b.closed - a.closed), st = C.paperStats(S.paper);
+    const r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R', cls = x => x > 0 ? 'up' : x < 0 ? 'dn' : '';
+    const srows = Object.entries(st).map(([k, x]) => `<tr><td>${esc(k)}</td><td class=num>${x.n}</td><td class=num>${x.win == null ? '—' : Math.round(x.win * 100) + '%'}</td><td class="num ${cls(x.avgR)}">${r(x.avgR)}</td><td class="num ${cls(x.totalR)}">${r(x.totalR)}</td></tr>`).join('');
+    box.innerHTML = `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
+      <p class=small>Add setups from the Chart tab ("Setups to watch") or the Coach ("Other setups"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
+      ${paperAcctCard()}
+      <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
+      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${fmtTime(t.opened, true)}</div></td>
+        <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(t.openR)}">${r(t.openR)}${t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
+        <td><button class="btn sm" data-pp="edit" data-id="${esc(t.id)}">Edit</button> <button class="btn sm" data-pp="close" data-id="${esc(t.id)}">Close</button></td></tr>`).join('')}</table>` : '<p class=mu>None. Add one from the setups lists.</p>'}</div>
+      <div class=card><h3>Record</h3>${srows ? `<table><tr><th>Group</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Total</th></tr>${srows}</table><p class="small mu">Small samples mean little: 20+ trades per group before reading anything into it.</p>` : '<p class=mu>No closed paper trades yet.</p>'}</div>
+      <div class=card><h3>Closed (${closed.length})</h3>${closed.length ? `<table><tr><th>Trade</th><th>Exit</th><th class=num>R</th><th class=num>Best / worst</th></tr>${closed.slice(0, 40).map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}<div class=mu>${fmtTime(t.opened, true)} → ${fmtTime(t.closed, true)}</div></td><td class=small>${esc(t.why)} @ ${px(t.exit)}</td><td class="num ${cls(t.R)}">${r(t.R)}${t.qty ? `<div class=small>${usd(C.paperPositions([Object.assign({}, t, { acct: 'x' })], 'x')[0].closed.realized)}</div>` : ''}</td><td class="num small">+${(t.mfe || 0).toFixed(1)} / -${(t.mae || 0).toFixed(1)}</td></tr>`).join('')}</table>` : '<p class=mu>None yet.</p>'}
+        <div class=row style="margin-top:8px"><button class="btn sm" data-pp="clear">Delete all paper trades</button></div></div>`;
+  }
+  $('#paperBox').addEventListener('click', e => {
+    if (e.target.id === 'ppNew') { const a = paperAcct(); if (a && !confirm('End this paper account and start a new one? Its result is kept in the list.')) return; newPaperAcct($('#ppPlan').value, +$('#ppSize').value, $('#ppProf').value); renderPaper(); return; }
+    const b = e.target.closest('[data-pp]'); if (!b) return;
+    const t = S.paper.find(x => x.id === b.dataset.id), now = Date.now();
+    if (b.dataset.pp === 'close' && t) { const p0 = pnlPrice(t.sym); if (p0 == null) return; Object.assign(t, { status: 'closed', exit: p0, closed: now, why: 'closed by you', R: C.paperR(t, p0, now) }); t.log.push({ t: now, what: 'closed by you at ' + px(p0) }); savePaper('closed by hand'); renderPaper(); }
+    if (b.dataset.pp === 'edit' && t) { const ns = prompt('Stop (paper):', t.stop); if (ns === null) return; const nt = prompt('Target (paper, blank = none):', t.target == null ? '' : t.target);
+      const sv = num(ns), tv = nt === '' ? null : num(nt), d = t.side === 'short' ? -1 : 1, p0 = pnlPrice(t.sym);
+      if (sv == null || (p0 != null && d * (p0 - sv) <= 0)) { alert('Stop must be ' + (d > 0 ? 'below' : 'above') + ' the price.'); return; }
+      if (d * (sv - t.stop) < 0 && !confirm('This widens the paper stop. Your real rule is never widen. Record it anyway?')) return;
+      t.log.push({ t: now, what: `stop ${px(t.stop)} → ${px(sv)}, target ${t.target == null ? '—' : px(t.target)} → ${tv == null ? '—' : px(tv)}` }); t.stop = sv; t.target = tv; savePaper('edited'); renderPaper(); }
+    if (b.dataset.pp === 'clear' && confirm('Delete every paper trade? This cannot be undone.')) { S.paper = []; savePaper('cleared'); renderPaper(); } });
+  // ---------- Track record: replay results (monitor/backtest.json, made by the "Replay test" workflow) ----------
+  let BT = null, btAt = 0;
+  async function loadTrack() {
+    if (Date.now() - btAt < 600e3) return; btAt = Date.now();
+    try { const r = await fetch('monitor/backtest.json', { cache: 'no-store' }); BT = r.ok ? await r.json() : null; } catch (e) { BT = null; }
+    try { const r = await fetch('monitor/slow.json', { cache: 'no-store' }); BT && (BT.slow = r.ok ? await r.json() : null); } catch (e) { }
+    renderTrack();
+  }
+  function renderTrack() {
+    const box = $('#trackBox'); if (!box) return;
+    if (!BT || !BT.groups) { box.innerHTML = '<p class=mu>No replay yet. Run it: GitHub → Actions → "Replay test" → Run workflow.</p>'; return; }
+    const NAMES = [['all', 'All setups'], ['fvg', 'FVG retest'], ['fvg|15', '  FVG 15m'], ['fvg|60', '  FVG 1h'], ['fvg|240', '  FVG 4h'], ['sweep', 'Liquidity sweep'], ['sweep|15', '  Sweep 15m'], ['sweep|60', '  Sweep 1h'], ['sweep|with_trend', '  Sweep with 4h trend'], ['sweep|counter_trend', '  Sweep counter-trend'], ['sweep|at_open', '  Sweep at a market open']];
+    const r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R';
+    const rows = NAMES.filter(([k]) => BT.groups[k]).map(([k, nm]) => { const g = BT.groups[k], a = g.all, h = g.heldOut || {}, thin = a.n < 20;
+      return `<tr class="${thin ? 'mu' : ''}"><td>${esc(nm)}</td><td class=num>${a.n}</td><td class=num>${a.n ? Math.round(a.winRate * 100) + '%' : '—'}</td><td class="num ${a.avgR > 0 ? 'up' : a.avgR < 0 ? 'dn' : ''}">${r(a.avgR)}</td><td class=num>${a.pf == null ? '—' : a.pf}</td><td class=num>${a.worstStreak ?? '—'}</td><td class="num ${h.avgR > 0 ? 'up' : h.avgR < 0 ? 'dn' : ''}">${h.n ? r(h.avgR) + ' (' + h.n + ')' : '—'}</td></tr>`; }).join('');
+    const o = BT.ote || {}, VR = { continuation_signs: 'Continuation signs', reversal_warning: 'Reversal warning', unclear: 'Unclear', unknown: 'No volume' };
+    const orows = Object.keys(VR).filter(k => o[k] && o[k].n).map(k => `<tr><td>${VR[k]}</td><td class=num>${o[k].n}</td><td class=num>${Math.round(o[k].continued / o[k].n * 100)}%</td><td class=num>${Math.round(o[k].failed / o[k].n * 100)}%</td></tr>`).join('');
+    const d = t => new Date(t * 1000).toLocaleDateString();
+    box.innerHTML = `<table><tr><th>Setup</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>PF</th><th class=num>Worst run</th><th class=num>Held-out avg (n)</th></tr>${rows}</table>
+      ${BT.variants ? `<h4 style="margin:10px 0 4px">Stricter versions (written down before testing)</h4><table><tr><th>Version</th><th class=num>n</th><th class=num>Avg</th><th class=num>Held-out avg (n)</th><th class=num>PF held-out</th></tr>${Object.entries(BT.variants).map(([v, x]) => `<tr><td class=small><b>${esc(v)}</b> ${esc(x.note)}${v === 'V4' ? ' <span class="tag up">phone alerts</span>' : ''}</td><td class=num>${x.all.n}</td><td class="num ${x.all.avgR > 0 ? 'up' : 'dn'}">${r(x.all.avgR)}</td><td class="num ${x.heldOut.avgR > 0 ? 'up' : 'dn'}">${x.heldOut.n ? r(x.heldOut.avgR) + ' (' + x.heldOut.n + ')' : '—'}</td><td class=num>${x.heldOut.pf ?? '—'}</td></tr>`).join('')}</table>` : ''}
+      ${BT.exits ? `<h4 style="margin:10px 0 4px">Exit versions on alert-grade entries (no time limit unless noted; swap fees included)</h4><table><tr><th>Exit</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Held-out avg</th><th class=num>Median hold</th></tr>${Object.entries(BT.exits).map(([m, x]) => `<tr><td class=small><b>${esc(m)}</b> ${esc(x.note)}</td><td class=num>${x.all.n}</td><td class=num>${x.all.n ? Math.round(x.all.winRate * 100) + '%' : '—'}</td><td class="num ${x.all.avgR > 0 ? 'up' : 'dn'}">${r(x.all.avgR)}</td><td class="num ${x.heldOut.avgR > 0 ? 'up' : 'dn'}">${x.heldOut.n ? r(x.heldOut.avgR) : '—'}</td><td class=num>${x.all.medDays != null ? (x.all.medDays * 24).toFixed(0) + 'h' : '—'}</td></tr>`).join('')}</table>` : ''}
+      ${BT.slow ? `<h4 style="margin:10px 0 4px">Slow setups: 4h and daily (${d(BT.slow.from)}–${d(BT.slow.to)}, held-out from ${d(BT.slow.heldOutFrom)})</h4><table><tr><th>Setup · exit</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Held-out avg (n)</th><th class=num>Median hold</th></tr>${Object.entries(BT.slow.groups).map(([k, x]) => `<tr class="${x.all.n < 20 ? 'mu' : ''}"><td class=small>${esc(k.replace(' E1', ' · stop/target').replace(' E3', ' · half at 1R'))}</td><td class=num>${x.all.n}</td><td class=num>${x.all.n ? Math.round(x.all.winRate * 100) + '%' : '—'}</td><td class="num ${x.all.avgR > 0 ? 'up' : 'dn'}">${r(x.all.avgR)}</td><td class="num ${x.heldOut.avgR > 0 ? 'up' : 'dn'}">${x.heldOut.n ? r(x.heldOut.avgR) + ' (' + x.heldOut.n + ')' : '—'}</td><td class=num>${x.medDays != null ? (x.medDays * 24).toFixed(0) + 'h' : '—'}</td></tr>`).join('')}</table>` : ''}
+      ${orows ? `<h4 style="margin:10px 0 4px">Fib OTE pullbacks by volume read</h4><table><tr><th>Volume read</th><th class=num>n</th><th class=num>Reached leg end</th><th class=num>Broke the start</th></tr>${orows}</table>` : ''}
+      <p class="small mu">${esc(BT.source)}. ${d(BT.period.from)}–${d(BT.period.to)}, held-out from ${d(BT.period.heldOutFrom)}. ${esc(BT.rules)} Grey = under 20 setups, too few to judge. Past results on one venue; not a promise and not a probability for your next trade. Avg R and held-out avg matter more than win rate.</p>`;
+  }
+  loadTrack(); setInterval(loadTrack, 600e3);
+  // ---------- Momentum & context traits: grades (monitor/traits.json) + what each says now + choose alert filters ----------
+  let TR = null, trAt = 0;
+  async function loadTraits() { if (Date.now() - trAt < 600e3) return; trAt = Date.now();
+    try { const r = await fetch('monitor/traits.json', { cache: 'no-store' }); TR = r.ok ? await r.json() : null; } catch (e) { TR = null; } }
+  function renderTraits(sym) {
+    const box = $('#traitBox'); if (!box || !window.PDTraits) return; loadTraits();
+    const h = F.candles(sym, 60).slice(0, -1), d = F.candles(sym, 1440).slice(0, -1);
+    let x = null; try { x = h.length > 240 && d.length > 20 ? PDTraits.ctxAt(h, d, h.length - 1) : null; } catch (e) { }
+    const sh = x && PDProfile.shardName(x.f), prof = sh && PROF[sh] ? { keys: PROF[sh], minN: PDProfile.MIN_N } : null;
+    const on = new Set(T().alertTraits || []), byId = {}; for (const t of (TR && TR.traits) || []) byId[t.id] = t;
+    const gc = g => g === 'A' || g === 'B' ? 'up' : g === 'C' ? '' : g === 'I' ? 'mu' : 'dn';
+    const rows = PDTraits.TRAITS.map(t => { const g = byId[t.id], now = x ? t.side(x, prof) : null, fd = g && g.filter.V4, dd = g && g.direction;
+      return `<tr><td class=small><label class=chk><input type=checkbox data-trait="${t.id}" ${on.has(t.id) ? 'checked' : ''}> <b>${t.id}</b> ${esc(t.name)}</label><div class=mu>${esc(t.rule)}</div></td>
+        <td class="small ${now === 'long' ? 'bull' : now === 'short' ? 'bear' : 'mu'}">${now || 'no view'}</td>
+        <td class="num ${gc(dd && dd.grade.grade)}" title="${esc(dd ? dd.grade.why : '')}">${dd ? dd.grade.grade : '—'}${dd && dd.held ? `<div class="small mu">${dd.held.hit}% right</div>` : ''}</td>
+        <td class="num ${gc(fd && fd.grade.grade)}" title="${esc(fd ? fd.grade.why : '')}">${fd ? fd.grade.grade : '—'}${fd && fd.held && fd.held.n ? `<div class="small mu">${fd.held.avgR >= 0 ? '+' : ''}${fd.held.avgR}R (${fd.held.n})</div>` : ''}</td></tr>`; }).join('');
+    box.innerHTML = `<table><tr><th>Trait (tick = filter my phone alerts)</th><th>Says now (${esc(sym)})</th><th class=num>Direction grade</th><th class=num>Filter grade</th></tr>${rows}</table>
+      <p class="small mu">Written down before testing; graded on held-out data. Direction = was its side right 24h later (${TR ? TR.direction.hours : '?'} past hours, all coins). Filter = average R of alert-grade setups it agrees with (held-out). A/B = held up in both periods, C = small, D = periods disagree, F = worse or a coin flip, I = too few cases. ${on.size ? `<b>Phone setup alerts now need: ${esc([...on].join(' + '))} to agree.</b>` : 'No filter ticked: all alert-grade setups are sent.'} Past results on Coinbase data, not probabilities.</p>`;
+  }
+  $('#traitBox') && $('#traitBox').addEventListener('change', e => { const c = e.target.closest('[data-trait]'); if (!c) return;
+    const set = new Set(T().alertTraits || []); c.checked ? set.add(c.dataset.trait) : set.delete(c.dataset.trait); T().alertTraits = [...set]; save(); saveAndSync('alert filters'); renderTraits(T().sym); });
+  // ---------- Market profile now (js/profile.js + monitor/profile/<trend>.json from the daily workflow) ----------
+  const PROF = {}; let profAt = {};
+  async function renderProfile(sym) {
+    const box = $('#profileBox'); if (!box || !window.PDProfile) return;
+    const h = F.candles(sym, 60).slice(0, -1), d = F.candles(sym, 1440).slice(0, -1);
+    let f = null; try { f = h.length > 240 && d.length > 20 ? PDProfile.featuresAt(h, d, h.length - 1) : null; } catch (e) { console.warn(e); }
+    if (!f) { box.innerHTML = '<p class=mu>Waiting for 1h and daily candles.</p>'; return; }
+    const sh = PDProfile.shardName(f);
+    if (!PROF[sh] || Date.now() - (profAt[sh] || 0) > 3600e3) { profAt[sh] = Date.now();
+      try { const r = await fetch('monitor/profile/' + sh + '.json', { cache: 'no-store' }); PROF[sh] = r.ok ? await r.json() : {}; } catch (e) { PROF[sh] = {}; } }
+    const m = PDProfile.match({ keys: PROF[sh] || {}, minN: PDProfile.MIN_N }, f);
+    const pc = x => (x >= 0 ? '+' : '') + x.toFixed(2) + '%';
+    box.innerHTML = `<p class=small><b>Now (${esc(sym)}, last closed hour):</b> ${esc(PDProfile.describe(f))}.</p>` + (m ? `
+      <div class=kv><div><span>Past matches</span><b>${m.n}</b></div><div><span>Traits matched</span>${m.traits.length} of ${PDProfile.ORDER.length}</div>
+      <div><span>Higher after 24h</span><b>${Math.round(m.upShare24 * 100)}%</b></div><div><span>24h median</span><b class="${m.med24 >= 0 ? 'up' : 'dn'}">${pc(m.med24)}</b></div>
+      <div><span>Middle half (24h)</span>${pc(m.p25_24)} to ${pc(m.p75_24)}</div><div><span>Typical stretch in 24h</span>${pc(m.medUp24)} / ${pc(m.medDn24)}</div>
+      <div><span>4h median</span>${pc(m.med4)}</div><div><span>Held-out (${m.held ? m.held.n : 0})</span>${m.held ? Math.round(m.held.upShare24 * 100) + '% higher' : '—'}</div></div>`
+      : '<p class=mu>No past group with 30+ matching hours yet (history still building, or a rare combination).</p>') +
+      `<p class="small mu">Every 4th past hour of BTC, ETH, SOL and XRP on Coinbase (data/history, topped up daily), grouped by the same traits. If a full match is rare it drops the least important traits (session first). Past frequencies, not a probability for this trade and not a signal. Held-out = last 30% of the history.</p>`;
+  }
+  // ---------- Research read (experimental engine, js/research.js): per timeframe, never one blended score ----------
+  const research = {};
+  function researchFor(sym) {
+    const r = research[sym];
+    if (r && Date.now() - r.at < 60e3) return r;   // heavy: recompute at most once a minute per coin
+    if (!window.PDResearch) return null;
+    try { research[sym] = PDResearch.read(sym, iv => F.candles(sym, iv), Date.now(), /coinbase/i.test(F.source) ? 'coinbase' : 'kraken'); } catch (e) { console.warn(e); }
+    return research[sym] || null;
+  }
+  function renderResearch(sym) {
+    const box = $('#researchBox'); if (!box) return;
+    const rd = researchFor(sym);
+    if (!rd) { box.innerHTML = '<p class=mu>Waiting for candles.</p>'; return; }
+    const lbl = s => esc(String(s || '').replace(/_/g, ' '));
+    const cls = b => /^bull/.test(b) ? 'bull' : /^bear/.test(b) ? 'bear' : '';
+    const rows = PDResearch.TFS.map(tf => { const s = rd.tfs[tf] || {};
+      if (s.status !== 'ready') return `<tr><td>${C.tfName(tf)}</td><td colspan=4 class="small warn">${lbl(s.status)}${s.error ? ': ' + esc(s.error) : ''}${s.status === 'gap' ? ' (a candle is missing; alerts off for this timeframe)' : ''}</td></tr>`;
+      const pats = s.patterns.map(p => `<span class="${cls(p.bias)}">${lbl(p.pattern)}${p.relaxed ? '*' : ''}</span>`).join(', ') || '<span class=mu>none</span>';
+      const form = s.forming.length ? `<div class="small mu">forming: ${s.forming.map(f => lbl(f.pattern)).join(', ')}</div>` : '';
+      const ups = s.setups.map(x => `<span class="${x.dir === 'long' ? 'bull' : 'bear'}">${x.dir} ${x.status}</span> @${px(x.level)}${x.invalidation != null ? ' · invalid ' + px(x.invalidation) : ''}`).join('<br>') || '<span class=mu>none</span>';
+      return `<tr><td>${C.tfName(tf)}</td><td class="${cls(s.bias)}">${lbl(s.bias)}${s.lastChange ? `<div class="small mu">was ${lbl(s.lastChange.from)}, ${fmtTime(s.lastChange.time)}</div>` : ''}</td><td class=small>${pats}${form}</td><td class=small>${ups}</td></tr>`; }).join('');
+    box.innerHTML = `<table><tr><th>TF</th><th>Structure</th><th>Patterns (last 3 bars)</th><th>Break &amp; retest</th></tr>${rows}</table>
+      <p class="small mu">Engine v${esc(rd.version)} on closed ${esc(F.demo ? 'DEMO (made-up)' : /coinbase/i.test(F.source) ? 'Coinbase' : 'Kraken')} candles, updated ${fmtTime(rd.at)}. "Forming" is provisional until the candle closes. Each timeframe stands alone; nothing here is averaged into a score.
+      * relaxed variant (looser gap rule). Untested: no replay results yet. Flows and liquidation maps are not in this read. Size only through "Weigh it".</p>`;
+  }
+  $('#setupBox').addEventListener('click', e => { const pb = e.target.closest('[data-paper]'); if (pb) { const u = lastUps[+pb.dataset.paper]; if (u) paperAdd(u); return; }
+    const b = e.target.closest('[data-weigh]'); if (!b) return; const u = lastUps[+b.dataset.weigh]; if (!u) return;
+    const now = Date.now(), P = prices(), accts = liveAccts();
+    const out = accts.map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: a.leverage }), name = esc(a.label || C.planOf(a).name);
+      return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${name}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${name}: not now</b> (${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ') || 'size 0'})`; });
+    $(`[data-weighout="${b.dataset.weigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>'; });
   $('#setupBox').addEventListener('click', e => { const b = e.target.closest('[data-plan]'); if (!b) return; posDraft = JSON.parse(b.dataset.plan); $('#manualBox').open = true; switchTab('pos'); });
   function switchTab(t) { document.querySelector(`#tabs button[data-tab="${t}"]`).click(); }
 
@@ -361,6 +616,7 @@
       ${live ? `<div class=kv>
         <div><span>Equity (live, ${esc(pnlQuote(a.sym || T().sym).basis)})</span><b>${usd(s.equity)}</b>${s.priceComplete ? '' : ' <span class=dn small>price missing: valued at stop</span>'}</div>
         <div><span>Balance (closed)</span>${usd(s.balance)}</div>
+        ${a.platformEq ? `<div><span>Platform equity (imported ${esc(fmtTime(a.platformEq.t, true))})</span>${usd(a.platformEq.v)}${Date.now() - a.platformEq.t < 15 * 60e3 ? ` <span class="small ${Math.abs(s.equity - a.platformEq.v) > a.size * 0.001 ? 'warn' : 'mu'}">app ${s.equity - a.platformEq.v >= 0 ? '+' : ''}${usd(s.equity - a.platformEq.v)}</span>` : ' <span class="small mu">older than 15 min</span>'}</div>` : ''}
         <div><span>Open P&L</span><b class="${cls(s.upnl)}">${usd(s.upnl)}</b> <span class=small>fees ${usd(-s.feesOpen)}</span></div>
         <div><span>Room to breach (${s.binding} limit)</span><b class="${s.room < s.profRisk * 2 ? 'dn' : ''}">${usd(s.room)}</b> (${pct(s.roomPct)})</div>
         ${a.phase === 'eval' ? `<div><span>To target ${usd(s.targetBal)}</span>${usd(s.toTarget)} · ${pct(Math.max(0, s.progress), 0)} done (on equity)</div>` : `<div><span>Payout available (est.)</span>${usd(s.payoutAvail)}</div>`}
@@ -369,7 +625,7 @@
         <div><span>Today</span>${s.tradesToday} trades · ${s.lossesToday} losses</div>
       </div>
       <div class=small>Daily floor ${usd(s.dailyFloor)} (3% of ${usd(s.dayStart)} at 00:30 UTC) · used ${pct(dU, 0)}</div><div class="${barC(dU)}"><i style="width:${dU * 100}%"></i></div>
-      <div class=small>Max floor ${usd(s.maxFloor)} (static) · used ${pct(mU, 0)}</div><div class="${barC(mU)}"><i style="width:${mU * 100}%"></i></div>
+      <div class=small>Max floor ${usd(s.maxFloor)} (static${a.ddLimit ? ', from platform' : ''}) · used ${pct(mU, 0)}</div><div class="${barC(mU)}"><i style="width:${mU * 100}%"></i></div>
       ${a.phase === 'eval' ? `<div class=small>Target progress</div><div class=bar><i style="width:${Math.max(0, Math.min(1, s.progress)) * 100}%"></i></div>` : ''}
       <div style="margin-top:8px"><div class=small>Risk profile (per trade, % of start)</div><div class=profiles>${prof}</div>
       <p class=small>${esc(s.profile.note)} Per trade <b>${usd(s.profRisk)}</b> · next trade may risk <b>${usd(s.nextRisk)}</b> · about <b>${s.lossesToBreach}</b> losses of room${wins ? ` · wins to pass: ${wins}` : ''} · max ${s.profile.maxTrades} trades/day, stop after ${s.profile.stopAfterLosses} losses.</p></div>
@@ -608,7 +864,7 @@
       ${r.warnings.map(w => `<p class="small warn">${esc(w)}</p>`).join('')}
       ${ageMin > 10 ? `<p class="small warn">These screenshots are ${Math.round(ageMin)} min old. Prices may have moved; the balance is still right if no trade closed since.</p>` : ''}
       <div class=row style="margin-top:8px"><select id=impAcct>${opts}${newOpt}</select><button class="btn pri" id=impGo>Looks right: sync</button></div>
-      <p class="small mu">Sync sets this account's balance and daily limit to your platform's, replaces its open positions with these (keeping your notes on ones that match), and marks missing ones as closed on your platform.</p>`;
+      <p class="small mu">Sync sets this account's equity, balance, daily loss limit, drawdown limit and target to your platform's, replaces its open positions with these (keeping your notes on ones that match), and marks missing ones as closed on your platform.</p>`;
     $('#impGo').onclick = () => applyImport();
   }
   function applyImport() {
@@ -624,6 +880,9 @@
     const t = Math.min(now, shotTime || now);
     if (r.balance != null) acct.anchor = { t, bal: r.balance };
     if (A.dailyLimit != null) acct.dayStartOverride = { reset: C.lastReset(t, acct.resetMin), bal: A.dailyLimit / (1 - C.planOf(acct).mdl) };
+    if (A.drawdownLimit > 0) acct.ddLimit = A.drawdownLimit;
+    if (A.target > 0 && acct.phase === 'eval') acct.targetEq = A.target;
+    if (A.equity > 0) acct.platformEq = { t, v: A.equity };
     // Match open positions: keep notes on ones that still exist; add new ones; close the rest.
     const open = S.positions.filter(p => p.acct === acct.id && !p.closed);
     const used = new Set();
@@ -666,14 +925,15 @@
   // ---------- Coach ----------
   const lastHealth = {};
   const notified = {};
-  function coachFor(p) {
+  function coachCtx(p) {
     const A = analyses[p.sym] || (analyses[p.sym] = analyze(p.sym));
     const a = acctById(p.acct);
     const st = a ? C.accountState(a, S.positions, prices(), Date.now()) : null;
     const ec = F.candles(p.sym, p.tf);
-    return C.health(p, { price: A.price, ageSec: A.ageSec, maxAge: T().maxAge, struct: A.struct, fvg: { 15: A.fvg[15], 60: A.fvg[60] }, levels: A.levels,
-      atr: A.atr, acct: st, rules: { beAt1R: T().beAt1R }, entryStruct: ec.length > 10 ? C.structure(ec) : null, now: Date.now() });
+    return { price: A.price, ageSec: A.ageSec, maxAge: T().maxAge, struct: A.struct, fvg: { 15: A.fvg[15], 60: A.fvg[60] }, levels: A.levels,
+      atr: A.atr, acct: st, rules: { beAt1R: T().beAt1R }, entryStruct: ec.length > 10 ? C.structure(ec) : null, now: Date.now() };
   }
+  function coachFor(p) { return C.health(p, coachCtx(p)); }
   let analyses = {};
   // ---------- Phone alerts via ntfy (free; works while the app is open) ----------
   const NT_KEY = 'kpd_ntfy', MEM_KEY = 'kpd_alertmem';
@@ -703,10 +963,11 @@
         const tgt = p.tp1 != null ? p.tp1 : p.tp2; if (tgt != null && d * (px - tgt) >= 0) fire(p.id + '|tp', 1, `${tag}: target reached`, `Price ${px.toFixed(1)} at target ${tgt}.`, 3);
         const h = lastHealth[p.id]; if (h && h.score != null && h.score <= 2) fire(p.id + '|health', 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal, 4);
       }
-      const A2 = analyses[T().sym] || analyze(T().sym);
-      for (const e of C.entryCheck(T().sym, A2, A, S.positions.filter(p => p.acct === a.id), now, { leverage: a.leverage }))
-        if (e.ready && e.size && e.size.qty > 0) fire(a.id + '|entry|' + e.key, 1, `${T().sym} ${e.dir} setup: all rules pass`, `${e.text} Size ${e.size.qty}. Untested idea, not a signal.`, 4);
     }
+    // Setups both ways, no account involved; you weigh them by ticking one.
+    const A2 = analyses[T().sym] || analyze(T().sym);
+    for (const e of C.scanSetups(T().sym, A2, now))
+      if (e.ready && C.alertGrade(e).ok) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
     mem.active = active; try { localStorage.setItem(MEM_KEY, JSON.stringify(mem)); } catch (e) { }
     for (const o of out.slice(0, 4)) ntSend(o.title, o.body, o.prio);
   }
@@ -729,11 +990,18 @@
       return `<div class=small><b>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</b>: room ${usd(s.room)} (${s.binding}), open risk ${s.riskKnown ? usd(s.riskToStops) : 'UNLIMITED (no stop)'}, ${s.profile.name} next ${usd(s.nextRisk)}. ${s.warnings.map(w => `<span class="${w.lvl === 'bad' ? 'dn' : 'warn'}">${esc(w.text)}</span>`).join(' ')}</div>`; }).join('');
     const cards = open.map(p => {
       const h = lastHealth[p.id] || coachFor(p);
+      const notes = window.PDResearch ? PDResearch.coachNotes(p, researchFor(p.sym)) : [];
+      const cx = coachCtx(p), plan = cx.ageSec != null && cx.ageSec <= T().maxAge ? C.levelPlan(p, cx) : [];
+      const TY = { stop: 'Move stop to', tp: 'Take profit at', partial: 'Take a partial at' };
       return `<div class=card><div class=acct-head><b>${esc(p.sym)} ${p.side.toUpperCase()} · ${C.tfName(p.tf)} ${esc(p.setup)}</b><span class="score s${h.score || 0}">${h.score || '–'}/5 ${h.label}</span></div>
-        <p><b>Proposal:</b> ${esc(h.proposal)}</p><div class=items>${h.items.map(i => `<div class="${i.k}"><b>${i.k}</b>${esc(i.t)}</div>`).join('')}</div></div>`;
+        <p><b>Proposal:</b> ${esc(h.proposal)}</p><div class=items>${h.items.map(i => `<div class="${i.k}"><b>${i.k}</b>${esc(i.t)}</div>`).join('')}</div>
+        ${plan.length ? `<h4 style="margin:10px 0 4px">Suggested levels</h4><table><tr><th>Action</th><th class=num>Price</th><th class=num>R</th><th>Why</th><th></th></tr>${plan.map((x, i) => `<tr><td class=small><b class="${x.type === 'stop' ? 'warn' : 'up'}">${TY[x.type]}</b>${x.rule ? '<div class=tag>your rule</div>' : ''}</td><td class=num>${px(x.price)}</td><td class=num>${x.r == null ? '—' : (x.r >= 0 ? '+' : '') + x.r.toFixed(2) + 'R'}</td><td class=small>${esc(x.why)}</td><td>${x.type !== 'partial' ? `<button class="btn sm" data-setlvl="${esc(p.id)}" data-type="${x.type}" data-px="${x.price}">I set it</button>` : ''}</td></tr>`).join('')}</table>
+          <p class="small mu">Set it on your prop platform first, then tap "I set it" so the app matches. Stops shown only tighten, stay at least 1 ATR from price, and are options unless marked "your rule". Not a signal; your plan decides.</p>` : ''}
+        ${notes.length ? `<div class=items>${notes.map(t => `<div class=warn><b>research</b>${esc(t)}</div>`).join('')}</div><p class="small mu">Research notes (experimental): what the engine sees against this trade. They don't change the score and never mean widen the stop.</p>` : ''}</div>`;
     }).join('');
     const sym = T().sym, A = analyses[sym] || analyze(sym);
-    const ups = C.setupsToWatch(sym, A, { minRR: 2 });
+    const ups = C.scanSetups(sym, A, now);
+    coachUps = ups.slice().sort((a, b) => (C.alertGrade(b).ok - C.alertGrade(a).ok) || (b.ready - a.ready) || (b.rr - a.rr)).slice(0, 5);
     const reviews = liveAccts().map(a => {
       const R = C.accountReview(a, S.positions, P, now), st = R.state;
       const syms = [...new Set(S.positions.filter(p => p.acct === a.id && !p.closed && p.stop == null && p.krakenSL).map(p => p.sym + '|' + p.side))];
@@ -746,10 +1014,23 @@
     }).join('');
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
-      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>untested idea, not a signal</span></h3>${ups.length ? ups.map(u => `<div class=small>${esc(u.text)}</div>`).join('') : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
+      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>top 5, try them on paper</span></h3>${coachUps.length ? coachUps.map((u, i) => `<div class=small style="margin:6px 0"><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> ${C.alertGrade(u).ok ? '<span class="tag up">alert grade</span> ' : ''}${u.ready ? '' : '<span class="tag mu">not ready</span> '}${esc(u.text)} <button class="btn sm" data-cpaper="${i}">Paper trade</button></div>`).join('') + '<p class="small mu">Sorted: alert grade first, then ready, then best R. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
   }
+  var coachUps = [];
   $('#coachBox').addEventListener('click', e => {
+    const cp = e.target.closest('[data-cpaper]'); if (cp) { const u = coachUps[+cp.dataset.cpaper]; if (u) paperAdd(u); return; }
+    const sb = e.target.closest('[data-setlvl]');
+    if (sb) {
+      const p = S.positions.find(x => x.id === sb.dataset.setlvl), v = +sb.dataset.px; if (!p || !isFinite(v)) return;
+      const d = p.side === 'short' ? -1 : 1, now = pnlPrice(p.sym);
+      if (sb.dataset.type === 'stop') {
+        if (p.stop != null && d * (v - p.stop) <= 0) { alert('That would widen the stop. Not allowed.'); return; }
+        if (now != null && d * (now - v) <= 0) { alert('Stop must be ' + (d > 0 ? 'below' : 'above') + ' the current price.'); return; }
+        p.stop = v; if (p.origStop == null) p.origStop = v; (p.stopHist = p.stopHist || []).push({ t: Date.now(), stop: v, why: 'coach suggestion, set on platform' });
+      } else { if (p.tp1 != null && now != null && d * (now - p.tp1) >= 0) p.tp2 = v; else p.tp1 = v; }
+      saveAndSync('levels'); renderAll(true); return;
+    }
     const b = e.target.closest('[data-bulkgo]'); if (!b) return;
     const k = b.dataset.bulkgo, aid = b.dataset.a, [sym, side] = k.split('|');
     const val = w => num(($(`[data-bulk=${w}][data-k="${k}"][data-a="${aid}"]`) || {}).value);
@@ -763,17 +1044,28 @@
   });
   // Monitor hand-off. Build the watch file (positions, stops, limits; no keys).
   function buildWatch() {
-    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'anchor', 'dayStartOverride', 'created'];
+    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'anchor', 'dayStartOverride', 'created'];
     const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
     const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
       stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [] }));
-    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R }, calib: S.calib.slice(-10), accounts: accts, positions: pos };
+    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice() }, calib: S.calib.slice(-10), accounts: accts, positions: pos };
   }
   // Auto-send: GitHub fine-grained token (this repo only, Contents read/write), kept in its own key so backups never include it.
   const GH_KEY = 'kpd_gh';
   const ghRepo = () => (T().monRepo || '').trim();
   const ghFile = () => `https://api.github.com/repos/${ghRepo()}/contents/monitor/watch.json`;
   const ghToken = () => { try { return localStorage.getItem(GH_KEY) || ''; } catch (e) { return ''; } };
+  async function pushFile(file, obj, msg) {
+    const tok = ghToken(); if (!tok || !/^[\w.-]+\/[\w.-]+$/.test(ghRepo())) return { ok: false };
+    const url = `https://api.github.com/repos/${ghRepo()}/contents/${file}`, H = { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json' };
+    const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(obj, null, 1))));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { const g = await fetch(url + '?ref=main', { headers: H, cache: 'no-store' }); const sha = g.ok ? (await g.json()).sha : undefined;
+        const r = await fetch(url, { method: 'PUT', headers: H, body: JSON.stringify({ message: msg, content: b64, sha, branch: 'main' }) });
+        if (r.ok) return { ok: true }; if (r.status !== 409 && r.status !== 422) return { ok: false, msg: 'GitHub error ' + r.status }; } catch (e) { return { ok: false }; }
+    }
+    return { ok: false };
+  }
   async function pushWatch(reason) {
     const tok = ghToken(); if (!tok) return { ok: false, msg: 'no key' };
     if (!/^[\w.-]+\/[\w.-]+$/.test(ghRepo())) return { ok: false, msg: 'set your monitor repo (owner/name) in Settings' };
@@ -901,6 +1193,7 @@
     runCoach();
     if (tab === 'chart') renderChart(true);
     if (tab === 'desk') renderDesk();
+    if (tab === 'paper') renderPaper();
     if (tab === 'pos') { if (posFormDirty) { renderPosForm(); posFormDirty = false; } renderPositions(); }
     if (tab === 'coach') renderCoach();
     if (tab === 'set' && full) renderSettings();

@@ -22,6 +22,7 @@
   <button data-tab="desk">Desk</button>
   <button data-tab="pos">Positions</button>
   <button data-tab="coach">Coach</button>
+  <button data-tab="paper">Paper</button>
   <button data-tab="set">Settings</button>
 </nav>
 
@@ -45,7 +46,13 @@
     <div class="card"><h3>Levels</h3><div id="levelBox"></div></div>
     <div class="card"><h3>Open fair value gaps</h3><div id="fvgBox"></div></div>
     <div class="card"><h3>Live data check</h3><div id="dataBox"></div></div>
+    <div class="card"><h3>Scan all coins <span class="tag">every model, both ways</span></h3><div id="scanAllBox"><p class=mu>Starting…</p></div></div>
     <div class="card"><h3>Setups to watch <span class="tag">untested idea, not a signal</span></h3><div id="setupBox"></div></div>
+    <div class="card"><h3>Market profile now <span class="tag">past hours like this one</span></h3><div id="profileBox"><p class=mu>Loading…</p></div></div>
+    <div class="card"><h3>Momentum &amp; context traits <span class="tag">graded, you choose</span></h3><div id="traitBox"><p class=mu>Loading…</p></div></div>
+    <div class="card"><h3>Track record <span class="tag">replay test, past data</span></h3><div id="trackBox"><p class=mu>Loading…</p></div></div>
+    <div class="card"><h3>Impulse legs &amp; fib retracements <span class="tag">observation, not a signal</span></h3><div id="fibBox"></div></div>
+    <div class="card"><h3>Research read <span class="tag">experimental, not a signal</span></h3><div id="researchBox"></div></div>
   </div>
 </section>
 
@@ -80,6 +87,7 @@
   <div id="coachBox"></div>
 </section>
 
+<section id="tab-paper" class="tab"><div id="paperBox"></div></section>
 <section id="tab-set" class="tab"><div id="setBox"></div></section>
 </main>
 
@@ -87,6 +95,10 @@
 
 <script src="vendor/lightweight-charts.standalone.production.js"></script>
 <script src="js/core.js"></script>
+<script src="js/research-model.js"></script>
+<script src="js/research.js"></script>
+<script src="js/profile.js"></script>
+<script src="js/traits.js"></script>
 <script src="js/feed.js"></script>
 <script src="js/app.js"></script>
 </body>

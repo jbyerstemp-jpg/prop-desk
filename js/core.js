@@ -356,11 +356,12 @@
     // Kraken: equity = balance (fees already in it) + unrealized P&L.
     const equity = balance + upnl;
     const dailyFloor = dayStart * (1 - pl.mdl);
-    const maxFloor = start * (1 - pl.mdd);
+    // Platform's own numbers (from an import) win over the preset math.
+    const maxFloor = a.ddLimit > 0 ? a.ddLimit : start * (1 - pl.mdd);
     const floor = Math.max(dailyFloor, maxFloor);
     const room = equity - floor;
     const dailyRoom = equity - dailyFloor, maxRoom = equity - maxFloor;
-    const targetBal = start * (1 + pl.target);
+    const targetBal = a.targetEq > 0 ? a.targetEq : start * (1 + pl.target);
     const isFunded = a.phase === 'funded';
     const equityIfStopped = equity - riskToStops;
     // A loss = a position fully closed after the reset whose total result is negative.
@@ -768,9 +769,11 @@
     opt = opt || {};
     const out = [];
     const s4 = data.struct['240'], px = data.price;
-    if (!s4 || px == null || s4.bias === 'range') return out;
-    const want = s4.bias, a1 = data.atr['60'] || px * 0.005;
-    for (const tf of ['15', '60']) {
+    if (px == null) return out;
+    // Default: only the 4h direction (old behavior). opt.both: both directions, whatever the 4h says.
+    const dirs = opt.both ? ['bull', 'bear'] : (!s4 || s4.bias === 'range' ? [] : [s4.bias]);
+    const a1 = data.atr[opt.atrKey || '60'] || px * 0.005;
+    for (const want of dirs) for (const tf of (opt.tfs || (opt.both ? ['15', '60', '240'] : ['15', '60']))) {
       for (const g of (data.fvg[tf] || [])) {
         if (g.dir !== want) continue;
         const edge = want === 'bull' ? g.top : g.bottom;
@@ -781,7 +784,7 @@
         const st = data.struct[tf];
         // Target: nearest opposing liquidity in the profit direction (1h/4h swings, key levels).
         const pool = [];
-        for (const iv of ['60', '240']) for (const s of ((data.struct[iv] || {}).swings || []).slice(-12))
+        for (const iv of (opt.poolTfs || ['60', '240'])) for (const s of ((data.struct[iv] || {}).swings || []).slice(-12))
           if (s.type === (want === 'bull' ? 'H' : 'L')) pool.push(s.price);
         for (const l of (data.levels || [])) pool.push(l.price);
         const minDist = Math.abs(edge - sl) * (opt.minRR || 2);
@@ -791,12 +794,135 @@
         if (tgt == null) continue;
         const rr = Math.abs(tgt - edge) / Math.abs(edge - sl);
         if (!(rr >= (opt.minRR || 2))) continue;
-        out.push({ sym, tf, dir: want === 'bull' ? 'long' : 'short', entry: edge, stop: sl, target: tgt, rr,
+        out.push({ sym, tf, dir: want === 'bull' ? 'long' : 'short', entry: edge, stop: sl, target: tgt, rr, zone: { top: g.top, bottom: g.bottom },
           aligned1h: data.struct['60'] && data.struct['60'].bias === want, entryTfBias: st && st.bias,
-          text: `${tfName(tf)} ${want} FVG ${fmtPx(g.bottom)}–${fmtPx(g.top)} with 4h ${want}. Retest entry ~${fmtPx(edge)}, stop ${fmtPx(sl)}, target next liquidity ${fmtPx(tgt)} (${rr.toFixed(1)}R).` });
+          text: `${tfName(tf)} ${want} FVG ${fmtPx(g.bottom)}–${fmtPx(g.top)} (4h ${s4 ? s4.bias : '?'}). Retest entry ~${fmtPx(edge)}, stop ${fmtPx(sl)}, target next liquidity ${fmtPx(tgt)} (${rr.toFixed(1)}R).` });
       }
     }
     return out.sort((a, b) => Math.abs(a.entry - px) - Math.abs(b.entry - px)).slice(0, 4);
+  }
+
+  /* Explicit stop / take-profit suggestions for an open position (owner's request, Nov 1 2026). Exact prices, each with its reason.
+     Stops ONLY tighten, never widen. A suggested stop must stay >= 1 ATR (position timeframe, or 0.5 x 1h ATR if larger) from price
+     so ordinary noise doesn't take it, and must move the stop by >= 0.25 of that ATR to be worth doing.
+     ctx as for health(): price, struct, levels, fvg, atr, entryStruct, rules. Returns [{ type, price, r, why, rule }], best first.
+     type: 'stop' | 'tp' | 'partial'. rule: true when it is HIS written rule (e.g. beAt1R), false when it is an option. */
+  function levelPlan(p, ctx) {
+    const out = [], px = ctx.price, d = dir(p);
+    if (px == null || p.entry == null) return out;
+    const risk0 = Math.abs(p.entry - (p.origStop != null ? p.origStop : p.stop));
+    const rAt = x => risk0 ? d * (x - p.entry) / risk0 : null;
+    const a1 = (ctx.atr && ctx.atr['60']) || px * 0.004, aT = (ctx.atr && ctx.atr[String(p.tf)]) || a1;
+    const noise = Math.max(aT, 0.5 * a1), step = 0.25 * noise;
+    const r = rMultiple(p, px), es = ctx.entryStruct;
+    const fees = p.entry * FEES.commission * 2;
+    const tighter = x => p.stop == null ? true : (d > 0 ? x >= p.stop + step : x <= p.stop - step);
+    const clear = x => d > 0 ? px - x >= noise : x - px >= noise;
+    const addStop = (x, why, rule) => { if (x != null && isFinite(x) && tighter(x) && clear(x)) out.push({ type: 'stop', price: x, r: rAt(x), why, rule: !!rule }); };
+    // Stops
+    if (r != null && r >= 1 && p.stop != null && (d > 0 ? p.stop < p.entry : p.stop > p.entry))
+      addStop(p.entry + d * fees, `Breakeven (+ fees) at +${r.toFixed(1)}R: the trade can no longer lose.`, ctx.rules && ctx.rules.beAt1R);
+    if (r != null && r >= 2) addStop(p.entry + d * risk0, `Lock in +1R now that you're at +${r.toFixed(1)}R.`);
+    const broke = es && es.last && es.last.time * 1000 > (p.opened || 0) && es.last.dir === (d > 0 ? 'down' : 'up');
+    const sw = es && (d > 0 ? es.swingLow : es.swingHigh);
+    if (sw && sw.time * 1000 > (p.opened || 0)) addStop(sw.price - d * 0.1 * a1, `Trail behind the new ${tfName(p.tf)} swing ${d > 0 ? 'low' : 'high'} ${fmtPx(sw.price)} (formed after entry).`);
+    if (broke && sw) addStop(sw.price - d * 0.1 * a1, `${tfName(p.tf)} structure broke against you; tighten to the last swing instead of waiting for the full stop.`);
+    // Take profit
+    const tgt = p.tp1 != null ? p.tp1 : p.tp2;
+    const opp = d > 0 ? 'H' : 'L';
+    const pool = (ctx.levels || []).filter(l => l.kind !== 'vwap').map(l => ({ name: l.name, price: l.price }));
+    for (const iv of ['60', '240']) for (const w of (((ctx.struct || {})[iv] || {}).swings || []).slice(-12)) if (w.type === opp) pool.push({ name: tfName(iv) + ' swing ' + (opp === 'H' ? 'high' : 'low'), price: w.price });
+    for (const tf of Object.keys(ctx.fvg || {})) for (const g of (ctx.fvg[tf] || [])) if (g.dir === (d > 0 ? 'bear' : 'bull')) pool.push({ name: tfName(tf) + ' opposing FVG', price: d > 0 ? g.bottom : g.top });
+    const ahead = pool.filter(l => d * (l.price - px) > 0.25 * a1).sort((x, y) => d * (x.price - y.price));
+    const first = ahead[0];
+    if (tgt == null && ahead.length) {
+      const t = ahead.find(l => rAt(l.price) >= 1.5) || ahead[ahead.length - 1];
+      out.push({ type: 'tp', price: t.price, r: rAt(t.price), why: `No target logged. Nearest liquidity at 1.5R+ from entry: ${t.name}.` });
+    }
+    if (tgt != null && first && d * (tgt - first.price) > 0.25 * a1)
+      out.push({ type: 'partial', price: first.price, r: rAt(first.price), why: `${first.name} sits before your target ${fmtPx(tgt)}: price often stalls at liquidity. A partial there banks part of the move; the rest still runs to your target.` });
+    if (tgt != null && d * (px - tgt) >= 0) {
+      const nxt = ahead.find(l => d * (l.price - tgt) > 0.5 * a1);
+      if (nxt) out.push({ type: 'tp', price: nxt.price, r: rAt(nxt.price), why: `Target ${fmtPx(tgt)} reached. If you keep a runner: next liquidity ${nxt.name}, only with the stop at +1R or better.` });
+    }
+    if (tgt != null && ahead.length && rAt(tgt) != null && rAt(tgt) < 1) out.push({ type: 'tp', price: (ahead.find(l => rAt(l.price) >= 1.5) || ahead[ahead.length - 1]).price, r: rAt((ahead.find(l => rAt(l.price) >= 1.5) || ahead[ahead.length - 1]).price), why: `Your target is under 1R from entry; after fees that pays little for the risk. Nearest 1.5R+ liquidity shown.` });
+    // De-duplicate stops: keep the best (most protective that still clears noise) first.
+    const stops = out.filter(x => x.type === 'stop').sort((x, y) => d * (y.price - x.price));
+    const seen = new Set(), rest = out.filter(x => x.type !== 'stop');
+    return stops.filter(x => { const k = Math.round(x.price / step); if (seen.has(k)) return false; seen.add(k); return true; }).concat(rest);
+  }
+
+  /* Alert grade (Nov 1 2026): the strictest replay version (V4) — sweeps >= 0.25 ATR past the level with sweep-candle volume
+     >= 1.5x normal, no 15m setups, fees <= 0.2R of the risk. Replay result was still slightly negative (held-out -0.01R, PF 0.97),
+     so passing it means "least bad so far", not "profitable". Same rule as monitor/backtest.js VARIANTS.V4. */
+  function alertGrade(e) {
+    const feeR = 2 * FEES.commission * e.entry / Math.abs(e.entry - e.stop);
+    const why = [];
+    if (String(e.tf) === '15') why.push('15m setups lost money in replay');
+    if (e.kind === 'sweep' && !(e.pen >= 0.25)) why.push('sweep shallower than 0.25 ATR');
+    if (e.kind === 'sweep' && !(e.rvol != null && e.rvol >= 1.5)) why.push('sweep candle volume under 1.5x');
+    if (!(feeR <= 0.2)) why.push(`fees ${feeR.toFixed(2)}R of the risk`);
+    return { ok: !why.length, why, feeR };
+  }
+
+  /* Paper trading (owner's request, Nov 1 2026): try setups with no money, same rules as the replay test, to build a record.
+     Opened at the live price when he taps (a market fill). Closed automatically at the stop or target: bars after the open are
+     checked first (a bar touching both counts as the STOP), then the live price. Result in R after 0.04%/side fees and swap. */
+  function paperOpen(idea, px, nowMs, meta) {
+    const d = idea.dir === 'short' ? -1 : 1;
+    if (!(px > 0) || idea.stop == null || d * (px - idea.stop) <= 0) return null;          // already past the stop: no trade
+    return { id: 'pp' + nowMs.toString(36) + Math.floor(Math.random() * 1e4).toString(36), sym: idea.sym, side: d > 0 ? 'long' : 'short', kind: idea.kind || 'manual',
+      tf: String(idea.tf || ''), entry: px, plannedEntry: idea.entry, stop: idea.stop, stop0: idea.stop, target: idea.target != null ? idea.target : null,
+      opened: nowMs, status: 'open', mfe: 0, mae: 0, text: idea.text || '', meta: meta || {}, log: [{ t: nowMs, what: 'opened at ' + fmtPx(px) }] };
+  }
+  function paperR(t, exitPx, nowMs) {
+    const d = t.side === 'short' ? -1 : 1, risk = Math.abs(t.entry - t.stop0), days = Math.max(0, (nowMs - t.opened) / 86400e3);
+    return d * (exitPx - t.entry) / risk - 2 * FEES.commission * t.entry / risk - FEES.fundingPerDay * days * t.entry / risk;
+  }
+  function paperStep(t, bars, barSec, px, nowMs) {
+    if (!t || t.status !== 'open') return t;
+    const d = t.side === 'short' ? -1 : 1, risk = Math.abs(t.entry - t.stop0), out = Object.assign({}, t);
+    const close = (price, why, at) => Object.assign(out, { status: 'closed', exit: price, closed: at, why, R: paperR(t, price, at), log: t.log.concat([{ t: at, what: why + ' at ' + fmtPx(price) }]) });
+    const from = (t.checkedTo || t.opened) / 1000;
+    for (const b of (bars || [])) {
+      if (b.time < from || b.time + barSec > nowMs / 1000) continue;      // only whole bars that opened after the trade (or the last check)
+      out.mfe = Math.max(out.mfe, d * ((d > 0 ? b.high : b.low) - t.entry) / risk); out.mae = Math.max(out.mae, d * (t.entry - (d > 0 ? b.low : b.high)) / risk);
+      if (d > 0 ? b.low <= t.stop : b.high >= t.stop) return close(t.stop, 'stop', (b.time + barSec) * 1000);
+      if (t.target != null && (d > 0 ? b.high >= t.target : b.low <= t.target)) return close(t.target, 'target', (b.time + barSec) * 1000);
+      out.checkedTo = (b.time + barSec) * 1000;
+    }
+    if (px > 0) {
+      out.mfe = Math.max(out.mfe, d * (px - t.entry) / risk); out.mae = Math.max(out.mae, -d * (px - t.entry) / risk);
+      if (d * (px - t.stop) <= 0) return close(t.stop, 'stop', nowMs);
+      if (t.target != null && d * (px - t.target) >= 0) return close(t.target, 'target', nowMs);
+      out.openR = paperR(t, px, nowMs);
+    }
+    return out;
+  }
+  /* Simulated prop account for paper trades (owner's request, Nov 1 2026). Paper trades become ordinary positions on a
+     paper account, so balance, equity, daily/max floors, target, breach and pass come from the SAME accountState() the Desk uses.
+     Sized at open with the same sizeFor() and the account's next-trade risk. Paper only: nothing here touches a real account. */
+  function paperPositions(trades, acctId) {
+    return (trades || []).filter(t => t.acct === acctId && t.qty > 0).map(t => {
+      const p = { id: t.id, acct: acctId, sym: t.sym, side: t.side, qty: t.qty, entry: t.entry, stop: t.stop, origStop: t.stop0, tp1: t.target, opened: t.opened, partials: [] };
+      if (t.status === 'closed') p.closed = { t: t.closed, price: t.exit, realized: realizedFor(p, t.qty, t.exit, t.closed) };
+      return p;
+    });
+  }
+  function paperSize(acct, trades, idea, px, nowMs, prices) {
+    const pos = paperPositions(trades, acct.id), A = accountState(acct, pos, prices || {}, nowMs);
+    const w = weighIdea(Object.assign({}, idea, { entry: px }), A, pos.filter(p => !p.closed), nowMs, { leverage: acct.leverage });
+    if (A.breached) w.rules.unshift({ ok: false, t: 'paper account breached: start a new one' });
+    return { A, ok: w.ok && !A.breached && !!(w.size && w.size.qty > 0), rules: w.rules, size: w.size };
+  }
+
+  /* Record of closed paper trades, grouped (all / by setup kind / alert grade / with or without volume push). */
+  function paperStats(list) {
+    const closed = list.filter(t => t.status === 'closed' && t.R != null), g = {};
+    const add = (k, t) => (g[k] = g[k] || []).push(t);
+    for (const t of closed) { add('all', t); add(t.kind + (t.tf ? ' ' + tfName(t.tf) : ''), t); add(t.meta && t.meta.alertGrade ? 'alert grade' : 'below alert grade', t); }
+    const st = l => { const w = l.filter(t => t.R > 0); return { n: l.length, win: l.length ? w.length / l.length : null, avgR: l.reduce((a, t) => a + t.R, 0) / l.length, totalR: l.reduce((a, t) => a + t.R, 0) }; };
+    return Object.fromEntries(Object.entries(g).map(([k, l]) => [k, st(l)]));
   }
 
   /* Entry check: a setup is READY only when every rule passes. Returns each setup with its checklist.
@@ -805,20 +931,189 @@
      account allows a trade (risk known, room >= one profile trade, under max trades, under the loss stop);
      no open position the other way on this coin; not within 30 min before the daily reset.
      Untested idea, not a signal: no backtest yet. */
-  function entryCheck(sym, data, A, positions, nowMs, opt) {
+  /* Impulse legs + fib retracements (owner's request, Nov 1 2026). Measurable rule:
+     an up leg starts at a confirmed swing low and ends at the highest high reached before price trades back below that low;
+     it counts as an IMPULSE only if: size >= minAtr x ATR(14) (default 3), close-to-close efficiency >= minEff (0.5, i.e. mostly
+     one-way), it took <= maxBars (60), and it broke the last confirmed swing high before it started (displacement through structure).
+     Down legs mirror it. The end is "provisional" until it is a confirmed swing (price may still extend).
+     Fibs measured from the end back toward the start: 0.236 ... 0.786; 0.618-0.786 = OTE zone. Observation only, not a signal. */
+  const FIBS = [0.236, 0.382, 0.5, 0.618, 0.705, 0.786];
+  /* Relative volume: bar volume / median of the 20 bars before it. null when volume is missing (never guessed). */
+  function rvol(closed, i, n) {
+    n = n || 20;
+    if (!closed[i] || !(closed[i].volume > 0) || i < n) return null;
+    const v = closed.slice(i - n, i).map(x => x.volume).filter(x => x > 0).sort((a, b) => a - b);
+    if (v.length < n / 2) return null;
+    const med = v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2;
+    return med > 0 ? closed[i].volume / med : null;
+  }
+  /* Volume read on an impulse leg and its pullback (owner's request, Nov 1 2026). Rule, not a forecast:
+     continuation signs = leg on heavy volume (avg RVOL >= 1.3) AND pullback on light volume (avg RVOL <= 0.8) AND no climax bar against it;
+     reversal warning = pullback volume >= leg volume, OR a climax bar (RVOL >= 2) closing against the leg within the last 5 bars of the
+     leg or anywhere in the pullback; otherwise unclear. Kraken volume only (one venue). Untested. */
+  function volumeRead(closed, i0, iEnd, up) {
+    const avg = (a, b) => { const r = []; for (let i = a; i <= b; i++) { const x = rvol(closed, i); if (x != null) r.push(x); } return r.length ? r.reduce((s, x) => s + x, 0) / r.length : null; };
+    const leg = avg(i0 + 1, iEnd), pull = iEnd < closed.length - 1 ? avg(iEnd + 1, closed.length - 1) : null;
+    if (leg == null) return { read: 'unknown', leg: null, pull: null, climax: false };
+    let climax = false;
+    for (let i = Math.max(i0 + 1, iEnd - 4); i < closed.length; i++) { const x = rvol(closed, i), against = up ? closed[i].close < closed[i].open : closed[i].close > closed[i].open; if (x != null && x >= 2 && against) climax = true; }
+    const read = climax || (pull != null && pull >= leg) ? 'reversal_warning' : (leg >= 1.3 && pull != null && pull <= 0.8) ? 'continuation_signs' : 'unclear';
+    return { read, leg, pull, climax };
+  }
+  function impulseLegs(c, opt) {
     opt = opt || {};
-    const ups = setupsToWatch(sym, data, { minRR: opt.minRR || 2 });
+    const k = opt.k || 3, minAtr = opt.minAtr || 3, minEff = opt.minEff || 0.5, maxBars = opt.maxBars || 60;
+    const closed = c.slice(0, -1);
+    if (closed.length < 40) return [];
+    const a = atr(closed, 14); if (!a) return [];
+    const sw = swings(c, k), legs = [];
+    for (const s0 of sw) {
+      const up = s0.type === 'L', d = up ? 1 : -1;
+      let end = s0.i, broken = false;
+      for (let j = s0.i + 1; j < closed.length; j++) {
+        if (up ? closed[j].low < s0.price : closed[j].high > s0.price) { broken = true; break; }
+        if (up ? closed[j].high > closed[end].high : closed[j].low < closed[end].low) end = j;
+      }
+      if (broken || end === s0.i) continue;                       // traded back through the start: no live leg
+      const endPx = up ? closed[end].high : closed[end].low, size = Math.abs(endPx - s0.price), bars = end - s0.i;
+      if (size < minAtr * a || bars > maxBars) continue;
+      let path = 0; for (let j = s0.i + 1; j <= end; j++) path += Math.abs(closed[j].close - closed[j - 1].close);
+      const eff = path ? Math.abs(closed[end].close - closed[s0.i].close) / path : 0;
+      if (eff < minEff) continue;
+      const prior = sw.filter(x => x.type === (up ? 'H' : 'L') && x.i < s0.i).pop();
+      if (!prior || !(up ? endPx > prior.price : endPx < prior.price)) continue;   // must break structure
+      const after = closed.slice(end + 1), px = opt.price != null ? opt.price : closed[closed.length - 1].close;
+      const deepest = after.length ? (up ? Math.min(...after.map(x => x.low)) : Math.max(...after.map(x => x.high))) : endPx;
+      const fr = p => d * (endPx - p) / size;                      // 0 at the end, 1 at the start
+      const retraceNow = fr(px), retraceMax = fr(deepest);
+      const status = end >= closed.length - k ? 'extending' : retraceNow >= 0.618 && retraceNow <= 0.786 ? 'in_ote' : retraceNow > 0.786 ? 'deep' : retraceNow > 0 ? 'retracing' : 'at_high';
+      const vol = volumeRead(closed, s0.i, end, up);
+      legs.push({ vol, dir: up ? 'up' : 'down', start: { time: s0.time, price: s0.price }, end: { time: closed[end].time, price: endPx, provisional: end >= closed.length - k },
+        size, atrMult: size / a, eff, bars, broke: prior.price, retraceNow, retraceMax, status,
+        fibs: FIBS.map(r => ({ r, price: endPx - d * r * size })), ote: { top: endPx - d * 0.618 * size, bottom: endPx - d * 0.786 * size } });
+    }
+    // Latest leg per direction only (older legs are history).
+    const pick = dir => legs.filter(l => l.dir === dir).sort((x, y) => y.start.time - x.start.time)[0];
+    return [pick('up'), pick('down')].filter(Boolean).sort((x, y) => y.end.time - x.end.time);
+  }
+
+  /* Liquidity sweep setups (owner's request, Nov 1 2026). Measurable rule, no storytelling:
+     a CLOSED 15m/1h candle trades beyond a liquidity level that was already known before that candle
+     (prior day/week high-low, a finished session's high-low, a confirmed 1h/4h swing) by at least 0.05 x 1h ATR,
+     and closes back inside it. Long after a sweep of lows, short after a sweep of highs. Only the last 3 closed candles.
+     Reference entry = the sweep candle's close; stop = sweep extreme -/+ 0.1 x 1h ATR; target = nearest opposite
+     liquidity with >= minRR. Sweeps within 90 min after the Asia (20:00 NY), London (03:00 NY) or New York (09:30 NY)
+     open are tagged with that open. Untested idea, not a signal: no backtest yet. Needs data.c = {15: candles, 60: candles}. */
+  const OPENS = [{ name: 'Asia open', min: 20 * 60 }, { name: 'London open', min: 3 * 60 }, { name: 'New York open', min: 9 * 60 + 30 }];
+  function marketOpenTag(tsSec, tz) {
+    const m = tzParts(tsSec, tz || 'America/New_York').min;
+    const o = OPENS.find(o => { const d = (m - o.min + 1440) % 1440; return d < 90; });
+    return o ? o.name : null;
+  }
+  function liquidityPool(data, tz, poolTfs) {
+    const pool = [];
+    for (const l of (data.levels || [])) if (l.kind === 'day' || l.kind === 'week') pool.push({ id: l.id, name: l.name, price: l.price, side: /h$/.test(l.id) ? 'H' : 'L', knownAt: 0 });
+    const c15 = (data.c || {})[15];
+    if (c15 && c15.length) {
+      const sr = sessionRanges(c15, tz);
+      for (const sd of SESSIONS) {
+        const r = sr[sd.id] && !sr[sd.id].forming ? sr[sd.id] : sr[sd.id + '_prev'];
+        if (r) { pool.push({ id: sd.id + 'h', name: r.name + ' H', price: r.high, side: 'H', knownAt: r.to + 900 }); pool.push({ id: sd.id + 'l', name: r.name + ' L', price: r.low, side: 'L', knownAt: r.to + 900 }); }
+      }
+    }
+    for (const iv of (poolTfs || ['60', '240'])) { const ivs = +iv * 60;
+      for (const w of (((data.struct || {})[iv] || {}).swings || []).slice(-12)) pool.push({ id: 'sw' + iv + w.type + w.time, name: tfName(iv) + ' swing ' + (w.type === 'H' ? 'high' : 'low'), price: w.price, side: w.type, knownAt: w.confirmedAt + ivs }); }
+    return pool;
+  }
+  function sweepSetups(sym, data, nowMs, opt) {
+    opt = opt || {};
+    const out = [], a1 = (data.atr || {})[opt.atrKey || '60'], px = data.price;
+    if (!a1 || px == null || !data.c) return out;
+    const pool = liquidityPool(data, opt.tz, opt.poolTfs), minRR = opt.minRR || 2, seen = new Set(), minPen = opt.minPen || 0.05;
+    for (const tf of (opt.tfs || ['15', '60'])) {
+      const c = (data.c[tf] || []), sec = +tf * 60;
+      const closed = c.filter(x => x.time + sec <= nowMs / 1000);
+      for (const k of closed.slice(-3)) {
+        for (const L of pool) {
+          if (!(L.knownAt <= k.time)) continue;                      // level must exist before the sweep candle
+          const long = L.side === 'L', beyond = long ? L.price - k.low : k.high - L.price;
+          const back = long ? k.close > L.price : k.close < L.price;
+          if (!(beyond >= minPen * a1) || !back) continue;
+          const dir = long ? 'long' : 'short', key = [sym, tf, dir, 'sweep', L.id, k.time].join('|');
+          if (seen.has(dir + L.id)) continue; seen.add(dir + L.id);
+          const entry = k.close, stop = long ? k.low - 0.1 * a1 : k.high + 0.1 * a1, risk = Math.abs(entry - stop);
+          const cands = pool.filter(q => q.side === (long ? 'H' : 'L') && (long ? q.price >= entry + risk * minRR : q.price <= entry - risk * minRR))
+            .sort((x, y) => Math.abs(x.price - entry) - Math.abs(y.price - entry));
+          const tgt = cands[0], rr = tgt ? Math.abs(tgt.price - entry) / risk : 0;
+          const open = marketOpenTag(k.time, opt.tz), want = long ? 'bull' : 'bear', s4 = (data.struct || {})['240'];
+          const rv = rvol(c, c.indexOf(k));
+          const rules = [], Rl = (ok, t) => rules.push({ ok: !!ok, t });
+          Rl(true, `${tfName(tf)} swept ${L.name} ${fmtPx(L.price)} and closed back`);
+          Rl(tgt, tgt ? `${rr.toFixed(1)}R to ${tgt.name} ${fmtPx(tgt.price)}` : `no ${minRR}R target in reach`);
+          Rl(long ? px > L.price : px < L.price, 'price still back inside the level now');
+          Rl(long ? px > stop : px < stop, 'stop not hit yet');
+          out.push({ sym, tf, dir, kind: 'sweep', rvol: rv, pen: beyond / a1, level: L, entry, stop, target: tgt ? tgt.price : null, rr, sweepTime: k.time, sweepExtreme: long ? k.low : k.high, open,
+            trend4h: s4 ? s4.bias : null, withTrend: !!(s4 && s4.bias === want),
+            text: `${tfName(tf)} sweep of ${L.name} ${fmtPx(L.price)}${open ? ' at the ' + open : ''} (4h ${s4 ? s4.bias : '?'}${s4 && s4.bias !== want ? ', counter-trend' : ''}${rv != null ? `, sweep candle volume ${rv.toFixed(1)}× normal` : ''}). Ref entry ${fmtPx(entry)}, stop ${fmtPx(stop)}${tgt ? `, target ${tgt.name} ${fmtPx(tgt.price)} (${rr.toFixed(1)}R)` : ''}.`,
+            rules, ready: rules.every(r => r.ok), key });
+        }
+      }
+    }
+    return out;
+  }
+
+  /* Market scan (owner's rule, Nov 1 2026): runs all the time, long AND short, with no account, equity or open positions
+     involved. A setup is "ready" when every MARKET rule passes. Your account only comes in via weighIdea(), when you tick it. */
+  function scanSetups(sym, data, nowMs, opt) {
+    opt = opt || {};
     const s4 = data.struct['240'], s1 = data.struct['60'], s15 = data.struct['15'], a1 = data.atr['60'] || 0;
-    const out = [];
-    for (const u of ups) {
-      const want = u.dir === 'long' ? 'bull' : 'bear';
-      const rules = [];
-      const R = (ok, t) => rules.push({ ok: !!ok, t });
+    return setupsToWatch(sym, data, { minRR: opt.minRR || 2, both: opt.both !== false }).map(u => {
+      const want = u.dir === 'long' ? 'bull' : 'bear', rules = [], R = (ok, t) => rules.push({ ok: !!ok, t });
       R(s4 && s4.bias === want, '4h structure ' + (s4 ? s4.bias : '?'));
       R(s1 && s1.bias === want, '1h agrees with 4h');
       R(s15 && (s15.bias === want || (s15.last && s15.last.dir === (want === 'bull' ? 'up' : 'down'))), '15m agrees');
       R(u.rr >= (opt.minRR || 2), `${u.rr.toFixed(1)}R to next liquidity`);
       R(data.price != null && Math.abs(data.price - u.entry) <= Math.max(a1 * 0.25, data.price * 0.0005), 'price at the zone now');
+      return Object.assign({}, u, { kind: 'fvg', rules, ready: rules.every(r => r.ok), key: [sym, u.tf, u.dir, Math.round(u.entry)].join('|') });
+    }).concat(opt.both === false ? [] : sweepSetups(sym, data, nowMs, opt));
+  }
+  /* Weigh one ticked idea against an account: account rules + size from the existing tested sizing. Never changes the idea. */
+  function weighIdea(idea, A, positions, nowMs, opt) {
+    opt = opt || {};
+    const sym = idea.sym, rules = [], R = (ok, t) => rules.push({ ok: !!ok, t });
+    R(A && A.riskKnown, 'all open positions have stops');
+    R(A && A.room >= A.profRisk, 'room for one ' + (A ? A.profile.name : '') + ' trade');
+    R(A && A.tradesToday < A.profile.maxTrades, 'under max trades today');
+    R(A && A.lossesToday < A.profile.stopAfterLosses, 'under the daily loss stop');
+    R(!(positions || []).some(p => !p.closed && p.sym === sym && p.side !== idea.dir && openQty(p) > 0), 'no open position the other way');
+    R(A && A.nextReset - nowMs > 30 * 60000, 'not in the 30 min before reset');
+    const ok = rules.every(r => r.ok);
+    const size = ok && A ? sizeFor({ sym, entry: idea.entry, stop: idea.stop, risk: A.nextRisk, equity: A.equity, usedMargin: A.usedMargin, symNotional: A.openBySym[sym] || 0, leverage: opt.leverage }) : null;
+    return { rules, ok, size };
+  }
+  /* Cross-check (owner's rule, Nov 1 2026): a setup counts as real only if a second venue's candles show the same gap:
+     same direction, same timeframe, zones overlapping. other = { tf: [fvg,...] } from another venue; missing = unverified. */
+  function confirmElsewhere(setup, other) {
+    if (setup.kind === 'sweep') {   // same candle on the other venue also went past the level (within 0.15%) and closed back
+      const k = other && other.c && (other.c[String(setup.tf)] || []).find(x => x.time === setup.sweepTime);
+      if (!k) return { status: 'unverified' };
+      const L = setup.level.price, tol = L * 0.0015, long = setup.dir === 'long';
+      const ok = long ? k.low < L + tol && k.close > L - tol : k.high > L - tol && k.close < L + tol;
+      return { status: ok ? 'confirmed' : 'not_seen' };
+    }
+    const list = other && other[String(setup.tf)];
+    if (!list) return { status: 'unverified' };
+    const want = setup.dir === 'long' ? 'bull' : 'bear', z = setup.zone || {};
+    const hit = list.find(g => g.dir === want && z.top != null && g.bottom <= z.top && g.top >= z.bottom);
+    return { status: hit ? 'confirmed' : 'not_seen' };
+  }
+  // Old combined check (4h direction only, market + account), kept for compatibility.
+  function entryCheck(sym, data, A, positions, nowMs, opt) {
+    opt = opt || {};
+    const out = [];
+    for (const m of scanSetups(sym, data, nowMs, Object.assign({}, opt, { both: false }))) {
+      const u = m, rules = m.rules.slice();
+      const R = (ok, t) => rules.push({ ok: !!ok, t });
       R(A && A.riskKnown, 'all open positions have stops');
       R(A && A.room >= A.profRisk, 'room for one ' + (A ? A.profile.name : '') + ' trade');
       R(A && A.tradesToday < A.profile.maxTrades, 'under max trades today');
@@ -827,7 +1122,7 @@
       R(A && A.nextReset - nowMs > 30 * 60000, 'not in the 30 min before reset');
       const ready = rules.every(r => r.ok);
       const size = ready && A ? sizeFor({ sym, entry: u.entry, stop: u.stop, risk: A.nextRisk, equity: A.equity, usedMargin: A.usedMargin, symNotional: A.openBySym[sym] || 0, leverage: opt.leverage }) : null;
-      out.push(Object.assign({}, u, { rules, ready, size, key: [sym, u.tf, u.dir, Math.round(u.entry)].join('|') }));
+      out.push(Object.assign({}, u, { rules, ready, size }));
     }
     return out;
   }
@@ -867,7 +1162,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { parseResetUtc, heikinAshi, ema, entryCheck, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
