@@ -87,7 +87,7 @@ function evaluate(watch, market, prev, now, opt) {
   }
   const watchAgeH = watch.updated ? (now - watch.updated) / 3600e3 : null;
   for (const a of (watch.accounts || []).filter(a => a.phase === 'eval' || a.phase === 'funded')) {
-    const R = C.accountReview(a, positions, prices, now), A = R.state;
+    const R = C.accountReview(a, positions, prices, now, { orders: watch.orders || [] }), A = R.state;   // working limit orders count in risk and margin
     const name = a.label || 'Prop account';
     if (A.breached) fire(`${a.id}|breach`, 3, `⛔ ${name}: at the breach line`, `Equity ~${C.fmtUsd(A.equity)} vs floor ${C.fmtUsd(A.floor)}. Check your prop platform now.`, 5);
     else if (A.room < A.profRisk) fire(`${a.id}|room`, 2, `${name}: room below one trade`, `Room ${C.fmtUsd(A.room)} (${A.binding} limit). No new trades today.`, 4);

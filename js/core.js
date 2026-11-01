@@ -470,6 +470,16 @@
       // Loss from here if the stop fills exactly (it may not: stops are not guaranteed).
       riskToStops += Math.max(0, grossPnl(p, px) - grossPnl(p, p.stop)) + p.stop * q * f.commission;
     }
+    // Working limit orders (owner's rule, Nov 2 2026): not positions (no P&L, equity unchanged until they fill), but they reserve
+    // margin, and if one fills and hits its stop he loses size x (|limit - stop| + both commissions). That loss counts in open risk
+    // now, so room, next-trade size and the breach check already include it. An order without a stop = unlimited risk.
+    const orders = (opt.orders || []).filter(o => o.acct === a.id && o.status === 'placed' && o.qty > 0 && o.entry > 0);
+    let orderRisk = 0, orderMargin = 0;
+    for (const o of orders) {
+      const cap = levCap(o.sym, lev); if (cap) orderMargin += o.entry * o.qty / cap; else marginUnknown++;
+      orderRisk += o.stop != null && isFinite(o.stop) ? o.qty * (Math.abs(o.entry - o.stop) + (o.entry + o.stop) * f.commission) : Infinity;
+    }
+    usedMargin += orderMargin; riskToStops += orderRisk;
     // Kraken: equity = balance (fees already in it) + unrealized P&L.
     const equity = balance + upnl;
     const dailyFloor = dayStart * (1 - pl.mdl);
@@ -506,7 +516,8 @@
     if (noStop) warnings.push({ lvl: 'bad', text: `${noStop} open position(s) with no stop logged: risk is unlimited, next trade size set to $0.` });
     if (slUnknown) warnings.push({ lvl: 'warn', text: `${slUnknown} position(s) have a stop on your platform but the app doesn't know its price yet: total risk can't be added up. Import each position's TP/SL screenshot.` });
     if (missingPx) warnings.push({ lvl: 'bad', text: `No live price for ${missingPx} position(s). Valued at the stop (worst planned case) until the feed is back.` });
-    if (!breached && open.length && equityIfStopped <= floor)
+    if (orders.length) warnings.push({ lvl: orders.some(o => o.stop == null) ? 'bad' : 'ok', text: `${orders.length} working order(s) count now: ${isFinite(orderRisk) ? fmtUsd(orderRisk) + ' at risk if filled and stopped' : 'one has no stop (unlimited risk)'}, ${fmtUsd(orderMargin)} margin reserved.` });
+    if (!breached && (open.length || orders.length) && equityIfStopped <= floor)
       warnings.push({ lvl: 'bad', text: isFinite(riskToStops) ? 'If every stop fills, the account breaches. Stops sit past the breach line.' : 'Risk is unlimited until every position has a stop.' });
     if (isFinite(riskToStops) && riskToStops > maxOpen + 0.01)
       warnings.push({ lvl: 'warn', text: `Open risk ${fmtUsd(riskToStops)} is over your ${prof.name} max of ${fmtUsd(maxOpen)}.` });
@@ -518,12 +529,12 @@
     if (reachedTarget)
       warnings.push({ lvl: 'warn', text: 'Equity is at the profit target. Check your platform (Kraken Prop auto-closes and marks the eval Passed here).' });
     return {
-      plan: pl, profile: prof, start, balance, dayStart, equity, upnl, feesOpen, open: open.length,
+      plan: pl, profile: prof, start, balance, dayStart, equity, upnl, feesOpen, open: open.length, workingOrders: orders.length, orderRisk, orderMargin,
       dailyFloor, maxFloor, floor, room, dailyRoom, maxRoom, roomPct: room / start,
       binding: dailyFloor >= maxFloor ? 'daily' : 'max',
       targetBal, toTarget: isFunded ? null : targetBal - equity,
       progress: isFunded ? null : (equity - start) / (targetBal - start), reachedTarget,
-      riskToStops, riskKnown: isFinite(riskToStops), equityIfStopped, stopsBreach: open.length > 0 && equityIfStopped <= floor,
+      riskToStops, riskKnown: isFinite(riskToStops), equityIfStopped, stopsBreach: (open.length > 0 || orders.length > 0) && equityIfStopped <= floor,
       priceComplete: missingPx === 0,
       profRisk, maxOpen, nextRisk, lossesToBreach: profRisk > 0 ? Math.floor(Math.max(0, room) / profRisk) : null,
       winsToPass: (!isFunded && profRisk > 0) ? (r => Math.max(0, Math.ceil((targetBal - equity) / (profRisk * r)))) : null,

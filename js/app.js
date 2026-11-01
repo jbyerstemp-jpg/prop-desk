@@ -443,7 +443,7 @@
     const pb = e.target.closest('[data-sapaper]'); if (pb) { const u = scanAll.rows[+pb.dataset.sapaper]; if (u) paperAdd(u); return; }
     const wb = e.target.closest('[data-saweigh]'); if (!wb) return; const u = scanAll.rows[+wb.dataset.saweigh]; if (!u) return;
     const now = Date.now(), P = prices();
-    const out = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) });
+    const out = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned }), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) });
       return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${esc(a.label || 'Account')}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${esc(a.label || 'Account')}: not now</b> (${esc(w.rules.filter(r => !r.ok).map(r => r.t).join(', ') || 'size 0')})`; });
     $(`[data-saout="${wb.dataset.saweigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>';
   });
@@ -533,7 +533,7 @@
   const sizeAcct = () => { const L = liveAccts(); return L.find(a => a.id === T().sizeAcct) || L[0] || null; };
   function fitOf(u, entry) {
     const a = sizeAcct(); if (!a) return null;
-    try { const now = Date.now(), A = C.accountState(a, S.positions, prices(), now), w = C.weighIdea(Object.assign({}, u, { entry: entry != null ? entry : u.entry }), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) });
+    try { const now = Date.now(), A = C.accountState(a, S.positions, prices(), now, { orders: S.planned }), w = C.weighIdea(Object.assign({}, u, { entry: entry != null ? entry : u.entry }), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) });
       const qty = w.size && w.size.qty > 0 ? w.size.qty : null;
       return { acct: a, ok: !!(w.ok && qty), qty, risk: w.size ? w.size.lossAtStop : null, room: A.room, why: w.rules.filter(r => !r.ok).map(r => r.t) }; } catch (e) { return null; }
   }
@@ -581,12 +581,12 @@
     const accts = liveAccts(); if (!accts.length) { alert('Add your prop account on the Desk first.'); return; }
     if (!fromPaper && !okToUse(u)) return;
     const now = Date.now(), P = prices();
-    const sizeIn = (a, entry, stop) => { const A = C.accountState(a, S.positions, P, now); return C.weighIdea(Object.assign({}, u, { entry }, stop != null && isFinite(stop) ? { stop } : {}), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }); };
+    const sizeIn = (a, entry, stop) => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned }); return C.weighIdea(Object.assign({}, u, { entry }, stop != null && isFinite(stop) ? { stop } : {}), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }); };
     const price = pnlPrice(u.sym), atr1 = (analyses[u.sym] && analyses[u.sym].atr[60]) || (analyze(u.sym).atr || {})[60];
     const op = C.orderPlan(u.entry, price, u.stop, u.dir, atr1);
     showModal(`<h3>Take it live: ${esc(u.sym)} ${u.dir.toUpperCase()}</h3>
       <p class=small>${fromPaper ? `From your open paper trade (opened ${fmtTime(fromPaper.opened, true)} at ${px(fromPaper.entry)}). The paper trade keeps running for reference, but once this is live only the live trade counts on the Scorecard.<br>` : ''}${esc(u.text)}</p>
-      <div class=form><label style="grid-column:1/-1">Which account<select id=tlA>${accts.map(a => { const A = C.accountState(a, S.positions, P, now); return `<option value="${a.id}" ${sizeAcct() && sizeAcct().id === a.id ? 'selected' : ''}>${esc(acctName(a.id))} · ${esc(a.phase)} · room ${usd(A.room)}</option>`; }).join('')}</select></label>
+      <div class=form><label style="grid-column:1/-1">Which account<select id=tlA>${accts.map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned }); return `<option value="${a.id}" ${sizeAcct() && sizeAcct().id === a.id ? 'selected' : ''}>${esc(acctName(a.id))} · ${esc(a.phase)} · room ${usd(A.room)}</option>`; }).join('')}</select></label>
         <label>Order<select id=tlType><option value=market ${op && op.type === 'market' ? 'selected' : ''}>Market</option><option value=limit ${!op || op.type !== 'market' ? 'selected' : ''}>Limit</option></select></label>
         <label>Entry<input id=tlE type=number step=any value="${pxIn((op && op.entry) || u.entry)}"></label>
         <div class=small style="grid-column:1/-1">${op ? `<b class="${op.type === 'none' ? 'dn' : 'up'}">${op.type === 'none' ? 'No trade' : op.type === 'market' ? 'Market' : 'Limit'}</b>: ${esc(op.why)}.` : ''} Level ${px(u.entry)}${price != null ? ' · price now ' + px(price) : ''}.</div>
@@ -603,7 +603,7 @@
     const upd = fill => { const a = acctById($('#tlA').value), w = sizeIn(a, num($('#tlE').value) || u.entry, num($('#tlS').value)); const z = w.size;
       if (fill && z && z.qty > 0) $('#tlQ').value = z.qty;
       const rrNow = C.rrOf(u.dir, num($('#tlE').value), num($('#tlS').value), num($('#tlT').value));
-      const Ast = C.accountState(a, S.positions, P, now), stN = num($('#tlS').value);
+      const Ast = C.accountState(a, S.positions, P, now, { orders: S.planned }), stN = num($('#tlS').value);
       const sizeLine = z && z.qty > 0 ? `Sized for <b>${esc(acctName(a.id))}</b>: ${esc(C.profileById(a.profile).name)} pace risks <b>${usd(z.lossAtStop)}</b> at the stop (room left ${usd(Ast.room)}, open risk ${usd(Ast.riskToStops)}). ` : '';
       $('#tlOut').innerHTML = sizeLine + (rrNow != null ? `Reward:risk <b class="${rrNow >= 2 ? 'up' : rrNow >= 1 ? '' : 'dn'}">${rrNow.toFixed(2)}R</b> from this entry, stop and target, after fees. ` : '<span class=warn>Reward:risk unknown: needs a target on the right side.</span> ') + (z && z.qty > 0 ? `Your ${esc(C.profileById(a.profile).name)} pace: <b>${z.qty} ${esc(C.base(u.sym))}</b>, about ${usd(z.lossAtStop)} at the stop${z.levUnknown ? ' · <span class=warn>leverage unknown</span>' : ''}.` : '<b class=warn>Your account says size 0 right now.</b>')
         + (w.rules.some(r => !r.ok) ? `<div class=warn>Not passing: ${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ')}</div>` : '<div class=up>Every account rule passes.</div>'); };
@@ -656,7 +656,7 @@
         ${priceBoxes([[lim ? 'Limit' : 'Entry ~', cpVal(pl.entry)], ['Stop', cpVal(pl.stop)], ['Target', cpVal(pl.tp1)], ['Size', String(pl.qty), String(+(+pl.qty).toPrecision(4))]])}
         <div class=small>${state}</div>
         <div class=sc-a>${btns}</div>${pl.thesis ? `<details class=sc-w ${fold('plan:' + pl.id)}><summary>Plan</summary><div>${esc(pl.thesis)}</div></details>` : ''}</div>`; }).join('')}
-      <p class="small mu">None of these count on the Desk. A working limit turns into an open position by itself when price reaches it (checked against the candles since you placed it, even after the app was closed). Importing a screenshot that shows the position does it too.</p></div>`;
+      <p class="small mu">Planned only: counts nothing. Working (placed): counts in your risk and margin like Kraken reserves it, but not in equity or P&amp;L until it fills. A working limit turns into an open position by itself when price reaches it (checked against the candles since you placed it, even after the app was closed). Importing a screenshot that shows the position does it too.</p></div>`;
   }
   // Working limits: fill when price reaches the limit (owner's rule, Nov 1 2026). Runs every 15 s and when the app opens.
   function plannedTick() {
@@ -675,8 +675,8 @@
   setInterval(() => { try { plannedTick(); } catch (e) { console.warn(e); } }, 15000); setTimeout(() => { try { plannedTick(); } catch (e) { } }, 8000);
   document.addEventListener('click', e => {
     const g = e.target.closest('[data-golive]'); if (g) { const pl = S.planned.find(x => x.id === g.dataset.golive); if (pl) goLive(pl); return; }
-    const pd = e.target.closest('[data-placed]'); if (pd) { const pl = S.planned.find(x => x.id === pd.dataset.placed); if (pl) { pl.status = 'placed'; pl.placedAt = Date.now(); save(); renderAll(true); } return; }
-    const d = e.target.closest('[data-dropplan]'); if (d && confirm('Remove this ' + ((S.planned.find(x => x.id === d.dataset.dropplan) || {}).status === 'placed' ? 'working order (cancel it on your platform too)' : 'plan') + '? The setup stays marked as used.')) { S.planned = S.planned.filter(x => x.id !== d.dataset.dropplan); save(); renderAll(true); }
+    const pd = e.target.closest('[data-placed]'); if (pd) { const pl = S.planned.find(x => x.id === pd.dataset.placed); if (pl) { pl.status = 'placed'; pl.placedAt = Date.now(); saveAndSync('order placed'); renderAll(true); } return; }
+    const d = e.target.closest('[data-dropplan]'); if (d && confirm('Remove this ' + ((S.planned.find(x => x.id === d.dataset.dropplan) || {}).status === 'placed' ? 'working order (cancel it on your platform too)' : 'plan') + '? The setup stays marked as used.')) { S.planned = S.planned.filter(x => x.id !== d.dataset.dropplan); saveAndSync('order removed'); renderAll(true); }
   });
 
   // ---------- Scorecard: the model learns from closed trades (owner's choice, Nov 1 2026) ----------
@@ -850,7 +850,7 @@
   $('#setupBox').addEventListener('click', e => { const pb = e.target.closest('[data-paper]'); if (pb) { const u = lastUps[+pb.dataset.paper]; if (u) paperAdd(u); return; }
     const b = e.target.closest('[data-weigh]'); if (!b) return; const u = lastUps[+b.dataset.weigh]; if (!u) return;
     const now = Date.now(), P = prices(), accts = liveAccts();
-    const out = accts.map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }), name = esc(a.label || C.planOf(a).name);
+    const out = accts.map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned }), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }), name = esc(a.label || C.planOf(a).name);
       return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${name}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${name}: not now</b> (${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ') || 'size 0'})`; });
     $(`[data-weighout="${b.dataset.weigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>'; });
   $('#setupBox').addEventListener('click', e => { const b = e.target.closest('[data-plan]'); if (!b) return; posDraft = JSON.parse(b.dataset.plan); $('#manualBox').open = true; switchTab('pos'); });
@@ -859,7 +859,7 @@
   // ---------- Desk ----------
   function renderDesk() {
     const now = Date.now(), P = prices();
-    const D = C.deskTotals(S.accounts, S.positions, P, now);
+    const D = C.deskTotals(S.accounts, S.positions, P, now, { orders: S.planned });
     const budgetMsg = T().budget ? ` of ${usd(T().budget)}/mo budget` : '';
     const monthCost = S.accounts.filter(a => new Date(a.created).getMonth() === new Date().getMonth() && new Date(a.created).getFullYear() === new Date().getFullYear())
       .reduce((s, a) => s + D.states[a.id].cost, 0);
@@ -899,7 +899,7 @@
       ${a.phase === 'eval' ? `<div class=small>Target progress</div><div class=bar><i style="width:${Math.max(0, Math.min(1, s.progress)) * 100}%"></i></div>` : ''}
       <div style="margin-top:8px"><div class=small>Risk profile (per trade, % of start)</div><div class=profiles>${prof}</div>
       <p class=small>${esc(s.profile.note)} Per trade <b>${usd(s.profRisk)}</b> · next trade may risk <b>${usd(s.nextRisk)}</b> · about <b>${s.lossesToBreach}</b> losses of room${wins ? ` · wins to pass: ${wins}` : ''} · max ${s.profile.maxTrades} trades/day, stop after ${s.profile.stopAfterLosses} losses.</p></div>
-      ${(w => w.length ? `<p class=small>Planned / working orders (not counted): ${w.map(pl => `${esc(pl.sym)} ${pl.side} ${pl.orderType !== 'market' ? 'limit @ ' + px(pl.entry) + (pl.status === 'placed' ? ' working' : ' not placed') : 'market, not placed'}`).join(' · ')}</p>` : '')(S.planned.filter(pl => pl.acct === a.id))}
+      ${(w => w.length ? `<p class=small>Orders: ${w.map(pl => `${esc(pl.sym)} ${pl.side} ${pl.orderType !== 'market' ? 'limit @ ' + px(pl.entry) : 'market'} ${pl.status === 'placed' ? '<b>working</b> (counts in risk and margin, not equity)' : 'planned only (counts nothing)'}`).join(' · ')}</p>` : '')(S.planned.filter(pl => pl.acct === a.id))}
       ${(m => m.length ? `<div class=warns>${m.map(x => `<div class=warn>Missing: ${esc(x.text)}. Import it in Positions → 📷 Import screenshots.</div>`).join('')}</div>` : '')(C.missingInfo(a, [T().sym]).filter(x => !S.positions.some(p => p.acct === a.id && !p.closed && p.sym === x.sym)))}
       ${s.warnings.length ? `<div class=warns>${s.warnings.map(w => `<div class="${w.lvl}">${esc(w.text)}</div>`).join('')}</div>` : ''}` : `<p class=small>Final balance ${usd(s.balance)}.</p>`}
       <p class="small mu">Cost ${usd(s.cost)} · payouts ${usd(s.paid)} · net ${usd(s.net)} ·
@@ -913,7 +913,7 @@
     const a = acctById(b.dataset.id);
     if (b.dataset.act === 'edit') acctForm(a);
     if (b.dataset.act === 'resetday') {
-      const st = C.accountState(a, S.positions, prices(), Date.now());
+      const st = C.accountState(a, S.positions, prices(), Date.now(), { orders: S.planned });
       showModal(`<h3>Reset my day</h3><p class=small>Clears the app's count of today's trades (${st.tradesToday}) and losses (${st.lossesToday}) so its warnings stop blocking you. <b>Your platform's real loss limits don't change</b>; the app keeps enforcing them.</p>
         <p class=small><b class=dn>This counts as a rule break</b> unless you check the box.</p>
         <div class=form><label class=chk><input type=checkbox id=rkAcc> Accidental trade or technical reason (not a rule break)</label>
@@ -1014,7 +1014,7 @@
       <div id=pfSize class=small style="margin:8px 0"></div>
       <div class=row><button class=btn id=pfCalc>Size it to my profile</button><button class="btn pri" id=pfSave>Log position</button></div>`;
     const calc = fill => {
-      const a = acctById($('#pfA').value), s = C.accountState(a, S.positions, prices(), Date.now());
+      const a = acctById($('#pfA').value), s = C.accountState(a, S.positions, prices(), Date.now(), { orders: S.planned });
       const entry = num($('#pfE').value) || pnlPrice($('#pfS').value), stop = num($('#pfStop').value);
       if (!entry || stop == null) { $('#pfSize').innerHTML = '<span class=warn>Need entry and stop to size.</span>'; return; }
       const side = $('#pfSide').value;
@@ -1247,7 +1247,7 @@
     if (!acct) { alert('Pick an account.'); return; }
     // Snapshot sync: the platform's numbers are the truth as of NOW (balance = equity - open P&L doesn't move with price).
     const t = now;
-    const before = C.accountState(acct, S.positions, prices(), now);
+    const before = C.accountState(acct, S.positions, prices(), now, { orders: S.planned });
     if (r.balance != null) acct.anchor = { t, bal: r.balance };
     if (A.dailyLimit != null) acct.dayStartOverride = { reset: C.lastReset(t, acct.resetMin), bal: A.dailyLimit / (1 - C.planOf(acct).mdl) };
     if (A.drawdownLimit > 0) acct.ddLimit = A.drawdownLimit;
@@ -1340,7 +1340,7 @@
   function coachCtx(p) {
     const A = analyses[p.sym] || (analyses[p.sym] = analyze(p.sym));
     const a = acctById(p.acct);
-    const st = a ? C.accountState(a, S.positions, prices(), Date.now()) : null;
+    const st = a ? C.accountState(a, S.positions, prices(), Date.now(), { orders: S.planned }) : null;
     const ec = F.candles(p.sym, p.tf);
     return { price: A.price, ageSec: A.ageSec, maxAge: T().maxAge, struct: A.struct, fvg: { 15: A.fvg[15], 60: A.fvg[60] }, levels: A.levels,
       atr: A.atr, acct: st, rules: { beAt1R: T().beAt1R }, entryStruct: ec.length > 10 ? C.structure(ec) : null, now: Date.now() };
@@ -1365,7 +1365,7 @@
       const now = Date.now(), G = C.alertGate(prev, now), fire = G.fire;
       const P = prices();
       for (const a of liveAccts()) {
-        const A = C.accountState(a, S.positions, P, now), name = a.label || C.planOf(a).name;
+        const A = C.accountState(a, S.positions, P, now, { orders: S.planned }), name = a.label || C.planOf(a).name;
         if (A.breached) fire(a.id + '|breach', 3, `${name}: at the breach line`, `Equity ~${usd(A.equity)} vs floor ${usd(A.floor)}. Check your platform now.`, 5);
         else if (A.room < A.profRisk) fire(a.id + '|room', 2, `${name}: room below one trade`, `Room ${usd(A.room)}. No new trades today.`, 4);
         if (!A.riskKnown && A.open) fire(a.id + '|nostop', 2, `${name}: a position has no stop`, 'Risk is unlimited until it has one.', 4);
@@ -1407,7 +1407,7 @@
   function renderCoach() {
     const open = S.positions.filter(p => !p.closed);
     const P = prices(), now = Date.now();
-    const acctHtml = liveAccts().map(a => { const s = C.accountState(a, S.positions, P, now);
+    const acctHtml = liveAccts().map(a => { const s = C.accountState(a, S.positions, P, now, { orders: S.planned });
       return `<div class=small><b>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</b>: room ${usd(s.room)} (${s.binding}), open risk ${s.riskKnown ? usd(s.riskToStops) : 'UNLIMITED (no stop)'}, ${s.profile.name} next ${usd(s.nextRisk)}. ${s.warnings.map(w => `<span class="${w.lvl === 'bad' ? 'dn' : 'warn'}">${esc(w.text)}</span>`).join(' ')}</div>`; }).join('');
     const cards = open.map(p => {
       const h = lastHealth[p.id] || coachFor(p);
@@ -1424,7 +1424,7 @@
     const ups = C.scanSetups(sym, A, now);
     coachUps = C.sortLive(ups, liveOf, fitsNow).slice(0, 5);
     const reviews = liveAccts().map(a => {
-      const R = C.accountReview(a, S.positions, P, now), st = R.state;
+      const R = C.accountReview(a, S.positions, P, now, { orders: S.planned }), st = R.state;
       const syms = [...new Set(S.positions.filter(p => p.acct === a.id && !p.closed && p.stop == null && p.krakenSL).map(p => p.sym + '|' + p.side))];
       return `<div class=card><h3>Account review: ${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))} <span class="tag">${esc(pnlQuote(T().sym).basis)}</span></h3>
         <div class=kv><div><span>Equity</span><b>${usd(st.equity)}</b></div><div><span>Room (${st.binding} limit)</span><b class="${st.room < st.profRisk * 2 ? 'dn' : ''}">${usd(st.room)}</b></div>
@@ -1469,7 +1469,7 @@
     const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
     const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
       stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [] }));
-    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice(), benched: benchedKeys() }, calib: S.calib.slice(-10), accounts: accts, positions: pos };
+    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice(), benched: benchedKeys() }, calib: S.calib.slice(-10), accounts: accts, positions: pos, orders: S.planned.filter(x => x.status === 'placed').map(x => ({ acct: x.acct, sym: x.sym, side: x.side, qty: x.qty, entry: x.entry, stop: x.stop, tp1: x.tp1, status: 'placed', placedAt: x.placedAt })) };
   }
   // Auto-send: GitHub fine-grained token (this repo only, Contents read/write), kept in its own key so backups never include it.
   const GH_KEY = 'kpd_gh';
@@ -1523,7 +1523,7 @@
   $('#copyClaude').onclick = async () => {
     const now = Date.now(), P = prices();
     const lines = [`MODE: REVIEW · as of ${new Date(now).toISOString()} · data: ${F.source}${F.demo ? ' (DEMO, not real)' : ''} · P&L price basis: ${pnlQuote(T().sym).basis}`];
-    for (const a of liveAccts()) { const s = C.accountState(a, S.positions, P, now);
+    for (const a of liveAccts()) { const s = C.accountState(a, S.positions, P, now, { orders: S.planned });
       lines.push(`ACCOUNT ${a.label || C.planOf(a).name + ' ' + a.size} (${a.phase}): start ${a.size}, balance ${s.balance.toFixed(2)}, equity ${s.equity.toFixed(2)}, daily floor ${s.dailyFloor.toFixed(2)}, max floor ${s.maxFloor.toFixed(2)}, room ${s.room.toFixed(2)}, target ${s.targetBal.toFixed(2)}, profile ${s.profile.name} (${s.profile.riskPct}%/trade), open risk to stops ${s.riskKnown ? s.riskToStops.toFixed(2) : 'UNLIMITED (position without stop)'}.`); }
     for (const p of S.positions.filter(p => !p.closed)) { const h = lastHealth[p.id] || coachFor(p), A = analyses[p.sym] || analyze(p.sym);
       lines.push(`POSITION ${p.sym} ${p.side} qty ${C.openQty(p)} entry ${p.entry} stop ${p.stop} (orig ${p.origStop}) tp1 ${p.tp1} tp2 ${p.tp2} tf ${C.tfName(p.tf)} setup ${p.setup}; price ${A.price} (${Math.round(A.ageSec || 0)}s old); health ${h.score}/5; thesis: ${p.thesis || 'none written'}`);
