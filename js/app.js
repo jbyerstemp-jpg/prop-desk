@@ -134,6 +134,20 @@
     renderAll(true);
   });
 
+  // ---------- Updates reach every phone (owner's choice, Nov 1 2026) ----------
+  // Every 30 min and whenever the app comes back to the screen, compare the app's code on the server with the copy that
+  // loaded. If the model or app changed, show "new version ready"; tapping reloads. Never reloads by itself mid-trade.
+  const CODE_FILES = ['js/core.js', 'js/app.js', 'js/help.js'];
+  let codeSig = null;
+  async function codeSignature() { let sig = ''; for (const f of CODE_FILES) { const r = await fetch(f, { cache: 'no-store' }); if (!r.ok) return null; sig += C.fnv(await r.text()); } return sig; }
+  async function checkUpdate() {
+    if (F.demo) return;
+    try { const sig = await codeSignature(); if (!sig) return; if (codeSig == null) codeSig = sig; else if (sig !== codeSig) $('#updBar').hidden = false; } catch (e) { }
+  }
+  $('#updBar').onclick = () => location.reload();
+  checkUpdate(); setInterval(checkUpdate, 30 * 60e3);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkUpdate(); });
+
   // ---------- Help + questions (owner's choice, Nov 1 2026) ----------
   // Questions and comments go to the repo's GitHub Issues, prefilled; nothing is sent until the user submits it there.
   let FEEDBACK_HOME = 'https://github.com/jbyerstemp-jpg/prop-desk';
@@ -364,10 +378,10 @@
     $('#fvgBox').innerHTML = fv.length ? `<table><tr><th>TF</th><th>Side</th><th class=num>Zone</th><th>State</th></tr>${fv.slice(0, 8).map(g => `<tr><td>${C.tfName(g.iv)}</td><td class="${g.dir}">${g.dir}</td><td class=num>${px(g.bottom)}–${px(g.top)}</td><td class=small>${g.status}</td></tr>`).join('')}</table>
       <p class="small mu">FVG = 3-candle gap ≥0.15 ATR, closed candles only. Filled ones are dropped.</p>` : '<p class=mu>None open near price (or still loading).</p>';
     const ups = C.scanSetups(A.sym, A, Date.now());
-    $('#setupBox').innerHTML = ups.length ? ups.map((u, i) => `<div class=small style="margin:6px 0"><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> ${u.kind === 'sweep' ? '<span class=tag>sweep</span> ' : ''}${(g => g.ok ? '<span class="tag up">alert grade</span> ' : `<span class="tag mu" title="${esc(g.why.join('; '))}">below alert grade</span> `)(C.alertGrade(u))}${esc(u.text)}
+    $('#setupBox').innerHTML = ups.length ? ups.map((u, i) => `<div class=small style="margin:6px 0"><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> ${u.kind === 'sweep' ? '<span class=tag>sweep</span> ' : ''}${setupBadge(u.kind, u.tf)}${(g => g.ok ? '<span class="tag up">alert grade</span> ' : `<span class="tag mu" title="${esc(g.why.join('; '))}">below alert grade</span> `)(C.alertGrade(u))}${esc(u.text)}
       <div>${u.rules.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>
       <button class="btn sm" data-weigh="${i}">Weigh it</button> <button class="btn sm" data-paper="${i}">Paper trade</button> <span data-weighout="${i}"></span>
-      <button class="btn sm" data-plan='${esc(JSON.stringify({ sym: u.sym, side: u.dir, entry: +u.entry.toFixed(6), stop: +u.stop.toFixed(6), tp1: u.target != null ? +u.target.toFixed(6) : null, tf: u.tf, setup: u.kind === 'sweep' ? 'Sweep' : 'FVG' }))}'>Plan it</button></div>`).join('')
+      <button class="btn sm" data-plan='${esc(JSON.stringify({ sym: u.sym, side: u.dir, entry: +u.entry.toFixed(6), stop: +u.stop.toFixed(6), tp1: u.target != null ? +u.target.toFixed(6) : null, tf: u.tf, setup: u.kind === 'sweep' ? 'Liquidity sweep' : 'FVG', ref: { key: C.setupKey(u.kind, u.tf), model: C.MODEL } }))}'>Plan it</button></div>`).join('')
       + '<p class="small mu">Scanned both ways, all the time, without your account. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
       : `<p class=mu>Nothing clean: no open FVG either way within 2 ATR with 2R+ to the next swing, and no fresh liquidity sweep. No trade is a valid answer.</p>`;
     lastUps = ups;
@@ -452,7 +466,7 @@
       if (z.ok) { t.acct = pa.id; t.qty = z.size.qty; t.riskUsd = z.size.lossAtStop; }
       else if (!confirm('Your paper prop account says not now: ' + z.rules.filter(r => !r.ok).map(r => r.t).join(', ') + '.\n\nOpen it as an R-only paper trade (no $ P&L) anyway?')) return;
     }
-    t.setupKey = u.key; S.paper.push(t); savePaper('open ' + u.sym + ' ' + u.dir); switchTab('paper');
+    t.setupKey = u.key; t.model = C.MODEL; S.paper.push(t); savePaper('open ' + u.sym + ' ' + u.dir); switchTab('paper');
   }
   function paperTick() {
     let changed = false;
@@ -487,12 +501,57 @@
       ${past.length ? `<p class="small mu">Earlier paper accounts: ${past.map(x => `${esc(x.label)} ${x.final ? usd(x.final.net) : ''}`).join(' · ')}</p>` : ''}
       ${form}</div>`;
   }
+  // ---------- Scorecard: the model learns from closed trades (owner's choice, Nov 1 2026) ----------
+  // Ranks each setup type by your forward results (paper + live trades tagged "followed plan") next to the replay and
+  // everyone's pooled results. Status rules are fixed (C.scoreStatus); a status change is a suggestion until you accept it.
+  // Accepted: "trusted" setups get a star and sort first; "benched" setups stop sending phone alerts. Size never changes.
+  const POOL_URL = 'https://kraken-prop-desk.jbyerstemp.workers.dev/pool', RESULT_URL = 'https://kraken-prop-desk.jbyerstemp.workers.dev/result', RESULT_KEY = 'kpd_results';
+  let POOL = null, poolAt = 0;
+  async function loadPool() {
+    if (F.demo || Date.now() - poolAt < 10 * 60e3) return; poolAt = Date.now();
+    try { const r = await fetch(POOL_URL); if (r.ok) { POOL = (await r.json()).models || null; if (tab === 'paper') renderPaper(); } } catch (e) { }
+  }
+  const scoreMark = key => (S.scoreAccepted || {})[key];   // 'trusted' | 'benched' | undefined
+  const benchedKeys = () => Object.entries(S.scoreAccepted || {}).filter(([, v]) => v === 'benched').map(([k]) => k);
+  function setupBadge(kind, tf) { const m = scoreMark(C.setupKey(kind, tf)); return m === 'trusted' ? '<span class="tag up" title="Proven on your trades (you accepted it)">★ trusted</span> ' : m === 'benched' ? '<span class="tag dn" title="Benched by you: no phone alerts">benched</span> ' : ''; }
+  function sendResults() {
+    if (F.demo || T().shareResults === false) return;
+    let sent; try { sent = JSON.parse(localStorage.getItem(RESULT_KEY)) || []; } catch (e) { sent = []; }
+    const todo = C.tradeRecords(S.paper, S.positions).filter(r => r.key !== 'unlinked').map(r => C.resultPayload(r, FEEDBACK_PUBLIC ? 'public' : 'private')).filter(b => !sent.includes(b.id)).slice(0, 10);
+    for (const b of todo) fetch(RESULT_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b), keepalive: true })
+      .then(x => x.json()).then(j => { if (j && j.ok) { sent.push(b.id); try { localStorage.setItem(RESULT_KEY, JSON.stringify(sent.slice(-3000))); } catch (e) { } } }).catch(() => { });
+  }
+  setTimeout(() => { try { sendResults(); } catch (e) { } }, 20000); setInterval(() => { try { sendResults(); } catch (e) { } }, 10 * 60e3);
+  function scorecardHtml() {
+    loadPool();
+    const recs = C.tradeRecords(S.paper, S.positions), sc = C.scorecard(recs, { replay: C.replayByKey(BT), pool: POOL || {} }), pat = C.tradePatterns(recs.filter(r => r.model === sc.model));
+    const r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R', cl = x => x > 0 ? 'up' : x < 0 ? 'dn' : '';
+    const cell = st => st && st.n ? `<span class="${cl(st.avg)}">${r(st.avg)}</span><div class="small mu">${st.n} · ${Math.round(st.win * 100)}% win${st.lo != null ? ` · ${r(st.lo)} to ${r(st.hi)}` : ''}</div>` : '<span class=mu>—</span>';
+    const label = { proven: '<b class=up>proven</b>', disproven: '<b class=dn>disproven</b>', 'below replay': '<b class=warn>below replay</b>', unclear: 'unclear', gathering: '<span class=mu>gathering</span>' };
+    const suggest = row => { const want = row.status === 'proven' ? 'trusted' : (row.status === 'disproven' || row.status === 'below replay') ? 'benched' : null, have = scoreMark(row.key);
+      if (want && want !== have) return `<div class=small>Suggested: <b>${want === 'trusted' ? '★ trust it' : 'bench it'}</b> <button class="btn sm" data-score="${esc(row.key)}" data-to="${want}">Accept</button></div>`;
+      return have ? `<div class=small>${have === 'trusted' ? '★ trusted' : 'benched'} <button class="btn sm" data-score="${esc(row.key)}" data-to="">Undo</button></div>` : ''; };
+    const rows = sc.rows.map(x => `<tr><td><b>${esc(x.label)}</b><div class=small>${label[x.status]}${x.status === 'gathering' ? ` (${x.forward.n || 0}/${C.SCORE_RULES.minN})` : ''}</div>${suggest(x)}</td>
+      <td class=num>${x.replay ? `<span class="${cl(x.replay.avgR)}">${r(x.replay.avgR)}</span><div class="small mu">${x.replay.n}</div>` : '<span class=mu>—</span>'}</td>
+      <td class=num>${cell(x.paper)}</td><td class=num>${cell(x.live)}</td><td class=num>${cell(x.pool)}</td></tr>`).join('');
+    const tagRows = Object.entries(pat.byTag).map(([k, st]) => `<tr><td>${esc(C.TRADE_TAGS[k].split(' (')[0])}</td><td class=num>${cell(st)}</td></tr>`).join('');
+    const sesRows = Object.entries(pat.bySession).map(([k, st]) => `<tr><td>${esc(k)}</td><td class=num>${cell(st)}</td></tr>`).join('');
+    return `<div class=card><h3>Scorecard <span class=tag>model ${esc(sc.model)} · learns from every closed trade</span></h3>
+      <p class=small>Each setup type is judged by your closed paper trades and live trades tagged "followed plan" (in R, after fees), next to the replay on past candles and <b>everyone's</b> results (both apps, self-reported). Mistakes, rule breaks and data problems never count against a setup.</p>
+      ${rows ? `<table><tr><th>Setup</th><th class=num>Replay</th><th class=num>Your paper</th><th class=num>Your live</th><th class=num>Everyone</th></tr>${rows}</table>` : '<p class=mu>No closed trades under this model yet. Paper trade the setups, or plan live trades with "Plan it", and they show up here.</p>'}
+      ${sc.unlinked ? `<p class="small warn">${sc.unlinked} closed live trade(s) aren't linked to a setup: pick one in Positions → Closed (journal).</p>` : ''}
+      <details><summary class=small><b>How it decides</b> (rules fixed Nov 1, 2026, before any results)</summary><p class=small>Under ${C.SCORE_RULES.minN} trades: <b>gathering</b>, too few to tell. With ${C.SCORE_RULES.minN}+: <b>proven</b> if the whole 95% range of the average R is above 0; <b>disproven</b> if it's all below 0; <b>below replay</b> if it's all below the replay's average (execution or the edge fading); otherwise <b>unclear</b>. A change is only a suggestion: you accept it. ★ trusted setups are marked and listed first; benched ones stop sending phone alerts. Nothing here ever changes your size. When the model's rules change it gets a new version (now ${esc(sc.model)}), and its record starts fresh so old and new rules never mix.</p></details>
+      ${tagRows || sesRows ? `<details><summary class=small><b>Your patterns</b></summary><table><tr><th>Live trades by tag</th><th class=num>Result</th></tr>${tagRows || '<tr><td colspan=2 class=mu>No live trades yet.</td></tr>'}</table>
+        <table style="margin-top:6px"><tr><th>All trades by session (NY time)</th><th class=num>Result</th></tr>${sesRows}</table>
+        <p class=small>Trades opened within 4h after a losing trade: ${cell(pat.afterLoss)}</p></details>` : ''}
+      <details><summary class=small><b>Model versions</b></summary><table>${C.MODELS.slice().reverse().map(m => `<tr><td><b>${m.id}</b></td><td class=small>${m.from ? new Date(m.from).toISOString().slice(0, 10) : '—'}</td><td class=small>${esc(m.note)}</td></tr>`).join('')}</table></details></div>`;
+  }
   function renderPaper() {
     const box = $('#paperBox'); if (!box) return;
     const open = S.paper.filter(t => t.status === 'open'), closed = S.paper.filter(t => t.status === 'closed').sort((a, b) => b.closed - a.closed), st = C.paperStats(S.paper);
     const r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R', cls = x => x > 0 ? 'up' : x < 0 ? 'dn' : '';
     const srows = Object.entries(st).map(([k, x]) => `<tr><td>${esc(k)}</td><td class=num>${x.n}</td><td class=num>${x.win == null ? '—' : Math.round(x.win * 100) + '%'}</td><td class="num ${cls(x.avgR)}">${r(x.avgR)}</td><td class="num ${cls(x.totalR)}">${r(x.totalR)}</td></tr>`).join('');
-    box.innerHTML = `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
+    box.innerHTML = scorecardHtml() + `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
       <p class=small>Add setups from the Chart tab ("Setups to watch") or the Coach ("Other setups"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
       ${paperAcctCard()}
       <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
@@ -504,6 +563,8 @@
         <div class=row style="margin-top:8px"><button class="btn sm" data-pp="clear">Delete all paper trades</button></div></div>`;
   }
   $('#paperBox').addEventListener('click', e => {
+    const sb = e.target.closest('[data-score]');
+    if (sb) { S.scoreAccepted = Object.assign({}, S.scoreAccepted); if (sb.dataset.to) S.scoreAccepted[sb.dataset.score] = sb.dataset.to; else delete S.scoreAccepted[sb.dataset.score]; save(); autoPush('scorecard'); renderPaper(); return; }
     if (e.target.id === 'ppNew') { const a = paperAcct(); if (a && !confirm('End this paper account and start a new one? Its result is kept in the list.')) return; newPaperAcct($('#ppPlan').value, +$('#ppSize').value, $('#ppProf').value); renderPaper(); return; }
     const b = e.target.closest('[data-pp]'); if (!b) return;
     const t = S.paper.find(x => x.id === b.dataset.id), now = Date.now();
@@ -791,6 +852,7 @@
       const p = { id: uid(), acct: $('#pfA').value, sym: $('#pfS').value, side: $('#pfSide').value, entry: num($('#pfE').value), stop: num($('#pfStop').value),
         qty: num($('#pfQ').value), tp1: num($('#pfT1').value), tp2: num($('#pfT2').value), tf: +$('#pfTf').value, setup: $('#pfSet').value,
         thesis: $('#pfTh').value.trim(), opened: Date.parse($('#pfOpen').value) || Date.now(), partials: [], stopHist: [] };
+      if (posDraft && posDraft.ref && C.setupKey(p.setup, p.tf) === posDraft.ref.key) p.ref = posDraft.ref;   // came from a model setup, unchanged
       if (!p.entry || !p.qty) { alert('Entry and quantity are required.'); return; }
       if (p.stop == null && !confirm('No stop logged. Your rules say every trade needs one. Log anyway?')) return;
       if (!p.thesis && !confirm('No thesis written. Every trade needs a plan. Log anyway?')) return;
@@ -819,15 +881,17 @@
     const resets = S.accounts.flatMap(a => (a.dayLog || []).filter(d => d.t > wk));
     const cnt = k => recent.filter(p => (p.tag || 'plan') === k).length;
     const stats = `<p class=small>Last 7 days: <b class=up>${cnt('plan')}</b> followed plan · <b class=warn>${cnt('mistake')}</b> mistakes · <b class=dn>${cnt('rulebreak')}</b> rule breaks · ${cnt('data')} data problems · day resets: ${resets.filter(d => d.kind === 'mistake').length} accident/technical, <b class=dn>${resets.filter(d => d.kind === 'rulebreak').length}</b> rule break</p>`;
-    $('#posClosed').innerHTML = stats + (closed.length ? `<table><tr><th>Closed</th><th>Trade</th><th class=num>Net</th><th>Tag</th></tr>${closed.map(p => {
+    $('#posClosed').innerHTML = stats + (closed.length ? `<table><tr><th>Closed</th><th>Trade</th><th class=num>Net</th><th>Setup · tag</th></tr>${closed.map(p => {
       const tot = C.realizedOfPos(p), known = !p.closed.synced || p.closed.resultKnown;
       return `<tr><td class=small>${fmtTime(p.closed.t, true)}</td><td>${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)}${p.closed.price ? ' → ' + px(p.closed.price) : ''}<div class=small>${esc(p.closed.note || '')}${p.widened ? ' <span class=warn>stop widened</span>' : ''}${p.tagNote ? ' <span class=dn>' + esc(p.tagNote) + '</span>' : ''}</div></td>
-        <td class="num ${cls(tot)}">${known ? usd(tot) : '—'}</td><td><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>`;
+        <td class="num ${cls(tot)}">${known ? usd(tot) : '—'}</td><td><select data-setup="${p.id}" aria-label="Setup">${C.SETUP_CHOICES.map(([k, l]) => `<option value="${k}" ${k === (p.ref && p.ref.key ? p.ref.key : C.setupKey(p.setup, p.tf)) ? 'selected' : ''}>${l}</option>`).join('')}</select><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>`;
     }).join('')}</table>` : '<p class=mu>Nothing closed yet.</p>');
     const dl = S.accounts.flatMap(a => (a.dayLog || []).map(d => Object.assign({ acct: a.label || C.planOf(a).name }, d))).sort((x, y) => y.t - x.t).slice(0, 10);
     if (dl.length) $('#posClosed').innerHTML += `<h3 style="margin-top:12px">Day resets</h3><table>${dl.map(d => `<tr><td class=small>${fmtTime(d.t, true)}</td><td>${esc(d.acct)}</td><td class="${d.kind === 'rulebreak' ? 'dn' : 'warn'}">${d.kind === 'rulebreak' ? 'Rule break' : 'Accident / technical'}</td><td class=small>${d.trades} trades, ${d.losses} losses${d.note ? ' · ' + esc(d.note) : ''}</td></tr>`).join('')}</table>`;
   }
-  $('#posClosed').addEventListener('change', e => { const sel = e.target.closest('[data-tag]'); if (!sel) return; const p = S.positions.find(x => x.id === sel.dataset.tag); if (p) { p.tag = sel.value; save(); renderPositions(); } });
+  $('#posClosed').addEventListener('change', e => { const ss = e.target.closest('[data-setup]');
+    if (ss) { const p = S.positions.find(x => x.id === ss.dataset.setup); if (p) { p.ref = { key: ss.value, model: (p.ref && p.ref.model) || C.modelAt(p.opened), byHand: true }; save(); renderPositions(); } return; }
+    const sel = e.target.closest('[data-tag]'); if (!sel) return; const p = S.positions.find(x => x.id === sel.dataset.tag); if (p) { p.tag = sel.value; save(); renderPositions(); } });
   $('#posOpen').addEventListener('click', e => {
     const b = e.target.closest('[data-pa]'); if (!b) return;
     const p = S.positions.find(x => x.id === b.dataset.id); if (!p) return;
@@ -1066,7 +1130,7 @@
       // Setups both ways, no account involved; you weigh them by ticking one.
       const A2 = analyses[T().sym] || analyze(T().sym);
       for (const e of C.scanSetups(T().sym, A2, now))
-        if (e.ready && C.alertGrade(e).ok) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
+        if (e.ready && C.alertGrade(e).ok && !benchedKeys().includes(C.setupKey(e.kind, e.tf))) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
       const q = C.alertQueue(G.fired), undelivered = q.slice(4);
       for (const o of q.slice(0, 4)) if (!(await ntSend(o.title, o.body, o.prio))) undelivered.push(o);
       C.alertSettle(G.state, prev, undelivered);
@@ -1150,7 +1214,7 @@
     const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
     const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
       stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [] }));
-    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice() }, calib: S.calib.slice(-10), accounts: accts, positions: pos };
+    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice(), benched: benchedKeys() }, calib: S.calib.slice(-10), accounts: accts, positions: pos };
   }
   // Auto-send: GitHub fine-grained token (this repo only, Contents read/write), kept in its own key so backups never include it.
   const GH_KEY = 'kpd_gh';
@@ -1250,8 +1314,10 @@
       </div>
       <div class=card><h3>24/7 monitor key</h3><p class=small>Paste a GitHub fine-grained key for <b>your monitor repo only</b>${ghRepo() ? ' (' + esc(ghRepo()) + ')' : ''}, permission <b>Contents: Read and write</b>. Then every import and trade change updates the monitor by itself. The key stays on this phone and is never in backups.</p>
       <label class=small style="display:block;margin-bottom:6px">Monitor repo (owner/name)<input id=ghRepo value="${esc(ghRepo())}" placeholder="you/your-monitor-repo" style="width:100%"></label><div class=row><input id=ghTok type=password placeholder="${ghToken() ? 'Key saved (paste to replace)' : 'github_pat_…'}" style="flex:1;min-width:180px"><button class="btn sm" id=ghSave>Save &amp; test</button>${ghToken() ? '<button class="btn sm bad" id=ghDel>Remove</button>' : ''}</div><p class=small id=ghStat>${S.lastPush ? 'Last update ' + fmtTime(S.lastPush, true) : ''}</p></div>
-      <div class=card><h3>Help improve the reader</h3><label class=chk><input type=checkbox id=stShare ${t.shareLayout !== false ? 'checked' : ''}> When a screenshot isn't fully read, send its layout to the developer</label>
-      <p class="small mu">Only the text layout is sent, with every number replaced by 9 and account numbers and emails removed. Never the picture, your balances, sizes or prices. Each layout is sent once.</p></div>
+      <div class=card><h3>Help improve the app</h3><label class=chk><input type=checkbox id=stShare ${t.shareLayout !== false ? 'checked' : ''}> When a screenshot isn't fully read, send its layout to the developer</label>
+      <p class="small mu">Only the text layout is sent, with every number replaced by 9 and account numbers and emails removed. Never the picture, your balances, sizes or prices. Each layout is sent once.</p>
+      <label class=chk><input type=checkbox id=stShareRes ${t.shareResults !== false ? 'checked' : ''}> Add my closed trades to everyone's Scorecard</label>
+      <p class="small mu">Sends only the setup type, model version, paper or live, and the result in R. No coin amounts, prices, dollars, account or times. Only "followed plan" trades are counted.</p></div>
       <div class=card><h3>Backup</h3><p class=small>Everything lives in this browser only. Export a backup now and then.</p>
       <div class=row><button class=btn id=stExp>Export backup</button><label class="btn">Import<input type=file id=stImp accept=application/json hidden></label><button class="btn bad" id=stClr>Erase all</button></div></div>
       <div class=card><h3>Data</h3><p class=small>Chart: Kraken spot candles (public WebSocket v2 + REST). P&amp;L: Kraken Futures perp mark (public WebSocket), falling back to spot when the mark is stale. Backup: Coinbase public candles (different venue, labeled). Free, no keys, nothing to install. Kraken Prop fills are simulated on Kraken's side and can differ from the public feed.</p>
@@ -1262,7 +1328,7 @@
     bind('#stSyms', el => { const v = el.value.split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z0-9]+\/[A-Z]+$/.test(x)); if (v.length) { T().symbols = v; if (!v.includes(T().sym)) T().sym = v[0]; ensureFeeds(); initChart(); } });
     bind('#stAge', el => { T().maxAge = Math.max(10, +el.value || 90); });
     bind('#stBasis', el => { T().priceBasis = ['usdt', 'mark', 'spot'].includes(el.value) ? el.value : 'usdt'; });
-    bind('#stBe', el => { T().beAt1R = el.checked; }); bind('#stShare', el => { T().shareLayout = el.checked; }); bind('#stDir', el => { T().dirRule = el.checked; }); bind('#stBud', el => { T().budget = num(el.value) || 0; });
+    bind('#stBe', el => { T().beAt1R = el.checked; }); bind('#stShare', el => { T().shareLayout = el.checked; }); bind('#stShareRes', el => { T().shareResults = el.checked; }); bind('#stDir', el => { T().dirRule = el.checked; }); bind('#stBud', el => { T().budget = num(el.value) || 0; });
     $('#ghRepo').onchange = e => { const v = e.target.value.trim(); if (/^[\w.-]+\/[\w.-]+$/.test(v)) { T().monRepo = v; save(); } else alert('Use owner/repo, like you/prop-desk.'); };
     $('#ghSave').onclick = async () => { const v = $('#ghTok').value.trim(); if (!/^(github_pat_|ghp_)\w+/.test(v)) { alert('That doesn\'t look like a GitHub key.'); return; }
       try { localStorage.setItem(GH_KEY, v); } catch (e) { } $('#ghStat').textContent = 'Testing…'; const r = await pushWatch('key test');

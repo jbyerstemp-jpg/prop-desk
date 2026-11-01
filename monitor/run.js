@@ -122,6 +122,7 @@ function evaluate(watch, market, prev, now, opt) {
     if (!data[s] || data[s].light) continue;
     for (const e of C.scanSetups(s, data[s], now)) {
       if (!e.ready || !C.alertGrade(e).ok) continue;   // phone alerts only for the replay's strictest version (V4)
+      if (((watch.rules && watch.rules.benched) || []).includes(C.setupKey(e.kind, e.tf))) continue;   // benched by him on the Scorecard
       const chosen = (watch.rules && watch.rules.traits) || [], tc = market[s].traits;
       if (chosen.length && !(tc && chosen.every(id => tc[id] === e.dir))) continue;   // his chosen trait filters must all agree
       const x = C.confirmElsewhere(e, market[s].xfvg);

@@ -1298,6 +1298,104 @@
     return full.length <= 7500 ? { url: full, fits: true } : { url: base + encodeURIComponent('(Too long for a link: the text is on your clipboard. Paste it here.)'), fits: false };
   }
 
+  /* ---------- Scorecard: the model learns from closed trades (owner's choice, Nov 1 2026) ----------
+     Every closed paper trade and every closed live trade is scored in R (after fees) under the setup type it came from and
+     the model version in force when it opened. Status rules were written down BEFORE any results and never change on
+     their own; a change of status is only a SUGGESTION until the owner accepts it. Nothing here changes position size. */
+  const MODELS = [
+    { id: 'M0', from: 0, note: 'Before versioning (rules changed during the day)' },
+    { id: 'M1', from: Date.UTC(2026, 10, 1), note: 'FVG + liquidity-sweep scanner on 15m/1h/4h; phone alerts only for replay version V4 (no 15m, sweeps ≥0.25 ATR deep with ≥1.5x volume, fees ≤0.2R)' }
+  ];
+  const MODEL = MODELS[MODELS.length - 1].id;
+  const modelAt = ms => { let m = MODELS[0].id; for (const x of MODELS) if (ms >= x.from) m = x.id; return m; };
+  const SCORE_RULES = { minN: 30, z: 1.96 };
+  const SETUP_CHOICES = [['fvg|15', 'FVG 15m'], ['fvg|60', 'FVG 1h'], ['fvg|240', 'FVG 4h'], ['fvg|1440', 'FVG 1D'], ['sweep|15', 'Sweep 15m'], ['sweep|60', 'Sweep 1h'], ['sweep|240', 'Sweep 4h'],
+    ['orb', 'Opening range'], ['structure', 'Structure'], ['own', 'Own idea'], ['unlinked', 'Not linked yet']];
+  function setupKey(kind, tf) {
+    const k = String(kind || '').toLowerCase();
+    const kk = /fvg/.test(k) ? 'fvg' : /sweep/.test(k) ? 'sweep' : /orb|opening/.test(k) ? 'orb' : /struct/.test(k) ? 'structure' : /import/.test(k) || !k ? 'unlinked' : 'own';
+    return (kk === 'fvg' || kk === 'sweep') && tf ? kk + '|' + String(tf) : kk === 'fvg' || kk === 'sweep' ? 'unlinked' : kk;
+  }
+  const setupLabel = key => (SETUP_CHOICES.find(c => c[0] === key) || [key, key])[1];
+  /* R of a closed live trade: total realized (fees included) / dollars at risk at entry (original stop x original size).
+     null when the result or the original stop isn't known: never guessed. */
+  function liveR(p) {
+    if (!p.closed || (p.closed.synced && !p.closed.resultKnown)) return null;
+    const stop = p.origStop != null ? p.origStop : null; if (stop == null || !(p.entry > 0)) return null;
+    const q0 = (p.qty || 0) + (p.partials || []).reduce((a, x) => a + (x.qty || 0), 0);
+    const risk = Math.abs(p.entry - stop) * q0; if (!(risk > 0)) return null;
+    return realizedOfPos(p) / risk;
+  }
+  /* All closed trades as one list: {id, src, key, model, R, tag, t, session}. */
+  function tradeRecords(paper, positions) {
+    const out = [], sess = ms => { const m = tzParts(Math.floor(ms / 1000), 'America/New_York').min; const s = SESSIONS.find(x => m >= x.from && m < x.to); return s ? s.name : 'Other hours'; };
+    for (const t of paper || []) if (t.status === 'closed' && t.R != null && isFinite(t.R))
+      out.push({ id: t.id, src: 'paper', key: setupKey(t.kind, t.tf), model: t.model || modelAt(t.opened), R: t.R, tag: 'plan', t: t.opened, closed: t.closed, session: sess(t.opened), sym: t.sym });
+    for (const p of positions || []) { const R = p.closed ? liveR(p) : null; if (R == null) continue;
+      out.push({ id: p.id, src: 'live', key: p.ref && p.ref.key ? p.ref.key : setupKey(p.setup, p.tf), model: (p.ref && p.ref.model) || modelAt(p.opened), R, tag: p.tag || 'plan', t: p.opened, closed: p.closed.t, session: sess(p.opened), sym: p.sym }); }
+    return out.sort((a, b) => a.closed - b.closed);
+  }
+  /* n, win rate, average R and a 95% range for the average (normal approximation; shown only from 5 trades). */
+  function statsR(rs) {
+    const n = rs.length; if (!n) return { n: 0 };
+    const avg = rs.reduce((a, x) => a + x, 0) / n, sd = n > 1 ? Math.sqrt(rs.reduce((a, x) => a + (x - avg) ** 2, 0) / (n - 1)) : null;
+    const half = n >= 5 && sd != null ? SCORE_RULES.z * sd / Math.sqrt(n) : null;
+    return { n, win: rs.filter(x => x > 0).length / n, avg, total: avg * n, lo: half != null ? avg - half : null, hi: half != null ? avg + half : null };
+  }
+  function statsAgg(a) {   // from pooled sums {n, s, s2, w}
+    if (!a || !(a.n > 0)) return { n: 0 };
+    const n = a.n, avg = a.s / n, v = n > 1 ? Math.max(0, (a.s2 - n * avg * avg) / (n - 1)) : null, half = n >= 5 && v != null ? SCORE_RULES.z * Math.sqrt(v / n) : null;
+    return { n, win: a.w / n, avg, total: a.s, lo: half != null ? avg - half : null, hi: half != null ? avg + half : null };
+  }
+  /* Status rules (fixed Nov 1, 2026, before any results):
+     gathering  < 30 forward trades (paper + live tagged "followed plan")
+     proven     30+ and the whole 95% range of the average R is above 0
+     disproven  30+ and the whole range is below 0
+     below replay 30+ and the whole range is below the replay's average for that setup (worse than history: execution or decay)
+     unclear    30+ otherwise */
+  function scoreStatus(st, replayAvg) {
+    if (!st || st.n < SCORE_RULES.minN || st.lo == null) return 'gathering';
+    if (st.lo > 0) return 'proven';
+    if (st.hi < 0) return 'disproven';
+    if (replayAvg != null && st.hi < replayAvg) return 'below replay';
+    return 'unclear';
+  }
+  const STATUS_ORDER = { proven: 0, unclear: 1, gathering: 2, 'below replay': 3, disproven: 4 };
+  function scorecard(records, opt) {
+    opt = opt || {};
+    const model = opt.model || MODEL, replay = opt.replay || {}, pool = (opt.pool && opt.pool[model]) || {};
+    const recs = records.filter(r => r.model === model), keys = new Set(recs.map(r => r.key).concat(Object.keys(pool)));
+    keys.delete('unlinked');
+    const rows = [...keys].map(key => {
+      const P = recs.filter(r => r.key === key && r.src === 'paper').map(r => r.R), L = recs.filter(r => r.key === key && r.src === 'live' && r.tag === 'plan').map(r => r.R);
+      const fwd = statsR(P.concat(L)), rp = replay[key] || null, rAvg = rp && rp.n ? rp.avgR : null;
+      const pl = pool[key] || {}, poolAll = statsAgg({ n: (pl.paper ? pl.paper.n : 0) + (pl.live ? pl.live.n : 0), s: (pl.paper ? pl.paper.s : 0) + (pl.live ? pl.live.s : 0), s2: (pl.paper ? pl.paper.s2 : 0) + (pl.live ? pl.live.s2 : 0), w: (pl.paper ? pl.paper.w : 0) + (pl.live ? pl.live.w : 0) });
+      return { key, label: setupLabel(key), replay: rp, paper: statsR(P), live: statsR(L), forward: fwd, pool: poolAll, status: scoreStatus(fwd, rAvg), poolStatus: scoreStatus(poolAll, rAvg) };
+    });
+    rows.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || (b.forward.lo != null ? b.forward.lo : -9) - (a.forward.lo != null ? a.forward.lo : -9) || b.forward.n - a.forward.n);
+    return { model, rows, unlinked: recs.filter(r => r.key === 'unlinked').length };
+  }
+  /* His own patterns from live trades: by tag, by session, and right after a loss. */
+  function tradePatterns(records) {
+    const live = records.filter(r => r.src === 'live'), out = { byTag: {}, bySession: {}, afterLoss: null };
+    for (const k of Object.keys(TRADE_TAGS)) { const st = statsR(live.filter(r => r.tag === k).map(r => r.R)); if (st.n) out.byTag[k] = st; }
+    for (const r of records) (out.bySession[r.session] = out.bySession[r.session] || []).push(r.R);
+    for (const k of Object.keys(out.bySession)) out.bySession[k] = statsR(out.bySession[k]);
+    const after = live.filter(r => live.some(x => x.R < 0 && x.closed <= r.t && r.t - x.closed < 4 * 3600e3)).map(r => r.R);
+    out.afterLoss = statsR(after);
+    return out;
+  }
+  /* What a closed trade sends to the shared pool: setup, model, source, R (2 decimals), tag. No coin size, price, money, account or time beyond the day. */
+  function resultPayload(rec, edition) {
+    return { v: 1, id: fnv(rec.src + '|' + rec.id), edition: edition === 'private' ? 'private' : 'public', model: rec.model, key: rec.key, src: rec.src, tag: rec.tag, R: Math.round(rec.R * 100) / 100 };
+  }
+  /* Replay averages per setup key from monitor/backtest.json (+ slow.json for 4h/1D FVG), held-out period where it exists. */
+  function replayByKey(bt) {
+    const out = {}; if (!bt || !bt.groups) return out;
+    for (const [k, g] of Object.entries(bt.groups)) if (/^(fvg|sweep)\|\d+$/.test(k) && g.all) out[k] = { n: g.all.n, avgR: g.all.avgR, heldOutAvgR: g.heldOut ? g.heldOut.avgR : null };
+    return out;
+  }
+
   /* Owner's rule: trade both ways only when it makes sense. A side is OK when the 4h trend is that way, or when the
      1h and 15m have both turned that way (an early reversal). Never long and short on the same coin at once. */
   function directionCheck(side, sym, struct, positions, acctId) {
@@ -1338,7 +1436,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
