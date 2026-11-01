@@ -440,7 +440,7 @@
     const pb = e.target.closest('[data-sapaper]'); if (pb) { const u = scanAll.rows[+pb.dataset.sapaper]; if (u) paperAdd(u); return; }
     const wb = e.target.closest('[data-saweigh]'); if (!wb) return; const u = scanAll.rows[+wb.dataset.saweigh]; if (!u) return;
     const now = Date.now(), P = prices();
-    const out = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: a.leverage });
+    const out = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) });
       return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${esc(a.label || 'Account')}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${esc(a.label || 'Account')}: not now</b> (${esc(w.rules.filter(r => !r.ok).map(r => r.t).join(', ') || 'size 0')})`; });
     $(`[data-saout="${wb.dataset.saweigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>';
   });
@@ -670,7 +670,7 @@
   $('#setupBox').addEventListener('click', e => { const pb = e.target.closest('[data-paper]'); if (pb) { const u = lastUps[+pb.dataset.paper]; if (u) paperAdd(u); return; }
     const b = e.target.closest('[data-weigh]'); if (!b) return; const u = lastUps[+b.dataset.weigh]; if (!u) return;
     const now = Date.now(), P = prices(), accts = liveAccts();
-    const out = accts.map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: a.leverage }), name = esc(a.label || C.planOf(a).name);
+    const out = accts.map(a => { const A = C.accountState(a, S.positions, P, now), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }), name = esc(a.label || C.planOf(a).name);
       return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${name}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${name}: not now</b> (${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ') || 'size 0'})`; });
     $(`[data-weighout="${b.dataset.weigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>'; });
   $('#setupBox').addEventListener('click', e => { const b = e.target.closest('[data-plan]'); if (!b) return; posDraft = JSON.parse(b.dataset.plan); $('#manualBox').open = true; switchTab('pos'); });
@@ -719,6 +719,7 @@
       ${a.phase === 'eval' ? `<div class=small>Target progress</div><div class=bar><i style="width:${Math.max(0, Math.min(1, s.progress)) * 100}%"></i></div>` : ''}
       <div style="margin-top:8px"><div class=small>Risk profile (per trade, % of start)</div><div class=profiles>${prof}</div>
       <p class=small>${esc(s.profile.note)} Per trade <b>${usd(s.profRisk)}</b> · next trade may risk <b>${usd(s.nextRisk)}</b> · about <b>${s.lossesToBreach}</b> losses of room${wins ? ` · wins to pass: ${wins}` : ''} · max ${s.profile.maxTrades} trades/day, stop after ${s.profile.stopAfterLosses} losses.</p></div>
+      ${(m => m.length ? `<div class=warns>${m.map(x => `<div class=warn>Missing: ${esc(x.text)}. Import it in Positions → 📷 Import screenshots.</div>`).join('')}</div>` : '')(C.missingInfo(a, [T().sym]).filter(x => !S.positions.some(p => p.acct === a.id && !p.closed && p.sym === x.sym)))}
       ${s.warnings.length ? `<div class=warns>${s.warnings.map(w => `<div class="${w.lvl}">${esc(w.text)}</div>`).join('')}</div>` : ''}` : `<p class=small>Final balance ${usd(s.balance)}.</p>`}
       <p class="small mu">Cost ${usd(s.cost)} · payouts ${usd(s.paid)} · net ${usd(s.net)} ·
         <a href="#" data-act="cost" data-id="${a.id}">+ cost</a> · <a href="#" data-act="payout" data-id="${a.id}">+ payout</a></p>
@@ -778,7 +779,7 @@
         <label>Daily loss %<input id=afL type=number step=any value="${(pl.mdl * 100).toFixed(2)}"></label>
         <label>Max drawdown % (static)<input id=afD type=number step=any value="${(pl.mdd * 100).toFixed(2)}"></label>
         <label>Daily reset (UTC, HH:MM)<input id=afReset value="${a.resetMin != null ? String(Math.floor(a.resetMin / 60)).padStart(2, '0') + ':' + String(a.resetMin % 60).padStart(2, '0') : '00:30'}" placeholder="00:30"></label>
-        <label>BTC leverage on this account<select id=afLev><option value=10 ${!(a.leverage && a.leverage.BTC === 5) ? 'selected' : ''}>10x (bought after Aug 18, 2026)</option><option value=5 ${a.leverage && a.leverage.BTC === 5 ? 'selected' : ''}>5x (older eval)</option></select></label>
+        <div class=small id=afLevNote style="grid-column:1/-1">Leverage: ${a.plan === 'custom' ? 'read from your screenshots (import the order screen that shows it)' : 'matches the venue (Kraken Prop: BTC 10x, ETH/SOL/XRP 5x, HYPE/WLD 3x)'}${a.leverage && Object.keys(a.leverage).length ? '; from your screenshots: ' + Object.entries(a.leverage).map(([k, v]) => esc(k) + ' ' + v + 'x').join(', ') : ''}.</div>
         <label>Started<input id=afDate type=datetime-local value="${new Date(a.created - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}"></label>
       </div>
       <p class="small mu">Presets fill in the firm's published rules (Kraken Prop checked Nov 1, 2026). For another firm pick "Other firm" and type its target and loss limits from its rules page.</p>
@@ -786,7 +787,7 @@
       <div class=row style="margin-top:10px"><button class="btn pri" id=afOk>Save</button><button class=btn data-close>Cancel</button>${isNew ? '' : '<button class="btn bad" id=afDel>Delete</button>'}</div>`);
     const autoFee = () => { const pk = $('#afPlan').value, z = +$('#afSize').value; const base = C.PLANS[pk].price[z]; if (base != null) $('#afFee').value = +(base * ($('#afAdd').checked ? 1 + C.ADDON_90 : 1)).toFixed(2);
       const P = C.PLANS[pk]; $('#afT').value = (P.target * 100).toFixed(2); $('#afL').value = (P.mdl * 100).toFixed(2); $('#afD').value = (P.mdd * 100).toFixed(2); };
-    $('#afPlan').onchange = autoFee; $('#afSize').onchange = autoFee; $('#afAdd').onchange = autoFee;
+    $('#afPlan').onchange = () => { autoFee(); $('#afLevNote').firstChild.textContent = 'Leverage: ' + ($('#afPlan').value === 'custom' ? 'read from your screenshots (import the order screen that shows it)' : 'matches the venue (Kraken Prop: BTC 10x, ETH/SOL/XRP 5x, HYPE/WLD 3x)'); }; $('#afSize').onchange = autoFee; $('#afAdd').onchange = autoFee;
     $('#afOk').onclick = () => {
       a.plan = $('#afPlan').value; a.size = +$('#afSize').value; a.fee = num($('#afFee').value) || 0; a.addon90 = $('#afAdd').checked;
       a.phase = $('#afPhase').value; a.label = $('#afLabel').value.trim();
@@ -796,7 +797,6 @@
       if (bad.length) { alert(bad.map(x => `${x[0]} ${x[1].error}. Leave it blank to use the plan default.`).join('\n')); return; }
       const keep = (r, d) => (r.value == null || Math.abs(r.value - d) < 1e-9 ? undefined : r.value);
       a.target = keep(tg, P.target); a.mdl = keep(ml, P.mdl); a.mdd = keep(md, P.mdd);
-      a.leverage = $('#afLev').value === '5' ? { BTC: 5 } : undefined;
       const rm = C.parseResetUtc($('#afReset').value || '00:30'); if (rm == null) { alert('Daily reset must be HH:MM in UTC, like 00:30 or 22:00.'); return; }
       a.resetMin = rm === 30 ? undefined : rm;
       const d = Date.parse($('#afDate').value); if (!isNaN(d)) a.created = d;
@@ -839,11 +839,11 @@
       const side = $('#pfSide').value;
       if ((side === 'long' && stop >= entry) || (side === 'short' && stop <= entry)) { $('#pfSize').innerHTML = '<span class=dn>Stop is on the wrong side of entry.</span>'; return; }
       if (!s.riskKnown) { $('#pfSize').innerHTML = '<span class=dn>An open position on this account has no stop. Log its stop first: risk is unlimited, so the app sizes nothing.</span>'; return; }
-      const z = C.sizeFor({ sym: $('#pfS').value, entry, stop, risk: s.nextRisk, equity: s.equity, usedMargin: s.usedMargin, symNotional: s.openBySym[$('#pfS').value] || 0, leverage: a.leverage });
+      const z = C.sizeFor({ sym: $('#pfS').value, entry, stop, risk: s.nextRisk, equity: s.equity, usedMargin: s.usedMargin, symNotional: s.openBySym[$('#pfS').value] || 0, leverage: C.levMap(a) });
       if (z.error) { $('#pfSize').innerHTML = `<span class=dn>${esc(z.error)}</span>`; return; }
       if (fill) $('#pfQ').value = z.qty;
       const q = num($('#pfQ').value) || z.qty, loss = q * (Math.abs(entry - stop) + (entry + stop) * C.FEES.commission);
-      $('#pfSize').innerHTML = `${s.profile.name}: may risk ${usd(s.nextRisk)} → <b>${z.qty} ${esc(C.base($('#pfS').value))}</b> (${usd(z.notional)}, ${z.leverage.toFixed(2)}x of ${z.levCap}x cap${z.capped ? `, <span class=warn>capped by ${z.capped === 'margin' ? 'margin left (' + usd(z.freeMargin) + ' free)' : 'the market\'s max position'}, real risk lower</span>` : ''}). Fees ≈ ${usd(z.fees)}.
+      $('#pfSize').innerHTML = `${s.profile.name}: may risk ${usd(s.nextRisk)} → <b>${z.qty} ${esc(C.base($('#pfS').value))}</b> (${usd(z.notional)}, ${z.leverage.toFixed(2)}x${z.levUnknown ? ' · <b class=warn>leverage unknown: screenshot your platform\'s order screen for this coin so the margin limit is known</b>' : ` of ${z.levCap}x cap`}${z.capped ? `, <span class=warn>capped by ${z.capped === 'margin' ? 'margin left (' + usd(z.freeMargin) + ' free)' : 'the market\'s max position'}, real risk lower</span>` : ''}). Fees ≈ ${usd(z.fees)}.
         At qty ${q}: loss at stop ≈ <b class="${loss > s.nextRisk * 1.05 ? 'dn' : ''}">${usd(loss)}</b>${loss > s.room ? ' <b class=dn>— breaches the account</b>' : ''}. Stops are not guaranteed fills; slippage adds to this.`;
     };
     $('#pfCalc').onclick = () => calc(true);
@@ -977,7 +977,7 @@
   function showImport(text, shotTime) {
     const r = C.parseKrakenProp(text, Date.now()); lastImport = { r, shotTime, text };
     const A = r.account, st = $('#impStatus');
-    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
+    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length && !Object.keys(r.leverage || {}).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
     st.textContent = '';
     const size = A.plan ? C.sizeFromLimits(A.plan, A.drawdownLimit, A.target) : null;
     const opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${A.label && a.label === A.label ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
@@ -993,6 +993,7 @@
         const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} @ ${px(q.entry)}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} @ ${px(k.pos.entry)}`));
         P.close.forEach(c => li.push(`<b class=dn>− Closed</b> ${esc(c.pos.side)} ${c.pos.qty} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result counted in balance'}`));
         return `<p class=small><b>Changes:</b> ${li.length ? '' : 'none to positions'}${P.keep.length ? ` · ${P.keep.length} unchanged` : ''}</p>${li.length ? '<div class=small>' + li.join('<br>') + '</div>' : ''}`; })()}
+      ${r.leverage && Object.keys(r.leverage).length ? `<p class=small><b>Leverage read:</b> ${Object.entries(r.leverage).map(([k, v]) => esc(k) + ' ' + v + 'x').join(', ')} (saved to the account)</p>` : ''}
       ${r.ledger && r.ledger.length ? `<p class=small><b>Ledger read:</b> ${r.ledger.length} row(s)${r.ledgerOk ? ', every running balance adds up' : ''} · swap fees ${usd(r.ledgerSum.swap)} · trades and commissions ${usd(r.ledgerSum.trade)}</p>` : ''}
       ${r.fills.length ? `<p class=small><b>Trades read:</b> ${r.fills.length} fill(s) · ${r.fills.filter(f => f.action === 'open' && f.t != null).length} opening today${r.fills.some(f => f.t == null) ? ' (older dated rows kept for history)' : ''}</p>` : ''}
       ${r.details.length ? `<table><tr><th>Position details read</th><th class=num>Size</th><th class=num>Stop</th><th class=num>Target</th><th>Opened</th></tr>${r.details.map(d => `<tr><td class="${d.side === 'short' ? 'dn' : 'up'}">${esc(d.side)} ${esc(d.base)}${d.entry ? ' @ ' + px(d.entry) : ''}</td><td class=num>${d.qty}</td><td class=num>${d.sl != null ? px(d.sl) : '—'}</td><td class=num>${d.tp != null ? px(d.tp) : '—'}</td><td class=small>${d.openedMs ? fmtTime(d.openedMs, true) : '—'}</td></tr>`).join('')}</table>` : ''}
@@ -1021,6 +1022,7 @@
     if (A.drawdownLimit > 0) acct.ddLimit = A.drawdownLimit;
     if (A.target > 0 && acct.phase === 'eval') acct.targetEq = A.target;
     if (A.equity > 0) acct.platformEq = { t, v: A.equity, appBefore: before.equity };
+    if (r.leverage && Object.keys(r.leverage).length) acct.leverage = Object.assign({}, acct.leverage, r.leverage);   // leverage as the venue shows it
     // Use the data given (owner's choice, Nov 1): when the screenshot shows the position list (or a flat account),
     // the app's open positions become exactly that list. A match (side + coin + entry) keeps his notes/stop/TP and
     // takes the platform's size; anything not on screen is closed (result from the Closed list when shown, otherwise

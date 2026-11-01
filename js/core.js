@@ -229,6 +229,20 @@
       if (twin) { for (const k of Object.keys(d)) if (twin[k] == null && d[k] != null) twin[k] = d[k]; } else merged.push(Object.assign({}, d));
     }
     out.details = merged;
+    // Leverage shown on the platform (order ticket, position sheet, market info): "BTC ... 10x", "Leverage 10x", "Max leverage: 5x".
+    // A number with x on a line that names one coin (or the line under it); "Leverage Nx" alone counts only when the screen names
+    // exactly one coin. Only 1x-200x is believed.
+    out.leverage = {};
+    { const COINS = /\b(BTC|XBT|ETH|SOL|XRP|LINK|LTC|DOGE|AVAX|SUI|HYPE|WLD|ADA|DOT|BNB|TON|PEPE|ARB|OP|NEAR|APT|TRX|BCH|ATOM)\b/i;
+      const ls = T.split('\n'), only = [...new Set((T.match(new RegExp(COINS.source, 'gi')) || []).map(c => c.toUpperCase().replace('XBT', 'BTC')))];
+      for (let i = 0; i < ls.length; i++) {
+        const m = /(?:^|[\s(])(\d{1,3}(?:\.\d)?)\s?[x×](?=$|[\s)])/i.exec(ls[i]); if (!m) continue;
+        const v = +m[1]; if (!(v >= 1 && v <= 200)) continue;
+        const coinOf = x => { const c = COINS.exec(x || ''); return c ? c[1].toUpperCase().replace('XBT', 'BTC') : null; };
+        const ctx = /lever|cross|isolated/i.test(ls[i]) || /lever/i.test(ls[i - 1] || '');
+        const coin = coinOf(ls[i]) || (ctx ? coinOf(ls[i - 1]) || coinOf(ls[i - 2]) || (only.length === 1 ? only[0] : null) : null);
+        if (coin && (ctx || coinOf(ls[i]))) out.leverage[coin] = v;
+      } }
     // History -> Ledger: each row = type, signed amount, date, running balance; newest first. The top row's running
     // balance is the account balance right now, fees included. Rows are checked against each other (older balance +
     // amount = newer balance); if any link fails, an OCR digit is wrong and the balance isn't used.
@@ -267,7 +281,21 @@
 
   // ---- Symbols -----------------------------------------------------------
   const base = sym => String(sym).split('/')[0].toUpperCase();
-  const levCap = (sym, lev) => { const b = base(sym); if (lev && lev[b]) return lev[b]; return LEVERAGE[b] || LEVERAGE._default; };
+  // Leverage comes from the venue, never asked (owner's rule, Nov 1 2026): a value read from his screenshots wins; otherwise the
+  // firm's published preset (Kraken Prop table above). A firm without a preset ("Other firm") has NO leverage until a screenshot
+  // shows it: levCap returns null and sizing says what's missing instead of guessing.
+  function levMap(a) { const m = Object.assign({}, (a && a.leverage) || {}); if (a && a.plan === 'custom') m._preset = false; return m; }
+  const levCap = (sym, lev) => { const b = base(sym); if (lev && lev[b]) return lev[b]; if (lev && lev._preset === false) return null; return LEVERAGE[b] || LEVERAGE._default; };
+  function levInfo(a, sym) { const b = base(sym), m = (a && a.leverage) || {};
+    if (m[b]) return { x: m[b], from: 'screenshot' };
+    if (a && a.plan === 'custom') return { x: null, from: null };
+    return { x: LEVERAGE[b] || LEVERAGE._default, from: LEVERAGE[b] ? 'preset' : 'preset-default' }; }
+  /* What the app still needs from his screenshots for this account (shown on the Desk with the screen to capture). */
+  function missingInfo(a, syms) {
+    const out = [];
+    for (const s of [...new Set(syms || [])]) { const li = levInfo(a, s); if (li.x == null) out.push({ k: 'leverage', sym: s, text: `${base(s)} leverage: screenshot your platform's order screen for ${base(s)} (it shows the leverage)` }); }
+    return out;
+  }
   const maxNotional = sym => MAX_NOTIONAL[base(sym)] || MAX_NOTIONAL._default;
   // Order size step = the coin's smallest unit (owner-confirmed Nov 1, 2026): 1 satoshi for BTC, 1 drop for XRP.
   const QTY_DP = { BTC: 8, ETH: 8, SOL: 8, XRP: 6 };
@@ -385,12 +413,13 @@
 
     const open = positions.filter(p => p.acct === a.id && !p.closed && openQty(p) > 0);
     let upnl = 0, feesOpen = 0, riskToStops = 0, noStop = 0, slUnknown = 0, missingPx = 0, notional = 0, usedMargin = 0;
-    const lev = opt.leverage || a.leverage;
+    const lev = opt.leverage || levMap(a);
+    let marginUnknown = 0;
     for (const p of open) {
       const px = prices[p.sym], q = openQty(p);
       feesOpen += openFeesPaid(p, nowMs, f);
       notional += p.entry * q;
-      usedMargin += p.entry * q / levCap(p.sym, lev);
+      { const cap = levCap(p.sym, lev); if (cap) usedMargin += p.entry * q / cap; else marginUnknown++; }
       const hasStop = p.stop != null && isFinite(p.stop);
       if (!hasStop) { if (p.krakenSL) slUnknown++; else noStop++; }
       if (px == null || !isFinite(px)) {
@@ -433,6 +462,7 @@
     const breached = equity <= floor;
     const reachedTarget = !isFunded && equity >= targetBal;
     const warnings = [];
+    for (const m of missingInfo(a, open.map(p => p.sym))) warnings.push({ lvl: 'warn', text: 'Missing: ' + m.text + '. Until then the margin limit for it is not checked.' });
     if (breached) warnings.push({ lvl: 'bad', text: 'Equity is at or below a breach line. Check your platform: the account may already be closed.' });
     if (noStop) warnings.push({ lvl: 'bad', text: `${noStop} open position(s) with no stop logged: risk is unlimited, next trade size set to $0.` });
     if (slUnknown) warnings.push({ lvl: 'warn', text: `${slUnknown} position(s) have a stop on your platform but the app doesn't know its price yet: total risk can't be added up. Import each position's TP/SL screenshot.` });
@@ -459,7 +489,7 @@
       winsToPass: (!isFunded && profRisk > 0) ? (r => Math.max(0, Math.ceil((targetBal - equity) / (profRisk * r)))) : null,
       lossesToday, tradesToday, reset, nextReset: reset + 86400000,
       cost, paid, net: paid - cost, notional, leverage: notional / Math.max(1, equity), usedMargin,
-      availMargin: Math.max(0, equity - usedMargin), breached, warnings, openRiskAtEntry,
+      availMargin: Math.max(0, equity - usedMargin), marginUnknown, breached, warnings, openRiskAtEntry,
       openBySym: open.reduce((m, p) => (m[p.sym] = (m[p.sym] || 0) + p.entry * openQty(p), m), {}),
       payoutAvail: isFunded ? Math.max(0, balance - start) * (a.addon90 ? 0.9 : 0.8) : null
     };
@@ -535,14 +565,14 @@
     let qty = o.risk / perUnit;
     const cap = levCap(o.sym, o.leverage);
     const freeMargin = Math.max(0, o.equity - (o.usedMargin || 0));
-    const byMargin = freeMargin * cap / o.entry;
+    const byMargin = cap ? freeMargin * cap / o.entry : Infinity;   // leverage unknown: no margin cap, flagged below
     const byMarket = Math.max(0, maxNotional(o.sym) - (o.symNotional || 0)) / o.entry;
     let capped = null;
     if (qty > byMargin) { qty = byMargin; capped = 'margin'; }
     if (qty > byMarket) { qty = byMarket; capped = 'market'; }
     qty = floorTo(qty, qtyDp(o.sym));
     const notional = qty * o.entry;
-    return { qty, notional, lossAtStop: qty * perUnit, leverage: notional / o.equity, levCap: cap, capped,
+    return { qty, notional, lossAtStop: qty * perUnit, leverage: notional / o.equity, levCap: cap, levUnknown: !cap, capped,
       freeMargin, fees: o.entry * qty * f.commission * 2, dist };
   }
 
@@ -966,7 +996,7 @@
   }
   function paperSize(acct, trades, idea, px, nowMs, prices) {
     const pos = paperPositions(trades, acct.id), A = accountState(acct, pos, prices || {}, nowMs);
-    const w = weighIdea(Object.assign({}, idea, { entry: px }), A, pos.filter(p => !p.closed), nowMs, { leverage: acct.leverage });
+    const w = weighIdea(Object.assign({}, idea, { entry: px }), A, pos.filter(p => !p.closed), nowMs, { leverage: levMap(acct) });
     if (A.breached) w.rules.unshift({ ok: false, t: 'paper account breached: start a new one' });
     return { A, ok: w.ok && !A.breached && !!(w.size && w.size.qty > 0), rules: w.rules, size: w.size };
   }
@@ -1268,7 +1298,7 @@
   function sampleReasons(r) {
     const why = [];
     const A = r.account || {};
-    const nothing = !r.positions.length && !r.details.length && !(r.fills || []).length && A.equity == null && A.balance == null && !(r.ledger || []).length && !r.flat;
+    const nothing = !r.positions.length && !r.details.length && !(r.fills || []).length && A.equity == null && A.balance == null && !(r.ledger || []).length && !r.flat && !Object.keys(r.leverage || {}).length;
     if (nothing) why.push('nothing-read');
     if ((r.ledger || []).length && r.ledgerOk === false) why.push('ledger-mismatch');
     if (r.warnings.some(w => /Could not read a position/.test(w))) why.push('position-unread');
@@ -1436,7 +1466,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
