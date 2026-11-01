@@ -1015,7 +1015,25 @@
     const d = t.side === 'short' ? -1 : 1, risk = Math.abs(t.entry - t.stop0), days = Math.max(0, (nowMs - t.opened) / 86400e3);
     return d * (exitPx - t.entry) / risk - 2 * FEES.commission * t.entry / risk - FEES.fundingPerDay * days * t.entry / risk;
   }
+  /* Paper limit order (owner's rule, Nov 2 2026): when price isn't at the level yet, a paper trade waits as a limit at the level
+     ('pending'), exactly like a real one. It opens at the level when price reaches it (limitFill: candles after it was placed, wicks
+     count, or the live price); if price runs to the target or the stop first it's cancelled and never counted. */
+  function paperLimit(idea, nowMs, meta) {
+    const d = idea.dir === 'short' ? -1 : 1;
+    if (!(idea.entry > 0) || idea.stop == null || d * (idea.entry - idea.stop) <= 0) return null;
+    return { id: 'pp' + nowMs.toString(36) + Math.floor(Math.random() * 1e4).toString(36), sym: idea.sym, side: d > 0 ? 'long' : 'short', kind: idea.kind || 'manual',
+      tf: String(idea.tf || ''), entry: idea.entry, plannedEntry: idea.entry, stop: idea.stop, stop0: idea.stop, target: idea.target != null ? idea.target : null,
+      opened: nowMs, placedAt: nowMs, status: 'pending', order: 'limit', mfe: 0, mae: 0, text: idea.text || '', meta: meta || {}, log: [{ t: nowMs, what: 'limit placed at ' + fmtPx(idea.entry) }] };
+  }
   function paperStep(t, bars, barSec, px, nowMs) {
+    if (t && t.status === 'pending') {
+      const f = limitFill({ side: t.side, entry: t.entry, stop: t.stop, tp1: t.target, placedAt: t.placedAt }, bars, barSec, px, nowMs);
+      if (f.ranAway) return Object.assign({}, t, { status: 'cancelled', closed: nowMs, why: `price ran to the ${f.ranAway} before the limit filled`, log: t.log.concat([{ t: nowMs, what: `cancelled: price reached the ${f.ranAway} first` }]) });
+      if (!f.filled) return t;
+      // Filled at the limit: the trade starts then; stop/target are checked from the next whole bar (the fill bar can't be split).
+      const next = f.t === nowMs ? nowMs : (Math.floor(f.t / 1000 / barSec) + 1) * barSec * 1000;
+      t = Object.assign({}, t, { status: 'open', opened: f.t, checkedTo: next, log: t.log.concat([{ t: f.t, what: 'limit filled at ' + fmtPx(t.entry) }]) });
+    }
     if (!t || t.status !== 'open') return t;
     const d = t.side === 'short' ? -1 : 1, risk = Math.abs(t.entry - t.stop0), out = Object.assign({}, t);
     const close = (price, why, at) => Object.assign(out, { status: 'closed', exit: price, closed: at, why, R: paperR(t, price, at), log: t.log.concat([{ t: at, what: why + ' at ' + fmtPx(price) }]) });
@@ -1038,15 +1056,17 @@
   /* Simulated prop account for paper trades (owner's request, Nov 1 2026). Paper trades become ordinary positions on a
      paper account, so balance, equity, daily/max floors, target, breach and pass come from the SAME accountState() the Desk uses.
      Sized at open with the same sizeFor() and the account's next-trade risk. Paper only: nothing here touches a real account. */
+  // Waiting paper limits take margin and risk room in the paper account, like real working orders.
+  function paperOrders(trades, acctId) { return (trades || []).filter(t => t.acct === acctId && t.qty > 0 && t.status === 'pending').map(t => ({ acct: acctId, sym: t.sym, side: t.side, qty: t.qty, entry: t.entry, stop: t.stop, status: 'placed' })); }
   function paperPositions(trades, acctId) {
-    return (trades || []).filter(t => t.acct === acctId && t.qty > 0).map(t => {
+    return (trades || []).filter(t => t.acct === acctId && t.qty > 0 && (t.status === 'open' || t.status === 'closed')).map(t => {
       const p = { id: t.id, acct: acctId, sym: t.sym, side: t.side, qty: t.qty, entry: t.entry, stop: t.stop, origStop: t.stop0, tp1: t.target, opened: t.opened, partials: [] };
       if (t.status === 'closed') p.closed = { t: t.closed, price: t.exit, realized: realizedFor(p, t.qty, t.exit, t.closed) };
       return p;
     });
   }
   function paperSize(acct, trades, idea, px, nowMs, prices) {
-    const pos = paperPositions(trades, acct.id), A = accountState(acct, pos, prices || {}, nowMs);
+    const pos = paperPositions(trades, acct.id), A = accountState(acct, pos, prices || {}, nowMs, { orders: paperOrders(trades, acct.id) });
     const w = weighIdea(Object.assign({}, idea, { entry: px }), A, pos.filter(p => !p.closed), nowMs, { leverage: levMap(acct) });
     if (A.breached) w.rules.unshift({ ok: false, t: 'paper account breached: start a new one' });
     return { A, ok: w.ok && !A.breached && !!(w.size && w.size.qty > 0), rules: w.rules, size: w.size };
@@ -1510,6 +1530,7 @@
     if (open) return { state: 'live', text: 'Live', acct: open.acct };
     if (pl.length) return pl[0].status === 'placed' ? { state: 'planned', text: `Limit placed @ ${fmtPx(pl[0].entry)}: waiting for fill`, acct: pl[0].acct } : { state: 'planned', text: 'Planned: place it on your platform', acct: pl[0].acct };
     if (pp.some(t => t.status === 'open')) return { state: 'paper', text: 'Paper trade open' };
+    if (pp.some(t => t.status === 'pending')) return { state: 'paper', text: 'Paper limit waiting' };
     const done = lv.find(p => p.closed), dp = pp.find(t => t.status === 'closed');
     if (done) { const o = tradeOutcome(done); return { state: 'used', acct: done.acct, text: 'Used live' + (o && o !== 'unknown' ? ': ' + (o === 'win' ? 'win' : o === 'loss' ? 'loss' : 'breakeven') : '') }; }
     if (dp) return { state: 'used', text: `Used on paper: ${dp.R >= 0 ? '+' : ''}${dp.R.toFixed(2)}R` };
@@ -1715,7 +1736,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

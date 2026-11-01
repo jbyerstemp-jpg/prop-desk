@@ -462,10 +462,15 @@
   function paperAdd(u) {
     const px = pnlPrice(u.sym); if (px == null) { alert('No live price yet.'); return; }
     if (!okToUse(u)) return;
-    const t = C.paperOpen(u, px, Date.now(), paperMeta(u)); if (!t) { alert('Price is already past this setup\'s stop. No paper trade.'); return; }
+    // Same order rule as live (owner's rule, Nov 2): market when price is at the level, otherwise a paper limit that waits there.
+    const op = C.orderPlan(u.entry, px, u.stop, u.dir, analyses[u.sym] && analyses[u.sym].atr ? analyses[u.sym].atr[60] : null);
+    if (op && op.type === 'none') { alert('Price is already past this setup\'s stop. No paper trade.'); return; }
+    const isLimit = op && op.type === 'limit';
+    const t = isLimit ? C.paperLimit(u, Date.now(), paperMeta(u)) : C.paperOpen(u, px, Date.now(), paperMeta(u)); if (!t) { alert('Price is already past this setup\'s stop. No paper trade.'); return; }
+    if (!isLimit) t.order = 'market';
     const pa = paperAcct();
     if (pa) {
-      const z = C.paperSize(pa, S.paper, u, px, Date.now(), prices());
+      const z = C.paperSize(pa, S.paper, u, isLimit ? u.entry : px, Date.now(), prices());
       if (z.ok) { t.acct = pa.id; t.qty = z.size.qty; t.riskUsd = z.size.lossAtStop; }
       else if (!confirm('Your paper prop account says not now: ' + z.rules.filter(r => !r.ok).map(r => r.t).join(', ') + '.\n\nOpen it as an R-only paper trade (no $ P&L) anyway?')) return;
     }
@@ -473,14 +478,14 @@
   }
   function paperTick() {
     let changed = false;
-    S.paper = S.paper.map(t => { if (t.status !== 'open') return t; const u = C.paperStep(t, F.candles(t.sym, 15), 900, pnlPrice(t.sym), Date.now()); if (u.status !== t.status) changed = true; return u; });
+    S.paper = S.paper.map(t => { if (t.status !== 'open' && t.status !== 'pending') return t; const u = C.paperStep(t, F.candles(t.sym, 15), 900, pnlPrice(t.sym), Date.now()); if (u.status !== t.status) changed = true; return u; });
     if (changed) { savePaper('closed by price'); if (T().notify) for (const t of S.paper.filter(t => t.status === 'closed' && t.closed > Date.now() - 60e3)) ntSend(`Paper ${t.sym} ${t.side}: ${t.why}`, `${t.R >= 0 ? '+' : ''}${t.R.toFixed(2)}R after fees. Paper only.`, 2); }
     if (tab === 'paper') renderPaper();
   }
   setInterval(() => { try { paperTick(); } catch (e) { console.warn(e); } }, 15000);
   // ---------- Simulated prop account for paper trades (same accountState as the Desk) ----------
   const paperAcct = () => S.paperAccts.find(a => a.status === 'active') || null;
-  function paperAcctState(a) { return C.accountState(a, C.paperPositions(S.paper, a.id), prices(), Date.now()); }
+  function paperAcctState(a) { return C.accountState(a, C.paperPositions(S.paper, a.id), prices(), Date.now(), { orders: C.paperOrders(S.paper, a.id) }); }
   function newPaperAcct(plan, size, profile) {
     for (const a of S.paperAccts) if (a.status === 'active') { const st = paperAcctState(a); a.status = 'ended'; a.ended = Date.now(); a.final = { equity: st.equity, net: st.equity - a.size }; }
     S.paperAccts.push({ id: 'pa' + Date.now().toString(36), label: 'Paper ' + C.PLANS[plan].name + ' ' + usd(size), plan, size, phase: 'eval', profile, created: Date.now(), status: 'active', paper: true });
@@ -727,15 +732,15 @@
   }
   function renderPaper() {
     const box = $('#paperBox'); if (!box) return;
-    const open = S.paper.filter(t => t.status === 'open'), closed = S.paper.filter(t => t.status === 'closed').sort((a, b) => b.closed - a.closed), st = C.paperStats(S.paper);
+    const open = S.paper.filter(t => t.status === 'open' || t.status === 'pending'), closed = S.paper.filter(t => t.status === 'closed').sort((a, b) => b.closed - a.closed), st = C.paperStats(S.paper);
     const r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R', cls = x => x > 0 ? 'up' : x < 0 ? 'dn' : '';
     const srows = Object.entries(st).map(([k, x]) => `<tr><td>${esc(k)}</td><td class=num>${x.n}</td><td class=num>${x.win == null ? '—' : Math.round(x.win * 100) + '%'}</td><td class="num ${cls(x.avgR)}">${r(x.avgR)}</td><td class="num ${cls(x.totalR)}">${r(x.totalR)}</td></tr>`).join('');
     box.innerHTML = scorecardHtml() + `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
       <p class=small>Add setups from the Chart tab ("Setups to watch") or the Coach ("Other setups"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
       ${paperAcctCard()}
       <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
-      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${fmtTime(t.opened, true)}</div></td>
-        <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(t.openR)}">${r(t.openR)}${t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
+      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.status === 'pending' ? ` <span class="tag warn">limit waiting @ ${px(t.entry)}</span>` : t.order === 'limit' ? ' <span class=tag>limit filled</span>' : t.order === 'market' ? ' <span class=tag>market</span>' : ''}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${t.status === 'pending' ? 'placed ' + fmtTime(t.placedAt, true) : fmtTime(t.opened, true)}</div></td>
+        <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(t.openR)}">${t.status === 'pending' ? `<span class=mu>waiting</span><div class=small>${(p0 => p0 != null ? px(p0) + ' now' : '')(pnlPrice(t.sym))}</div>` : r(t.openR)}${t.status === 'pending' ? '' : t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
         <td>${(use => use && (use.state === 'planned' || use.state === 'live') ? `<span class="tag ${use.state === 'live' ? 'up' : 'warn'}">${use.state === 'live' ? '✅ Live' : '⏳ Planned'}${use.acct && acctName(use.acct) ? ' · ' + esc(acctName(use.acct)) : ''}</span> ` : `<button class="btn sm pri" data-pp="live" data-id="${esc(t.id)}">Take it live</button> `)(t.setupKey ? C.setupUse(t.setupKey, S.paper, S.positions, S.planned, S.usedSetups) : null)}<button class="btn sm" data-pp="edit" data-id="${esc(t.id)}">Edit</button> <button class="btn sm" data-pp="close" data-id="${esc(t.id)}">Close</button></td></tr>`).join('')}</table>` : '<p class=mu>None. Add one from the setups lists.</p>'}</div>
       <div class=card><h3>Record</h3>${srows ? `<table><tr><th>Group</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Total</th></tr>${srows}</table><p class="small mu">Small samples mean little: 20+ trades per group before reading anything into it.</p>` : '<p class=mu>No closed paper trades yet.</p>'}</div>
       <div class=card><h3>Closed (${closed.length})</h3>${closed.length ? `<table><tr><th>Trade</th><th>Exit</th><th class=num>R</th><th class=num>Best / worst</th></tr>${closed.slice(0, 40).map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}<div class=mu>${fmtTime(t.opened, true)} → ${fmtTime(t.closed, true)}</div></td><td class=small>${esc(t.why)} @ ${px(t.exit)}</td><td class="num ${cls(t.R)}">${r(t.R)}${t.qty ? `<div class=small>${usd(C.paperPositions([Object.assign({}, t, { acct: 'x' })], 'x')[0].closed.realized)}</div>` : ''}</td><td class="num small">+${(t.mfe || 0).toFixed(1)} / -${(t.mae || 0).toFixed(1)}</td></tr>`).join('')}</table>` : '<p class=mu>None yet.</p>'}
@@ -748,6 +753,7 @@
     const b = e.target.closest('[data-pp]'); if (!b) return;
     const t = S.paper.find(x => x.id === b.dataset.id), now = Date.now();
     if (b.dataset.pp === 'live' && t) { paperToLive(t); return; }
+    if (b.dataset.pp === 'close' && t && t.status === 'pending') { Object.assign(t, { status: 'cancelled', closed: now, why: 'cancelled by you' }); t.log.push({ t: now, what: 'limit cancelled by you' }); savePaper('cancelled'); renderPaper(); return; }
     if (b.dataset.pp === 'close' && t) { const p0 = pnlPrice(t.sym); if (p0 == null) return; Object.assign(t, { status: 'closed', exit: p0, closed: now, why: 'closed by you', R: C.paperR(t, p0, now) }); t.log.push({ t: now, what: 'closed by you at ' + px(p0) }); savePaper('closed by hand'); renderPaper(); }
     if (b.dataset.pp === 'edit' && t) { const ns = prompt('Stop (paper):', t.stop); if (ns === null) return; const nt = prompt('Target (paper, blank = none):', t.target == null ? '' : t.target);
       const sv = num(ns), tv = nt === '' ? null : num(nt), d = t.side === 'short' ? -1 : 1, p0 = pnlPrice(t.sym);
