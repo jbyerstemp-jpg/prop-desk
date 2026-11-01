@@ -869,9 +869,9 @@
     if (f.length) { e.preventDefault(); importFiles(f); }
   });
   function showImport(text, shotTime) {
-    const r = C.parseKrakenProp(text); lastImport = { r, shotTime, text };
+    const r = C.parseKrakenProp(text, Date.now()); lastImport = { r, shotTime, text };
     const A = r.account, st = $('#impStatus');
-    if (!r.positions.length && !r.details.length && A.equity == null) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
+    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
     st.textContent = '';
     const size = A.plan ? C.sizeFromLimits(A.plan, A.drawdownLimit, A.target) : null;
     const opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${A.label && a.label === A.label ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
@@ -887,6 +887,7 @@
         const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} @ ${px(q.entry)}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} @ ${px(k.pos.entry)}`));
         P.close.forEach(c => li.push(`<b class=dn>− Closed</b> ${esc(c.pos.side)} ${c.pos.qty} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result counted in balance'}`));
         return `<p class=small><b>Changes:</b> ${li.length ? '' : 'none to positions'}${P.keep.length ? ` · ${P.keep.length} unchanged` : ''}</p>${li.length ? '<div class=small>' + li.join('<br>') + '</div>' : ''}`; })()}
+      ${r.fills.length ? `<p class=small><b>Trades read:</b> ${r.fills.length} fill(s) · ${r.fills.filter(f => f.action === 'open' && f.t != null).length} opening today${r.fills.some(f => f.t == null) ? ' (older dated rows kept for history)' : ''}</p>` : ''}
       ${r.details.length ? `<table><tr><th>Position details read</th><th class=num>Size</th><th class=num>Stop</th><th class=num>Target</th><th>Opened</th></tr>${r.details.map(d => `<tr><td class="${d.side === 'short' ? 'dn' : 'up'}">${esc(d.side)} ${esc(d.base)}${d.entry ? ' @ ' + px(d.entry) : ''}</td><td class=num>${d.qty}</td><td class=num>${d.sl != null ? px(d.sl) : '—'}</td><td class=num>${d.tp != null ? px(d.tp) : '—'}</td><td class=small>${d.openedMs ? fmtTime(d.openedMs, true) : '—'}</td></tr>`).join('')}</table>` : ''}
       ${!r.positions.length && !r.flat ? '<p class=small>No position list in these screenshots: your open positions stay as they are' + (r.details.length ? '; details are added to the matching ones.' : '.') + '</p>' : ''}
       ${r.warnings.map(w => `<p class="small warn">${esc(w)}</p>`).join('')}
@@ -929,7 +930,19 @@
       const old = S.positions.find(p => p.acct === acct.id && p.closed && p.closed.synced && !p.closed.resultKnown && p.side === row.side && p.sym === row.sym && Math.abs(p.entry - row.entry) < 0.01 && Math.abs(p.qty - row.qty) < 1e-9);
       if (old) { old.closed.realized = row.realized; old.closed.price = row.exit; old.closed.resultKnown = true; if (old.closed.t > t) old.closed.t = t - 1; }
     }
-    lastSyncSummary = { keep: plan.keep.length, add: plan.add.length, partial: plan.partial.length, close: plan.close.length, diff: A.equity > 0 ? before.equity - A.equity : null };
+    // Trades tab: keep the platform's fills (deduped) and use them to complete open positions' history.
+    let fillN = 0, storyN = 0;
+    if (r.fills.length) {
+      const key = f => [f.side, f.sym, f.action, f.qty, f.price, f.t || f.day].join('|');
+      const have = new Set((acct.fills || []).map(key));
+      acct.fills = (acct.fills || []).concat(r.fills.filter(f => !have.has(key(f)) && (fillN++, true))).sort((x, y) => (y.t || y.day || 0) - (x.t || x.day || 0)).slice(0, 300);
+      for (const p of S.positions.filter(p => p.acct === acct.id && !p.closed)) {
+        const h = C.fillHistory(p, acct.fills); if (!h) continue;
+        p.opened = Math.min(h.opened, t - 2); p.openedUnknown = false;
+        if (h.partials && !(p.partials || []).length && h.partials.length) { p.qty = h.qty; p.partials = h.partials.map(x => Object.assign(x, { t: Math.min(x.t, t - 1) })); storyN++; }
+      }
+    }
+    lastSyncSummary = { fills: fillN, story: storyN, keep: plan.keep.length, add: plan.add.length, partial: plan.partial.length, close: plan.close.length, diff: A.equity > 0 ? before.equity - A.equity : null };
     // Position detail sheets: stop/target, real open time. Match by side + coin + size (+ entry when shown).
     let setN = 0; const unmatched = [];
     for (const d of r.details) {
@@ -953,7 +966,7 @@
     const withPx = r.positions.find(q => q.price > 0) || r.details.find(q => q.price > 0);
     if (withPx && now - t < 10 * 60000) { const qq = pnlQuote(withPx.sym); if (qq.raw && Math.abs(withPx.price / qq.raw - 1) < 0.01) S.calib.push({ t, sym: withPx.sym, prop: withPx.price, est: qq.raw }); }
     save(); ensureFeeds(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impText').value = ''; $('#impText').hidden = true;
-    const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' partly closed', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} off, now matched` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
+    const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' partly closed', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${L.fills ? ` · ${L.fills} new fill(s)` : ''}${L.story ? ` · ${L.story} position history rebuilt` : ''}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} off, now matched` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
     posFormDirty = true; autoPush('import'); switchTab('coach');
   }
 
@@ -1079,7 +1092,7 @@
   });
   // Monitor hand-off. Build the watch file (positions, stops, limits; no keys).
   function buildWatch() {
-    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'dayResetAt', 'anchor', 'dayStartOverride', 'created'];
+    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'dayResetAt', 'fills', 'anchor', 'dayStartOverride', 'created'];
     const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
     const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
       stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [] }));

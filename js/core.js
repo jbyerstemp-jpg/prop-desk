@@ -114,11 +114,11 @@
 
   /* Read a Kraken Prop screen (OCR text or copied text). Returns what it could read; anything not found
      stays null (never 0). Only the Open section is read; closed positions are ignored. */
-  function parseKrakenProp(text) {
+  function parseKrakenProp(text, nowMs) {
     const num = v => (v == null ? null : Number(String(v).replace(/,/g, '')));
     const T = String(text || '').replace(/\r/g, '');
     const grab = re => { const m = re.exec(T); return m ? num(m[1]) : null; };
-    const out = { account: {}, positions: [], groups: [], warnings: [] };
+    const out = { account: {}, positions: [], groups: [], warnings: [], _now: nowMs };
     const nm = /\b(Advanced|Intermediate|Starter|Lite)\s*(Eval|Funded)\w*\s*#?\s*(\d+)?/i.exec(T);
     if (nm) out.account = { plan: nm[1].toLowerCase(), phase: /fund/i.test(nm[2]) ? 'funded' : 'eval',
       label: (nm[1][0].toUpperCase() + nm[1].slice(1).toLowerCase()) + ' ' + (nm[2][0].toUpperCase() + nm[2].slice(1).toLowerCase()) + (nm[3] ? ' ' + nm[3] : '') };
@@ -179,6 +179,23 @@
         const em = cl[i + 2] ? /@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?\s*([\d,]+\.?\d*)?/i.exec(cl[i + 2]) : null;
         if (!qm || !em || qm[3] == null) continue;
         out.closedRows.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD', realized: num(qm[3]), entry: num(em[1]), exit: em[2] ? num(em[2]) : null });
+      } }
+    // Trades tab (History -> Trades): each fill with side, open/close, size, order type, price and time.
+    // Time-only rows are today (phone's local date); older rows show a date and no time.
+    out.fills = [];
+    { const fl = T.split('\n').map(l => l.trim()).filter(Boolean);
+      const base = new Date(out._now || Date.now());
+      for (let i = 0; i < fl.length; i++) {
+        const hm = /\b(Buy|Sell)\s+([A-Z]{2,6})\s+(Opening|Closing)\b\s*(?:(\d{1,2}):(\d{2})\s*([AP])\.?M|([A-Z][a-z]{2})\w*\s+(\d{1,2}),\s*(\d{4}))?/i.exec(fl[i]);
+        if (!hm || !fl[i + 1]) continue;
+        const qm = /^([\d]*\.?\d+)\s*(?:USD|BTC|ETH|SOL|XRP|[A-Z]{2,6})?\b/.exec(fl[i + 1]);
+        const pm = fl[i + 2] ? /@\s*(Market|Limit|Stop[\w\s-]*|Take[\w\s-]*)?\s*([\d,]+\.?\d*)/i.exec(fl[i + 2]) : null;
+        if (!qm) continue;
+        let t = null, day = null;
+        if (hm[4]) { let h = +hm[4] % 12; if (/p/i.test(hm[6])) h += 12; t = new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, +hm[5]).getTime(); if (t > base.getTime() + 6e4) t -= 864e5; }
+        else if (hm[7]) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(hm[7].toLowerCase()) / 3; if (mo >= 0) day = new Date(+hm[9], mo, +hm[8]).getTime(); }
+        out.fills.push({ side: hm[1].toLowerCase(), base: hm[2].toUpperCase(), sym: hm[2].toUpperCase() + '/USD', action: /open/i.test(hm[3]) ? 'open' : 'close',
+          qty: num(qm[1]), type: pm && pm[1] ? pm[1].trim().toLowerCase() : null, price: pm ? num(pm[2]) : null, t, day });
       } }
     // De-duplicate (the same position can appear on two overlapping screenshots)
     const seen = new Set();
@@ -247,7 +264,8 @@
   // charges it on the position's current value; we use the entry value (difference ~0.1% of a ~$0.43 fee).
   const dir = p => (p.side === 'short' ? -1 : 1);
   const qtyClosedBy = (p, t) => (p.partials || []).reduce((s, x) => s + (x.t <= t ? x.qty : 0), 0);
-  const openQty = p => Math.max(0, p.qty - (p.partials || []).reduce((s, x) => s + x.qty, 0));
+  // Rounded to 10 decimals so 0.172 - 0.043 - 0.064 reads 0.065, not 0.06499999...
+  const openQty = p => Math.max(0, Math.round((p.qty - (p.partials || []).reduce((s, x) => s + x.qty, 0)) * 1e10) / 1e10);
   function grossPnl(p, price, qty) { return dir(p) * (price - p.entry) * (qty == null ? openQty(p) : qty); }
   const ROLL = 4 * 3600000;
   // Swap charge times for a position opened at openedMs, in (openedMs, toMs]: every 4h from its open.
@@ -385,7 +403,8 @@
     // "Reset my day" restarts the app's own counters (never the platform's loss limits).
     const countFrom = Math.max(reset, a.dayResetAt || 0);
     const lossesToday = positions.filter(p => p.acct === a.id && p.closed && p.closed.t > countFrom && realizedOfPos(p) < 0).length;
-    const tradesToday = positions.filter(p => p.acct === a.id && p.opened > countFrom && !p.openedUnknown).length;
+    const tradesToday = (a.fills && a.fills.length) ? a.fills.filter(f => f.action === 'open' && f.t != null && f.t > countFrom).length
+      : positions.filter(p => p.acct === a.id && p.opened > countFrom && !p.openedUnknown).length;
     const prof = profileById(a.profile);
     const openRiskAtEntry = open.reduce((s, p) => s + (p.stop != null ? Math.abs(p.entry - p.stop) * openQty(p) : 0), 0);
     const profRisk = start * prof.riskPct / 100;
@@ -1199,6 +1218,20 @@
   }
   const TRADE_TAGS = { plan: 'Followed plan', mistake: 'Mistake (execution/logging)', rulebreak: 'Rule break', data: 'Data problem' };
 
+  /* Use platform fills to complete an open position's story: its real open time and the partial closes that took it
+     from the opening size to what's open now. Only applied when the numbers add up exactly; otherwise nothing changes. */
+  function fillHistory(p, fills) {
+    const openSide = p.side === 'short' ? 'sell' : 'buy', closeSide = p.side === 'short' ? 'buy' : 'sell';
+    const op = fills.filter(f => f.action === 'open' && f.side === openSide && f.sym === p.sym && f.price != null && Math.abs(f.price - p.entry) < 0.01 && f.t != null)
+      .sort((x, y) => y.t - x.t)[0];
+    if (!op) return null;
+    const closes = fills.filter(f => f.action === 'close' && f.side === closeSide && f.sym === p.sym && f.t != null && f.t > op.t && f.price != null).sort((x, y) => x.t - y.t);
+    const closed = closes.reduce((a, f) => a + f.qty, 0);
+    const cur = openQty(p);
+    if (Math.abs(op.qty - closed - cur) > 1e-9) return { opened: op.t, partials: null };
+    return { opened: op.t, qty: op.qty, partials: closes.map(f => ({ t: f.t, qty: f.qty, price: f.price, realized: realizedFor(Object.assign({}, p, { opened: op.t }), f.qty, f.price, f.t), note: 'partial close on platform (' + (f.type || 'fill') + ')' })) };
+  }
+
   // ---- Formatting --------------------------------------------------------
   function fmtUsd(x) {
     if (x == null || !isFinite(x)) return '—';
@@ -1213,7 +1246,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
