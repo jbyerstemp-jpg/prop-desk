@@ -515,6 +515,11 @@
   const acctName = id => { const a = acctById(id); return a ? a.label || C.planOf(a).name + ' ' + usd(a.size) : ''; };
   function okToUse(u) { const use = useOf(u); return !use || confirm(`This setup was already used (${use.text}). Use it again anyway?`); }
   const SETUP_LISTS = { chart: () => lastUps, coach: () => coachUps, scan: () => scanAll.rows };
+  // ---------- Folds stay open through the screen's refresh (owner's report, Nov 1 2026) ----------
+  // The Coach, Chart and Paper screens redraw every few seconds; each fold remembers that he opened it.
+  const openFolds = new Set();
+  const fold = id => `data-fold="${esc(id)}"${openFolds.has(id) ? ' open' : ''}`;
+  document.addEventListener('toggle', e => { const d = e.target; if (!d || !d.dataset || !d.dataset.fold) return; if (d.open) openFolds.add(d.dataset.fold); else openFolds.delete(d.dataset.fold); }, true);
   // ---------- One setup card everywhere (owner's request, Nov 1 2026) ----------
   // Same layout on Chart, Coach and Scan all: one header line, a fixed row of price boxes (tap a box to copy that number for
   // the platform's order form), the status/buttons, and the long explanation folded under "Why".
@@ -530,7 +535,7 @@
       <div class=sc-t>${g.ok ? '<span class="tag up">alert grade</span>' : '<span class="tag mu">below alert grade</span>'}${u.ready ? '<span class="tag up">ready</span>' : '<span class="tag mu">not ready</span>'}${setupBadge(u.kind, u.tf)}</div>
       ${priceBoxes([['Entry', cpVal(u.entry)], ['Stop', cpVal(u.stop)], ['Target', cpVal(u.target)], ['Size', q != null ? String(q) : '', q != null ? String(+q.toPrecision(4)) : null]])}
       <div class=sc-a>${setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · entry ${cpVal(u.entry)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
-      <details class=sc-w><summary>Why</summary><div>${esc(u.text)}</div><div>${(u.rules || []).map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
+      <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary><div>${esc(u.text)}</div><div>${(u.rules || []).map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
   }
   async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch (e) { try { const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } catch (e2) { return false; } } }
   document.addEventListener('click', async e => {
@@ -632,7 +637,7 @@
       return `<div class=sc><div class=sc-h><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${pl.side.toUpperCase()}</b> <b>${esc(C.base(pl.sym))}</b> <span>${lim ? 'Limit' : 'Market'}</span> <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span></div>
         ${priceBoxes([[lim ? 'Limit' : 'Entry ~', cpVal(pl.entry)], ['Stop', cpVal(pl.stop)], ['Target', cpVal(pl.tp1)], ['Size', String(pl.qty), String(+(+pl.qty).toPrecision(4))]])}
         <div class=small>${state}</div>
-        <div class=sc-a>${btns}</div>${pl.thesis ? `<details class=sc-w><summary>Plan</summary><div>${esc(pl.thesis)}</div></details>` : ''}</div>`; }).join('')}
+        <div class=sc-a>${btns}</div>${pl.thesis ? `<details class=sc-w ${fold('plan:' + pl.id)}><summary>Plan</summary><div>${esc(pl.thesis)}</div></details>` : ''}</div>`; }).join('')}
       <p class="small mu">None of these count on the Desk. A working limit turns into an open position by itself when price reaches it (checked against the candles since you placed it, even after the app was closed). Importing a screenshot that shows the position does it too.</p></div>`;
   }
   // Working limits: fill when price reaches the limit (owner's rule, Nov 1 2026). Runs every 15 s and when the app opens.
@@ -695,11 +700,11 @@
       <p class=small>Each setup type is judged by your closed paper trades and live trades tagged "followed plan" (in R, after fees), next to the replay on past candles and <b>everyone's</b> results (both apps, self-reported). Mistakes, rule breaks and data problems never count against a setup.</p>
       ${rows ? `<table><tr><th>Setup</th><th class=num>Replay</th><th class=num>Your paper</th><th class=num>Your live</th><th class=num>Everyone</th></tr>${rows}</table>` : '<p class=mu>No closed trades under this model yet. Paper trade the setups, or plan live trades with "Plan it", and they show up here.</p>'}
       ${sc.unlinked ? `<p class="small warn">${sc.unlinked} closed live trade(s) aren't linked to a setup: pick one in Positions → Closed (journal).</p>` : ''}
-      <details><summary class=small><b>How it decides</b> (rules fixed Nov 1, 2026, before any results)</summary><p class=small>Under ${C.SCORE_RULES.minN} trades: <b>gathering</b>, too few to tell. With ${C.SCORE_RULES.minN}+: <b>proven</b> if the whole 95% range of the average R is above 0; <b>disproven</b> if it's all below 0; <b>below replay</b> if it's all below the replay's average (execution or the edge fading); otherwise <b>unclear</b>. A change is only a suggestion: you accept it. ★ trusted setups are marked and listed first; benched ones stop sending phone alerts. Nothing here ever changes your size. When the model's rules change it gets a new version (now ${esc(sc.model)}), and its record starts fresh so old and new rules never mix.</p></details>
-      ${tagRows || sesRows ? `<details><summary class=small><b>Your patterns</b></summary><table><tr><th>Live trades by tag</th><th class=num>Result</th></tr>${tagRows || '<tr><td colspan=2 class=mu>No live trades yet.</td></tr>'}</table>
+      <details ${fold('sc:how')}><summary class=small><b>How it decides</b> (rules fixed Nov 1, 2026, before any results)</summary><p class=small>Under ${C.SCORE_RULES.minN} trades: <b>gathering</b>, too few to tell. With ${C.SCORE_RULES.minN}+: <b>proven</b> if the whole 95% range of the average R is above 0; <b>disproven</b> if it's all below 0; <b>below replay</b> if it's all below the replay's average (execution or the edge fading); otherwise <b>unclear</b>. A change is only a suggestion: you accept it. ★ trusted setups are marked and listed first; benched ones stop sending phone alerts. Nothing here ever changes your size. When the model's rules change it gets a new version (now ${esc(sc.model)}), and its record starts fresh so old and new rules never mix.</p></details>
+      ${tagRows || sesRows ? `<details ${fold('sc:patterns')}><summary class=small><b>Your patterns</b></summary><table><tr><th>Live trades by tag</th><th class=num>Result</th></tr>${tagRows || '<tr><td colspan=2 class=mu>No live trades yet.</td></tr>'}</table>
         <table style="margin-top:6px"><tr><th>All trades by session (NY time)</th><th class=num>Result</th></tr>${sesRows}</table>
         <p class=small>Trades opened within 4h after a losing trade: ${cell(pat.afterLoss)}</p></details>` : ''}
-      <details><summary class=small><b>Model versions</b></summary><table>${C.MODELS.slice().reverse().map(m => `<tr><td><b>${m.id}</b></td><td class=small>${m.from ? new Date(m.from).toISOString().slice(0, 10) : '—'}</td><td class=small>${esc(m.note)}</td></tr>`).join('')}</table></details></div>`;
+      <details ${fold('sc:models')}><summary class=small><b>Model versions</b></summary><table>${C.MODELS.slice().reverse().map(m => `<tr><td><b>${m.id}</b></td><td class=small>${m.from ? new Date(m.from).toISOString().slice(0, 10) : '—'}</td><td class=small>${esc(m.note)}</td></tr>`).join('')}</table></details></div>`;
   }
   function renderPaper() {
     const box = $('#paperBox'); if (!box) return;
