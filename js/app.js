@@ -1034,7 +1034,8 @@
       // Same plan the preview showed (C.planSync), so what he approved is exactly what is applied.
       plan = C.planSync(open, r.positions, r.closedRows);
       for (const k of plan.keep) { k.pos.krakenSL = k.snap.hasSL; k.pos.krakenTP = k.snap.hasTP; }
-      for (const k of plan.partial) { const p = k.pos; p.qty = k.snap.qty; p.partials = []; p.krakenSL = k.snap.hasSL; p.krakenTP = k.snap.hasTP; }
+      // Partly closed on the platform: keep the history, add the closed part (its result is already in the imported balance).
+      for (const k of plan.partial) { const p = k.pos; p.partials = (p.partials || []).concat({ t: t - 1, qty: k.closedQty, price: null, realized: 0, resultKnown: false, synced: true }); p.krakenSL = k.snap.hasSL; p.krakenTP = k.snap.hasTP; }
       for (const q of plan.add)
         S.positions.push({ id: uid(), acct: acct.id, sym: q.sym, side: q.side, qty: q.qty, entry: q.entry, stop: null, origStop: null, tp1: null, tp2: null,
           tf: 15, setup: 'Imported', thesis: '', opened: t - 2, openedUnknown: true, partials: [], stopHist: [], krakenSL: q.hasSL, krakenTP: q.hasTP, source: 'kraken-import' });
@@ -1057,7 +1058,7 @@
     let setN = 0; const unmatched = [];
     for (const d of r.details) {
       let cands = S.positions.filter(p => p.acct === acct.id && !p.closed && p.side === d.side && p.sym === d.sym && Math.abs(C.openQty(p) - d.qty) < 1e-9);
-      if (d.entry != null && cands.some(p => Math.abs(p.entry - d.entry) < 0.01)) cands = cands.filter(p => Math.abs(p.entry - d.entry) < 0.01);
+      if (d.entry != null && cands.some(p => C.samePx(p.entry, d.entry))) cands = cands.filter(p => C.samePx(p.entry, d.entry));
       const p = cands.find(x => x.stop == null) || cands[0];
       if (!p) { unmatched.push(`${d.side} ${d.qty} ${d.base}`); continue; }
       if (cands.length > 1) unmatched.push(`${d.qty} ${d.base}: ${cands.length} positions share this size, applied to one; check them`);

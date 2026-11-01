@@ -1236,9 +1236,12 @@
   /* Reconcile the app's open positions with a platform snapshot. Only what differs changes:
      matched (same side, coin, entry) stays (qty drop = partial close); new ones are added; missing ones are
      closed, with the platform's realized result when its Closed list shows it. Pure: returns a plan. */
+  /* Same entry price, allowing for display rounding (a typed 77,652.23 vs the platform's 77,652.2): within 0.002% (about
+     $1.50 on BTC, 0.00004 on XRP), never looser than $0.01 on very cheap coins' absolute floor. */
+  const samePx = (a, b) => Math.abs(a - b) <= Math.max(0.01 * Math.min(1, Math.abs(a) / 1000), Math.abs(a) * 2e-5);
   function planSync(appOpen, snap, closedRows) {
     const used = new Set(), usedClosed = new Set(), plan = { keep: [], partial: [], add: [], close: [] };
-    const same = (p, q) => p.side === q.side && p.sym === q.sym && Math.abs(p.entry - q.entry) < 0.01;
+    const same = (p, q) => p.side === q.side && p.sym === q.sym && samePx(p.entry, q.entry);
     for (const q of snap) {
       const exact = appOpen.find(p => !used.has(p.id) && same(p, q) && Math.abs(openQty(p) - q.qty) < 1e-9);
       const m = exact || appOpen.find(p => !used.has(p.id) && same(p, q) && openQty(p) > q.qty + 1e-9);
@@ -1347,12 +1350,13 @@
     return (kk === 'fvg' || kk === 'sweep') && tf ? kk + '|' + String(tf) : kk === 'fvg' || kk === 'sweep' ? 'unlinked' : kk;
   }
   const setupLabel = key => (SETUP_CHOICES.find(c => c[0] === key) || [key, key])[1];
-  /* R of a closed live trade: total realized (fees included) / dollars at risk at entry (original stop x original size).
+  /* R of a closed live trade: total realized (fees included) / dollars at risk at entry (original stop x original size, p.qty).
      null when the result or the original stop isn't known: never guessed. */
   function liveR(p) {
     if (!p.closed || (p.closed.synced && !p.closed.resultKnown)) return null;
     const stop = p.origStop != null ? p.origStop : null; if (stop == null || !(p.entry > 0)) return null;
-    const q0 = (p.qty || 0) + (p.partials || []).reduce((a, x) => a + (x.qty || 0), 0);
+    if ((p.partials || []).some(x => x.resultKnown === false)) return null;   // a part closed with an unknown result
+    const q0 = p.qty || 0;   // p.qty is the ORIGINAL size; partials are taken out of it (openQty)
     const risk = Math.abs(p.entry - stop) * q0; if (!(risk > 0)) return null;
     return realizedOfPos(p) / risk;
   }
@@ -1466,7 +1470,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

@@ -25,7 +25,7 @@ jobs:
           PATTERN_LAB_TOKEN: ${{ secrets.PATTERN_LAB_TOKEN }}
           PATTERN_LAB_REPO: ${{ vars.PATTERN_LAB_REPO }}
         run: |
-          if [ -f monitor/HOSTED_ON_CLOUDFLARE ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then echo "Cloudflare runs the monitor; GitHub is the manual backup only."; exit 0; fi
+          if [ -z "$NTFY_TOPIC" ]; then echo "NTFY_TOPIC_PROP secret not set: nothing to alert, skipping (see MONITOR-SETUP.md)."; exit 0; fi
           node monitor/run.js
       - name: Save alert memory (only if it changed)
         working-directory: repo
