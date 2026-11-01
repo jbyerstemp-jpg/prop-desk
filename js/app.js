@@ -547,7 +547,7 @@
         <label>Size<input id=tlQ type=number step=any></label>
         <label style="grid-column:1/-1">Plan (why, and what makes you get out)<input id=tlTh value="${esc(u.text)}"></label></div>
       <div id=tlOut class=small></div>
-      <p class="small mu">This saves a <b>planned</b> trade. Nothing counts on the Desk until you place it on your platform and tap <b>It's live</b> on the Positions tab (or import the screenshot, which picks it up by itself).</p>
+      <p class="small mu">This saves a <b>planned</b> trade. Nothing counts on the Desk yet. Market: place it, then tap <b>It's live</b>. Limit: place it, tap <b>Limit placed</b>, and it becomes an open position by itself when price reaches it. Importing the screenshot also picks it up.</p>
       <div class=row><button class="btn pri" id=tlOk>Save plan</button><button class=btn data-close>Cancel</button></div>`);
     $('#tlType').onchange = () => { $('#tlE').value = $('#tlType').value === 'market' && pnlPrice(u.sym) != null ? pxIn(pnlPrice(u.sym)) : pxIn(u.entry); upd(true); };
     $('#tlE').addEventListener('change', () => upd(true));
@@ -570,7 +570,7 @@
   // Planned -> live: he placed it on the platform. Fill price and size as the platform shows them.
   function goLive(pl) {
     const live = pnlPrice(pl.sym);
-    showModal(`<h3>It's live: ${esc(pl.sym)} ${pl.side.toUpperCase()}</h3>
+    showModal(`<h3>${pl.status === 'placed' ? 'Limit filled' : 'It\'s live'}: ${esc(pl.sym)} ${pl.side.toUpperCase()}</h3>
       <div class=form><label>Fill price (from your platform)<input id=glE type=number step=any value="${pl.entry}"></label>
         <label>Size filled<input id=glQ type=number step=any value="${pl.qty}"></label>
         <label>Stop set on the platform<input id=glS type=number step=any value="${pl.stop}"></label>
@@ -594,15 +594,36 @@
   }
   function plannedHtml() {
     if (!S.planned.length) return '';
-    return `<div class=card id=posPlanned><h3>Planned: place these on your platform</h3>${S.planned.map(pl => { const a = acctById(pl.acct);
-      return `<div style="margin:6px 0"><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${esc(pl.sym)} ${pl.side.toUpperCase()}</b> ${pl.qty} · <b>${pl.orderType === 'market' ? 'Market' : 'Limit @ ' + px(pl.entry)}</b>${pl.orderType === 'market' ? ' (~' + px(pl.entry) + ')' : ''} · stop ${px(pl.stop)}${pl.tp1 != null ? ' · target ' + px(pl.tp1) : ''} <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span>
-        <div class="small mu">${esc(pl.thesis)} · planned ${fmtTime(pl.created, true)}</div>
-        <div class=row><button class="btn sm pri" data-golive="${pl.id}">✅ It's live</button><button class="btn sm" data-dropplan="${pl.id}">Cancel plan</button></div></div>`; }).join('')}
-      <p class="small mu">Not counted on the Desk until it's live. Importing a screenshot that shows it marks it live by itself.</p></div>`;
+    return `<div class=card id=posPlanned><h3>Planned and working orders</h3>${S.planned.map(pl => { const a = acctById(pl.acct), lim = pl.orderType !== 'market', placed = pl.status === 'placed';
+      const state = placed ? `<b class=warn>📌 Limit working since ${fmtTime(pl.placedAt, true)}</b>: becomes an open position when price reaches ${px(pl.entry)}${pl.ranAway ? `<div class=dn>Price ran to the ${pl.ranAway === 'target' ? 'target' : 'stop'} without filling: cancel this order on your platform.</div>` : ''}`
+        : lim ? '<b>Not placed yet</b>: place the limit order on your platform, then tap Limit placed.' : '<b>Not placed yet</b>: place the market order on your platform, then tap It\'s live.';
+      const btns = placed ? `<button class="btn sm" data-golive="${pl.id}">It filled</button><button class="btn sm" data-dropplan="${pl.id}">Order cancelled</button>`
+        : lim ? `<button class="btn sm pri" data-placed="${pl.id}">📌 Limit placed</button><button class="btn sm" data-dropplan="${pl.id}">Cancel plan</button>`
+        : `<button class="btn sm pri" data-golive="${pl.id}">✅ It's live</button><button class="btn sm" data-dropplan="${pl.id}">Cancel plan</button>`;
+      return `<div style="margin:8px 0"><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${esc(pl.sym)} ${pl.side.toUpperCase()}</b> ${pl.qty} · <b>${lim ? 'Limit @ ' + px(pl.entry) : 'Market (~' + px(pl.entry) + ')'}</b> · stop ${px(pl.stop)}${pl.tp1 != null ? ' · target ' + px(pl.tp1) : ''} <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span>
+        <div class=small>${state}</div><div class="small mu">${esc(pl.thesis)}</div>
+        <div class=row>${btns}</div></div>`; }).join('')}
+      <p class="small mu">None of these count on the Desk. A working limit turns into an open position by itself when price reaches it (checked against the candles since you placed it, even after the app was closed). Importing a screenshot that shows the position does it too.</p></div>`;
   }
+  // Working limits: fill when price reaches the limit (owner's rule, Nov 1 2026). Runs every 15 s and when the app opens.
+  function plannedTick() {
+    let changed = false; const now = Date.now();
+    for (const pl of S.planned.filter(x => x.status === 'placed')) {
+      const f = C.limitFill(pl, F.candles(pl.sym, 15), 900, pnlPrice(pl.sym), now);
+      if (f.filled) {
+        S.positions.push(liveFromPlan(pl, { entry: pl.entry, qty: pl.qty, stop: pl.stop, opened: f.t, source: 'limit-fill' }));
+        S.planned = S.planned.filter(x => x.id !== pl.id); changed = true;
+        ntSend(`${pl.sym} ${pl.side} limit filled @ ${px(pl.entry)}`, `Now an open position on ${acctName(pl.acct)}. Check your platform shows it.`, 4);
+      } else if (f.ranAway && !pl.ranAway) { pl.ranAway = f.ranAway; changed = true;
+        ntSend(`${pl.sym} ${pl.side}: limit not filled, price ran to the ${f.ranAway}`, `Cancel the ${px(pl.entry)} limit on your platform.`, 4); }
+    }
+    if (changed) { posFormDirty = true; saveAndSync('limit'); renderAll(true); }
+  }
+  setInterval(() => { try { plannedTick(); } catch (e) { console.warn(e); } }, 15000); setTimeout(() => { try { plannedTick(); } catch (e) { } }, 8000);
   document.addEventListener('click', e => {
     const g = e.target.closest('[data-golive]'); if (g) { const pl = S.planned.find(x => x.id === g.dataset.golive); if (pl) goLive(pl); return; }
-    const d = e.target.closest('[data-dropplan]'); if (d && confirm('Cancel this plan? The setup stays marked as used.')) { S.planned = S.planned.filter(x => x.id !== d.dataset.dropplan); save(); renderAll(true); }
+    const pd = e.target.closest('[data-placed]'); if (pd) { const pl = S.planned.find(x => x.id === pd.dataset.placed); if (pl) { pl.status = 'placed'; pl.placedAt = Date.now(); save(); renderAll(true); } return; }
+    const d = e.target.closest('[data-dropplan]'); if (d && confirm('Remove this ' + ((S.planned.find(x => x.id === d.dataset.dropplan) || {}).status === 'placed' ? 'working order (cancel it on your platform too)' : 'plan') + '? The setup stays marked as used.')) { S.planned = S.planned.filter(x => x.id !== d.dataset.dropplan); save(); renderAll(true); }
   });
 
   // ---------- Scorecard: the model learns from closed trades (owner's choice, Nov 1 2026) ----------
@@ -824,6 +845,7 @@
       ${a.phase === 'eval' ? `<div class=small>Target progress</div><div class=bar><i style="width:${Math.max(0, Math.min(1, s.progress)) * 100}%"></i></div>` : ''}
       <div style="margin-top:8px"><div class=small>Risk profile (per trade, % of start)</div><div class=profiles>${prof}</div>
       <p class=small>${esc(s.profile.note)} Per trade <b>${usd(s.profRisk)}</b> · next trade may risk <b>${usd(s.nextRisk)}</b> · about <b>${s.lossesToBreach}</b> losses of room${wins ? ` · wins to pass: ${wins}` : ''} · max ${s.profile.maxTrades} trades/day, stop after ${s.profile.stopAfterLosses} losses.</p></div>
+      ${(w => w.length ? `<p class=small>Planned / working orders (not counted): ${w.map(pl => `${esc(pl.sym)} ${pl.side} ${pl.orderType !== 'market' ? 'limit @ ' + px(pl.entry) + (pl.status === 'placed' ? ' working' : ' not placed') : 'market, not placed'}`).join(' · ')}</p>` : '')(S.planned.filter(pl => pl.acct === a.id))}
       ${(m => m.length ? `<div class=warns>${m.map(x => `<div class=warn>Missing: ${esc(x.text)}. Import it in Positions → 📷 Import screenshots.</div>`).join('')}</div>` : '')(C.missingInfo(a, [T().sym]).filter(x => !S.positions.some(p => p.acct === a.id && !p.closed && p.sym === x.sym)))}
       ${s.warnings.length ? `<div class=warns>${s.warnings.map(w => `<div class="${w.lvl}">${esc(w.text)}</div>`).join('')}</div>` : ''}` : `<p class=small>Final balance ${usd(s.balance)}.</p>`}
       <p class="small mu">Cost ${usd(s.cost)} · payouts ${usd(s.paid)} · net ${usd(s.net)} ·

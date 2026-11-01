@@ -1469,7 +1469,7 @@
     const pp = (paper || []).filter(t => t.setupKey === key), lv = (positions || []).filter(p => p.setupKey === key), pl = (planned || []).filter(x => x.setupKey === key);
     const open = lv.find(p => !p.closed);
     if (open) return { state: 'live', text: 'Live', acct: open.acct };
-    if (pl.length) return { state: 'planned', text: 'Planned: place it on your platform, then mark it live', acct: pl[0].acct };
+    if (pl.length) return pl[0].status === 'placed' ? { state: 'planned', text: `Limit placed @ ${fmtPx(pl[0].entry)}: waiting for fill`, acct: pl[0].acct } : { state: 'planned', text: 'Planned: place it on your platform', acct: pl[0].acct };
     if (pp.some(t => t.status === 'open')) return { state: 'paper', text: 'Paper trade open' };
     const done = lv.find(p => p.closed), dp = pp.find(t => t.status === 'closed');
     if (done) { const o = tradeOutcome(done); return { state: 'used', acct: done.acct, text: 'Used live' + (o && o !== 'unknown' ? ': ' + (o === 'win' ? 'win' : o === 'loss' ? 'loss' : 'breakeven') : '') }; }
@@ -1490,6 +1490,20 @@
     const near = (atr1h > 0 ? atr1h : price * 0.004) * 0.25, away = d * (price - level);   // > 0: price still above a long's level
     if (away <= near) return { type: 'market', entry: price, why: away <= 0 ? 'price is already through the level: market now' : 'price is at the level: market now' };
     return { type: 'limit', entry: level, why: `price is ${fmtPx(Math.abs(price - level))} from the level (more than 0.25 x 1h ATR): limit at the level` };
+  }
+  /* A working limit order (placed on the platform, not filled): filled once price reaches the limit after it was placed.
+     Checks whole candles that opened after placement (wicks count) and the live price. Returns {filled, t} or {filled:false},
+     plus ranAway when price hit the target or the stop first (the setup played out without him: cancel the order). */
+  function limitFill(pl, bars, barSec, price, nowMs) {
+    const d = pl.side === 'short' ? -1 : 1, from = (pl.placedAt || nowMs) / 1000;
+    for (const b of (bars || [])) {
+      if (b.time < from) continue;   // only candles that opened after it was placed (an earlier wick in that bar isn't a fill); the live price covers the rest
+      if (d > 0 ? b.low <= pl.entry : b.high >= pl.entry) return { filled: true, t: Math.max(pl.placedAt || 0, b.time * 1000) };
+      if (pl.tp1 != null && (d > 0 ? b.high >= pl.tp1 : b.low <= pl.tp1)) return { filled: false, ranAway: 'target' };
+      if (d > 0 ? b.low <= pl.stop : b.high >= pl.stop) return { filled: false, ranAway: 'stop' };
+    }
+    if (price != null && isFinite(price) && d * (price - pl.entry) <= 0) return { filled: true, t: nowMs };
+    return { filled: false };
   }
   /* A planned live trade the platform screenshot now shows: same coin and side, and the same size or an entry within 0.5% of the plan. */
   function matchPlanned(planned, q) {
@@ -1537,7 +1551,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
