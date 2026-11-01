@@ -99,3 +99,13 @@ details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:"▸ ";color:var(--acc)}details[open]>summary::before{content:"▾ "}
 .faq{border-top:1px solid var(--line);padding:6px 0}.faq:first-of-type{border-top:0}.faq>summary{font-weight:600}.faq>div{padding:4px 0 8px}
 .banner.upd{display:block;width:100%;text-align:left;cursor:pointer;border:0;font:inherit;background:var(--card);color:var(--acc);border-bottom:1px solid var(--acc)}.banner.upd[hidden]{display:none}
+/* Setup cards: same layout everywhere; price boxes copy on tap */
+.sc{border-top:1px solid var(--line);padding:10px 0}.sc:first-of-type{border-top:0}
+.sc-h{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;font-size:14px}.sc-h>*{flex:0 0 auto}.sc-h .tag{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
+.sc-p{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;margin:8px 0}
+.sc-t{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.cp{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 5px;color:var(--mu);font:400 11px var(--font);text-align:left;cursor:pointer}
+.cp b{display:block;width:100%;font:600 clamp(10.5px,3vw,13px) var(--font);letter-spacing:-.02em;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cp.off{opacity:.5;cursor:default}.cp.ok,.btn.ok{border-color:var(--up)}.cp.bad,.btn.bad{border-color:var(--bad)}
+.sc-a{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.sc-a>div{flex-basis:100%}
+.sc-w{margin-top:6px;font-size:12px}.sc-w>summary{color:var(--mu);min-height:28px}.sc-w>div{margin-top:4px}
