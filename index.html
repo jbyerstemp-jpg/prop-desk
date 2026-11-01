@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Prop Desk</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">Prop Desk</div>
+  <div class="feed" id="feedPill" title="Data source and age">connecting…</div>
+  <button class="btn sm" id="refreshBtn" title="Reload candles and reconnect">↻ Refresh</button>
+  <div class="reset" id="resetPill" title="Daily loss limit resets 00:30 UTC (Kraken Prop rule; check your firm)"></div>
+</header>
+<div class="banner" id="banner" hidden></div>
+<nav class="tabs" id="tabs">
+  <button data-tab="chart" class="on">Chart</button>
+  <button data-tab="desk">Desk</button>
+  <button data-tab="pos">Positions</button>
+  <button data-tab="coach">Coach</button>
+  <button data-tab="set">Settings</button>
+</nav>
+
+<main>
+<section id="tab-chart" class="tab on">
+  <div class="chartbar">
+    <select id="symSel"></select>
+    <div class="seg" id="tfSeg"></div>
+    <div class="row" id="layerSeg" style="margin:0"></div>
+    <button class="btn sm" id="fsBtn">⛶ Full screen</button>
+  </div>
+  <div class="chartwrap" id="chartWrap">
+    <div id="chart"></div>
+    <canvas id="overlay"></canvas>
+    <div class="small" id="haNote" hidden style="position:absolute;left:6px;bottom:34px;z-index:3;background:rgba(0,0,0,.75);padding:2px 6px;border-radius:4px;font-size:11px">Heikin Ashi view · candles are averaged · "Price" line = real price</div>
+    <div class="fsinfo" id="fsInfo"></div>
+    <button class="btn sm fsx" id="fsExit">✕ Exit</button>
+  </div>
+  <div class="grid2">
+    <div class="card"><h3>Structure &amp; bias <span class="muted small" id="biasAsOf"></span></h3><div id="biasBox"></div></div>
+    <div class="card"><h3>Levels</h3><div id="levelBox"></div></div>
+    <div class="card"><h3>Open fair value gaps</h3><div id="fvgBox"></div></div>
+    <div class="card"><h3>Live data check</h3><div id="dataBox"></div></div>
+    <div class="card"><h3>Setups to watch <span class="tag">untested idea, not a signal</span></h3><div id="setupBox"></div></div>
+  </div>
+</section>
+
+<section id="tab-desk" class="tab">
+  <div id="deskTotals" class="totals"></div>
+  <div class="row"><button class="btn" id="addAcct">+ Add prop account</button></div>
+  <div id="deskList"></div>
+</section>
+
+<section id="tab-pos" class="tab">
+  <div class="card" id="importCard">
+    <h3>Add trades from a screenshot <span class="tag">main way · no typing</span></h3>
+    <p class="small mu">Screenshot your prop platform: the account screen (equity + limits), the positions list, and each position's TP/SL and details. Pick them all here. Everything is read on this phone; nothing is uploaded.</p>
+    <div class="row"><label class="btn pri" style="flex:1;text-align:center;font-size:16px;min-height:52px;display:flex;align-items:center;justify-content:center">📷 Import screenshots<input type="file" id="impFiles" accept="image/*" multiple hidden></label>
+      <button class="btn" id="impPasteBtn">Paste text</button></div>
+    <textarea id="impText" placeholder="…or paste text here" hidden></textarea>
+    <div id="impStatus" class="small"></div><div id="impPreview"></div>
+  </div>
+  <details class="card" id="manualBox"><summary><b>➕ Add a trade manually</b> <span class="small mu">(if a screenshot won't read)</span></summary><div id="posFormCard" style="margin-top:10px"></div></details>
+  <h3>Open positions</h3><div id="posOpen"></div>
+  <h3>Closed (journal)</h3><div id="posClosed"></div>
+</section>
+
+<section id="tab-coach" class="tab">
+  <div class="card"><h3>24/7 monitor (GitHub)</h3>
+    <p class="small mu">After you import screenshots, send the monitor a copy so it can watch your positions every 15 min and alert your phone (ntfy) only when something changes.</p>
+    <div class="row"><button class="btn pri" id="sendMon">Send to monitor</button><span class="small" id="monStatus"></span></div></div>
+  <div class="row">
+    <button class="btn" id="copyClaude">Copy snapshot for Claude</button>
+    <label class="chk"><input type="checkbox" id="notifyChk"> Phone alert when a score drops to 2 or less (while the app is open)</label>
+  </div>
+  <div id="coachBox"></div>
+</section>
+
+<section id="tab-set" class="tab"><div id="setBox"></div></section>
+</main>
+
+<div class="modal" id="modal" hidden><div class="modal-card" id="modalCard"></div></div>
+
+<script src="vendor/lightweight-charts.standalone.production.js"></script>
+<script src="js/core.js"></script>
+<script src="js/feed.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
