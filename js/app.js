@@ -675,6 +675,43 @@
       atr: A.atr, acct: st, rules: { beAt1R: T().beAt1R }, entryStruct: ec.length > 10 ? C.structure(ec) : null, now: Date.now() });
   }
   let analyses = {};
+  // ---------- Phone alerts via ntfy (free; works while the app is open) ----------
+  const NT_KEY = 'kpd_ntfy', MEM_KEY = 'kpd_alertmem';
+  const ntTopic = () => { try { return localStorage.getItem(NT_KEY) || ''; } catch (e) { return ''; } };
+  async function ntSend(title, body, prio) {
+    const t = ntTopic(); if (!t) return false;
+    try { const r = await fetch('https://ntfy.sh/' + encodeURIComponent(t), { method: 'POST', body, headers: { Title: title.replace(/[^\x20-\x7E]/g, '').trim() || 'Prop Desk', Priority: String(prio || 3) } }); return r.ok; } catch (e) { return false; }
+  }
+  // Same anti-spam rule as the 24/7 monitor: alert when a condition starts or gets worse; 2h cooldown per alert.
+  function alertCheck() {
+    if (!ntTopic() || F.demo) return;
+    let mem; try { mem = JSON.parse(localStorage.getItem(MEM_KEY)) || {}; } catch (e) { mem = {}; }
+    const active = {}, now = Date.now(), out = [];
+    const fire = (key, level, title, body, prio) => { active[key] = level; const was = (mem.active || {})[key], last = (mem.sent || {})[key];
+      if ((was == null || level > was) && (!last || now - last >= 2 * 3600e3 || (was != null && level > was))) { out.push({ title, body, prio }); (mem.sent = mem.sent || {})[key] = now; } };
+    const P = prices();
+    for (const a of liveAccts()) {
+      const A = C.accountState(a, S.positions, P, now), name = a.label || C.planOf(a).name;
+      if (A.breached) fire(a.id + '|breach', 3, `${name}: at the breach line`, `Equity ~${usd(A.equity)} vs floor ${usd(A.floor)}. Check your platform now.`, 5);
+      else if (A.room < A.profRisk) fire(a.id + '|room', 2, `${name}: room below one trade`, `Room ${usd(A.room)}. No new trades today.`, 4);
+      if (!A.riskKnown && A.open) fire(a.id + '|nostop', 2, `${name}: a position has no stop`, 'Risk is unlimited until it has one.', 4);
+      for (const p of S.positions.filter(p => p.acct === a.id && !p.closed)) {
+        const px = P[p.sym]; if (px == null) continue; const d = p.side === 'short' ? -1 : 1, tag = `${p.sym} ${p.side} ${p.qty}`;
+        if (p.stop != null) { const to = d * (px - p.stop), a1 = (analyses[p.sym] && analyses[p.sym].atr[60]) || px * 0.004;
+          if (to <= 0) fire(p.id + '|stophit', 3, `${tag}: price through the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Re-import to sync.`, 4);
+          else if (to < a1 * 0.3) fire(p.id + '|stopnear', 2, `${tag}: close to the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Hold or exit per plan; don't widen it.`, 3); }
+        const tgt = p.tp1 != null ? p.tp1 : p.tp2; if (tgt != null && d * (px - tgt) >= 0) fire(p.id + '|tp', 1, `${tag}: target reached`, `Price ${px.toFixed(1)} at target ${tgt}.`, 3);
+        const h = lastHealth[p.id]; if (h && h.score != null && h.score <= 2) fire(p.id + '|health', 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal, 4);
+      }
+      const A2 = analyses[T().sym] || analyze(T().sym);
+      for (const e of C.entryCheck(T().sym, A2, A, S.positions.filter(p => p.acct === a.id), now, { leverage: a.leverage }))
+        if (e.ready && e.size && e.size.qty > 0) fire(a.id + '|entry|' + e.key, 1, `${T().sym} ${e.dir} setup: all rules pass`, `${e.text} Size ${e.size.qty}. Untested idea, not a signal.`, 4);
+    }
+    mem.active = active; try { localStorage.setItem(MEM_KEY, JSON.stringify(mem)); } catch (e) { }
+    for (const o of out.slice(0, 4)) ntSend(o.title, o.body, o.prio);
+  }
+  setInterval(() => { try { alertCheck(); } catch (e) { console.warn(e); } }, 60000);
+
   function runCoach() {
     analyses = {};
     for (const p of S.positions.filter(p => !p.closed)) {
@@ -806,6 +843,16 @@
       <div class=row style="margin:8px 0 0"><label class=chk><input type=checkbox id=stScan ${t.scan ? 'checked' : ''}> Scanlines</label><label class=chk><input type=checkbox id=stGlow ${t.glow !== false ? 'checked' : ''}> Glow</label></div>
       <label class=small style="display:block;margin-top:10px">Chart colors<select id=stChart><option value=tv ${t.chartStyle !== 'theme' ? 'selected' : ''}>TradingView (green/red candles)</option><option value=theme ${t.chartStyle === 'theme' ? 'selected' : ''}>Match theme (Fallout look)</option></select></label>
       <p class="small mu">Gains and bull read green, losses and bear read red, stops and danger stay red, cautions yellow, in every theme.</p></div>
+      <div class=card><h3>Phone alerts</h3>
+        <p class=small>Free alerts to your phone through the <b>ntfy</b> app. Only when something changes (stop close, target hit, room low, a setup where every rule passes). No account needed.</p>
+        <ol class=small style="padding-left:18px;margin:6px 0">
+          <li>Install ntfy: <a href="https://apps.apple.com/app/ntfy/id1625396347" target=_blank rel=noopener>iPhone</a> · <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target=_blank rel=noopener>Android</a></li>
+          <li>${ntTopic() ? 'Your private channel: <b class=mono>' + esc(ntTopic()) + '</b>' : '<button class="btn sm pri" id=ntMake>Create my private channel</button>'}</li>
+          ${ntTopic() ? `<li><button class="btn sm" id=ntCopy>Copy channel name</button> then in ntfy tap <b>+</b>, paste it, and tap <b>Subscribe</b>.</li>
+          <li><button class="btn sm pri" id=ntTest>Send test alert</button> <span id=ntStat></span></li>` : ''}
+        </ol>
+        ${ntTopic() ? '<p class="small mu">Alerts are sent while Prop Desk is open (iPhone pauses web apps in the background). For 24/7 alerts, see the <a href="MONITOR-SETUP.md" target=_blank>24/7 setup guide</a>. Keep the channel name private: anyone with it can read your alerts. <a href="#" id=ntOff>Turn off / new channel</a></p>' : '<p class="small mu">Want alerts even when the app is closed? See the <a href="MONITOR-SETUP.md" target=_blank>24/7 setup guide</a>.</p>'}
+      </div>
       <div class=card><h3>24/7 monitor key</h3><p class=small>Paste a GitHub fine-grained key for <b>your monitor repo only</b>${ghRepo() ? ' (' + esc(ghRepo()) + ')' : ''}, permission <b>Contents: Read and write</b>. Then every import and trade change updates the monitor by itself. The key stays on this phone and is never in backups.</p>
       <label class=small style="display:block;margin-bottom:6px">Monitor repo (owner/name)<input id=ghRepo value="${esc(ghRepo())}" placeholder="you/your-monitor-repo" style="width:100%"></label><div class=row><input id=ghTok type=password placeholder="${ghToken() ? 'Key saved (paste to replace)' : 'github_pat_…'}" style="flex:1;min-width:180px"><button class="btn sm" id=ghSave>Save &amp; test</button>${ghToken() ? '<button class="btn sm bad" id=ghDel>Remove</button>' : ''}</div><p class=small id=ghStat>${S.lastPush ? 'Last update ' + fmtTime(S.lastPush, true) : ''}</p></div>
       <div class=card><h3>Backup</h3><p class=small>Everything lives in this browser only. Export a backup now and then.</p>
@@ -829,6 +876,12 @@
     $('#stChart').onchange = e => { T().chartStyle = e.target.value; save(); applyTheme(); };
     $('#stScan').onchange = e => { T().scan = e.target.checked; save(); applyTheme(); };
     $('#stGlow').onchange = e => { T().glow = e.target.checked; save(); applyTheme(); };
+    if ($('#ntMake')) $('#ntMake').onclick = () => { const b = new Uint8Array(12); crypto.getRandomValues(b); const t = 'pd-' + [...b].map(x => 'abcdefghijkmnpqrstuvwxyz23456789'[x % 32]).join('');
+      try { localStorage.setItem(NT_KEY, t); } catch (e) { } renderSettings(); };
+    if ($('#ntCopy')) $('#ntCopy').onclick = async () => { try { await navigator.clipboard.writeText(ntTopic()); $('#ntCopy').textContent = 'Copied ✓'; } catch (e) { prompt('Copy this channel name', ntTopic()); } };
+    if ($('#ntTest')) $('#ntTest').onclick = async () => { $('#ntStat').textContent = 'Sending…'; const ok = await ntSend('Prop Desk test', 'Alerts are working. You\'ll only hear from me when something changes.', 3);
+      $('#ntStat').innerHTML = ok ? '<b class=up>Sent. Check ntfy.</b>' : '<b class=dn>Couldn\'t send. Check your connection.</b>'; };
+    if ($('#ntOff')) $('#ntOff').onclick = e => { e.preventDefault(); if (confirm('Stop alerts and forget this channel? You can make a new one.')) { try { localStorage.removeItem(NT_KEY); localStorage.removeItem(MEM_KEY); } catch (x) { } renderSettings(); } };
     $('#stExp').onclick = () => { const b = new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `prop-desk-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
     $('#stImp').onchange = async e => { try { const j = JSON.parse(await e.target.files[0].text()); if (!Array.isArray(j.accounts) || !Array.isArray(j.positions)) throw 0; if (confirm('Replace current data with this backup?')) { S = Object.assign({}, DEF, j); S.settings = Object.assign({}, DEF.settings, j.settings || {}); save(); location.reload(); } } catch (x) { alert('Not a Prop Desk backup file.'); } };
     $('#stClr').onclick = () => { if (confirm('Erase all accounts, positions and settings on this device?')) { localStorage.removeItem(KEY); location.reload(); } };
