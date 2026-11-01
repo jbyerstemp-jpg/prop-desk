@@ -61,19 +61,11 @@ function contextLine(market, sym, dir) {
 
 /* Pure decision step (tested): given market data, the watch file and the previous state, return alerts to send and the new state. */
 function evaluate(watch, market, prev, now, opt) {
-  const sent = {};
-  for (const [k, v] of Object.entries((prev && prev.sent) || {})) if (v && now - v.t < KEEP) sent[k] = v;   // forget closed positions' memory after 3 days
   // lastSummary was one number for all accounts (old state files); now one per account.
   const ls = prev && prev.lastSummary, lastSum = typeof ls === 'number' ? { _all: ls } : Object.assign({}, ls || {});
-  const state = { active: {}, sent, lastSummary: lastSum };
-  const fired = [];
-  const fire = (key, level, title, body, prio) => {
-    state.active[key] = level;
-    const was = prev && prev.active && prev.active[key];
-    const last = state.sent[key];
-    const escalated = was != null && level > was;
-    if ((was == null || escalated) && (!last || now - last.t >= COOLDOWN || escalated)) { fired.push({ key, title, body, prio: prio || 3 }); state.sent[key] = { t: now, level }; }
-  };
+  const G = C.alertGate(prev, now, { cooldown: COOLDOWN, keep: KEEP });   // shared with the app's alerts
+  const state = G.state, fired = G.fired, fire = G.fire;
+  state.lastSummary = lastSum;
   const positions = (watch.positions || []).filter(p => !p.closed);
   const syms = [...new Set(((watch.symbols || ['BTC/USD'])).concat(positions.map(p => p.sym)))];
   const heavy = new Set((opt && opt.heavy) || syms);   // coins that get the full candle check this run
@@ -196,19 +188,17 @@ function evaluate(watch, market, prev, now, opt) {
   const all = state.lastSummary._all; delete state.lastSummary._all;
   if (all) for (const a of (watch.accounts || [])) if (state.lastSummary[a.id] == null) state.lastSummary[a.id] = all;
   // Most urgent first, so the per-run cap never holds back a breach behind an entry idea.
-  fired.sort((x, y) => (y.prio || 3) - (x.prio || 3));
-  return { fired, state };
+  return { fired: C.alertQueue(fired), state };
 }
 
 /* After sending: anything not delivered (over the cap, or ntfy failed) is forgotten, so the next run sends it as new. */
 function settle(state, prev, undelivered) {
-  const ps = (prev && prev.sent) || {};
+  const rest = [];
   for (const f of undelivered) {
     if (f.key.startsWith('summary|')) { if (f.prevSummary) state.lastSummary[f.acct] = f.prevSummary; else delete state.lastSummary[f.acct]; continue; }
-    delete state.active[f.key];
-    if (ps[f.key]) state.sent[f.key] = ps[f.key]; else delete state.sent[f.key];
+    rest.push(f);
   }
-  return state;
+  return C.alertSettle(state, prev, rest);
 }
 
 // ntfy JSON publish keeps emoji in the title; returns true only if ntfy accepted it.

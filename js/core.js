@@ -229,6 +229,23 @@
       if (twin) { for (const k of Object.keys(d)) if (twin[k] == null && d[k] != null) twin[k] = d[k]; } else merged.push(Object.assign({}, d));
     }
     out.details = merged;
+    // History -> Ledger: each row = type, signed amount, date, running balance; newest first. The top row's running
+    // balance is the account balance right now, fees included. Rows are checked against each other (older balance +
+    // amount = newer balance); if any link fails, an OCR digit is wrong and the balance isn't used.
+    out.ledger = [];
+    const LR = /(Prop\s+margin\s+trade|Swap\s+fee|Commission|Deposit|Withdrawal|Payout|Adjustment|Funding\s+fee|Rollover)\s+([+\-\u2212\u2013]\s?[\d,]*\.\d+)\s+([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\s+([\d,]+\.\d+)/gi;
+    for (let m; (m = LR.exec(T));) {
+      const kind = /swap/i.test(m[1]) ? 'swap' : /margin/i.test(m[1]) ? 'trade' : m[1].toLowerCase().replace(/\s+/g, ' ');
+      out.ledger.push({ kind, amt: num(m[2].replace(/[\u2212\u2013]/, '-').replace(/\s/g, '')), date: m[3].replace(/\s+/g, ' '), bal: num(m[4]) });
+    }
+    if (out.ledger.length) {
+      const L = out.ledger, bad = [];
+      for (let i = 0; i + 1 < L.length; i++) if (Math.abs(L[i + 1].bal + L[i].amt - L[i].bal) > 0.0006) bad.push(i);
+      out.ledgerOk = !bad.length;
+      out.ledgerSum = { swap: L.filter(x => x.kind === 'swap').reduce((a, x) => a + x.amt, 0), trade: L.filter(x => x.kind === 'trade').reduce((a, x) => a + x.amt, 0), n: L.length };
+      if (bad.length) out.warnings.push(`Ledger: ${bad.length} row(s) don't add up (a number was misread), so its balance isn't used. Try a sharper screenshot.`);
+      else if (out.account.balance == null) { out.account.balance = L[0].bal; out.account.balanceFrom = 'ledger'; }
+    }
         // "Positions·0" means flat; otherwise no rows read means we don't know the open P&L.
     out.flat = /Positions\s*\W?\s*0\b/i.test(T) && !out.positions.length;
     const known = out.positions.every(p => p.upnl != null);
@@ -1206,6 +1223,53 @@
     return plan;
   }
 
+  /* Alert anti-spam, shared by the 24/7 monitor and the in-app alerts so their rules can't drift. An alert fires when its
+     condition starts or gets worse; the same alert waits 2h unless it escalates; memory of an alert is kept 3 days.
+     alertQueue sorts most urgent first (a breach is never held back behind an idea); alertSettle forgets anything not
+     delivered (over the cap, or the send failed) so the next check sends it again. */
+  function alertGate(prev, nowMs, o) {
+    o = o || {}; const cool = o.cooldown || 2 * 3600e3, keep = o.keep || 3 * 86400e3;
+    const sent = {};
+    for (const [k, v] of Object.entries((prev && prev.sent) || {})) { const x = typeof v === 'number' ? { t: v, level: null } : v; if (x && nowMs - x.t < keep) sent[k] = x; }
+    const state = { active: {}, sent }, fired = [];
+    const fire = (key, level, title, body, prio) => {
+      state.active[key] = level;
+      const was = prev && prev.active && prev.active[key], last = state.sent[key], escalated = was != null && level > was;
+      if ((was == null || escalated) && (!last || nowMs - last.t >= cool || escalated)) { fired.push({ key, title, body, prio: prio || 3 }); state.sent[key] = { t: nowMs, level }; }
+    };
+    return { fire, fired, state };
+  }
+  function alertQueue(fired) { return fired.slice().sort((x, y) => (y.prio || 3) - (x.prio || 3)); }
+  function alertSettle(state, prev, undelivered) {
+    const ps = (prev && prev.sent) || {};
+    for (const f of undelivered) {
+      delete state.active[f.key];
+      if (ps[f.key] != null) state.sent[f.key] = typeof ps[f.key] === 'number' ? { t: ps[f.key], level: null } : ps[f.key]; else delete state.sent[f.key];
+    }
+    return state;
+  }
+
+  /* Reader samples: screenshot text a user chooses to share so the screenshot reader can be fixed for their layout.
+     Strips what identifies a person or account (emails, account/order numbers, wallet addresses); keeps the layout and
+     prices the reader needs. The user sees and can edit the result before anything leaves the phone. */
+  function redactSample(text) {
+    return String(text || '').replace(/\r/g, '')
+      .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]')
+      .replace(/\b0x[0-9a-f]{8,}\b/gi, '[address]')
+      .replace(/\b(Eval|Funded|Challenge|Account|Acct|Login|ID|Order|No\.?)(\s*[#:]?\s*)\d{2,}\b/gi, '$1$2#')
+      .replace(/#\s*\d{2,}\b/g, '#')
+      .replace(/\b\d{6,}\b/g, '[number]')
+      .slice(0, 20000);
+  }
+  /* A prefilled "new issue" link on GitHub. Links over ~7,500 characters break in some browsers, so a long body is left
+     out and the app copies it to the clipboard for pasting instead. */
+  function issueLink(repo, title, body) {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo || '')) return null;
+    const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(String(title).slice(0, 120))}&body=`;
+    const full = base + encodeURIComponent(body);
+    return full.length <= 7500 ? { url: full, fits: true } : { url: base + encodeURIComponent('(Too long for a link: the text is on your clipboard. Paste it here.)'), fits: false };
+  }
+
   /* Owner's rule: trade both ways only when it makes sense. A side is OK when the 4h trend is that way, or when the
      1h and 15m have both turned that way (an early reversal). Never long and short on the same coin at once. */
   function directionCheck(side, sym, struct, positions, acctId) {
@@ -1246,7 +1310,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { redactSample, issueLink, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

@@ -14,6 +14,7 @@
   <div class="brand">Prop Desk</div>
   <div class="feed" id="feedPill" title="Data source and age">connecting…</div>
   <button class="btn sm" id="refreshBtn" title="Reload candles and reconnect">↻ Refresh</button>
+  <button class="btn sm" id="helpBtn" title="How to use this app, questions and comments">? Help</button>
   <div class="reset" id="resetPill" title="Daily loss limit resets 00:30 UTC (Kraken Prop rule; check your firm)"></div>
 </header>
 <div class="banner" id="banner" hidden></div>
@@ -24,6 +25,7 @@
   <button data-tab="coach">Coach</button>
   <button data-tab="paper">Paper</button>
   <button data-tab="set">Settings</button>
+  <button data-tab="help" hidden>Help</button>
 </nav>
 
 <main>
@@ -89,6 +91,7 @@
 
 <section id="tab-paper" class="tab"><div id="paperBox"></div></section>
 <section id="tab-set" class="tab"><div id="setBox"></div></section>
+<section id="tab-help" class="tab"><div id="helpBox"></div></section>
 </main>
 
 <div class="modal" id="modal" hidden><div class="modal-card" id="modalCard"></div></div>
@@ -100,6 +103,7 @@
 <script src="js/profile.js"></script>
 <script src="js/traits.js"></script>
 <script src="js/feed.js"></script>
+<script src="js/help.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

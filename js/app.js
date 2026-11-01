@@ -134,6 +134,35 @@
     renderAll(true);
   });
 
+  // ---------- Help + questions (owner's choice, Nov 1 2026) ----------
+  // Questions and comments go to the repo's GitHub Issues, prefilled; nothing is sent until the user submits it there.
+  let FEEDBACK_HOME = 'https://github.com/jbyerstemp-jpg/prop-desk';
+  const FEEDBACK_PUBLIC = /\/prop-desk$/.test(FEEDBACK_HOME);
+  $('#helpBtn').onclick = () => switchTab('help');
+  function renderHelp() {
+    $('#helpBox').innerHTML = PDHelp.helpHtml();
+    $('#fbNote').textContent = FEEDBACK_PUBLIC ? 'Questions on GitHub are public: never include balances, account numbers or keys.' : 'Goes to your private repo\'s Issues (only you can see them).';
+    $('#fbBtn').onclick = () => {
+      showModal(`<h3>Question or comment</h3>
+        <label class=small>Type<select id=fbKind><option>Question</option><option>Idea</option><option>Problem</option></select></label>
+        <label class=small style="display:block;margin-top:8px">Message<textarea id=fbMsg rows=6 style="width:100%" placeholder="What happened, or what would make the app easier?"></textarea></label>
+        <label class=chk><input type=checkbox id=fbDev checked> Add device info (screen size, browser, open tab; no account data)</label>
+        <p class="small mu">${FEEDBACK_PUBLIC ? 'Opens GitHub with this filled in; you press Submit there. It is public: leave out balances and account numbers.' : 'Opens your private repo\'s Issues with this filled in; press Submit there.'}</p>
+        <div class=row><button class="btn pri" id=fbGo>Open on GitHub</button><button class=btn id=fbCopy>Copy text</button><button class=btn id=fbX>Close</button></div><p class=small id=fbStat></p>`);
+      const body = () => $('#fbMsg').value.trim() + ($('#fbDev').checked ? `\n\n---\nScreen ${innerWidth}x${innerHeight} · ${navigator.userAgent.replace(/[^\x20-\x7E]/g, '').slice(0, 160)}` : '');
+      $('#fbX').onclick = closeModal;
+      $('#fbCopy').onclick = async () => { try { await navigator.clipboard.writeText(body()); $('#fbStat').textContent = 'Copied.'; } catch (e) { $('#fbStat').textContent = 'Copy failed: select the text and copy it.'; } };
+      $('#fbGo').onclick = async () => {
+        const msg = $('#fbMsg').value.trim(); if (!msg) { $('#fbStat').textContent = 'Type a message first.'; return; }
+        const L = C.issueLink(FEEDBACK_HOME.replace('https://github.com/', ''), `[${$('#fbKind').value}] ${msg.split('\n')[0].slice(0, 70)}`, body());
+        if (!L) return;
+        if (!L.fits) { try { await navigator.clipboard.writeText(body()); } catch (e) { } }
+        window.open(L.url, '_blank', 'noopener'); $('#fbStat').textContent = L.fits ? 'Opened GitHub. Press Submit there.' : 'Long message: copied. Paste it on the GitHub page, then Submit.';
+      };
+    };
+  }
+  renderHelp();
+
   // ---------- Chart ----------
   const TFS = [5, 15, 60, 240, 1440];
   const LAYERS = { levels: 'Day/week levels', vwap: 'VWAP', sessions: 'Sessions', orb: 'Opening range', fvg: 'Fair value gaps', marks: 'BOS / CHoCH marks', fib: 'Impulse legs + fib retracements',
@@ -871,7 +900,7 @@
   function showImport(text, shotTime) {
     const r = C.parseKrakenProp(text, Date.now()); lastImport = { r, shotTime, text };
     const A = r.account, st = $('#impStatus');
-    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
+    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
     st.textContent = '';
     const size = A.plan ? C.sizeFromLimits(A.plan, A.drawdownLimit, A.target) : null;
     const opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${A.label && a.label === A.label ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
@@ -880,13 +909,14 @@
     $('#impPreview').innerHTML = `<div class=kv>
         <div><span>Account</span>${esc(A.label || '—')}</div><div><span>Equity</span>${A.equity != null ? usd(A.equity) : '—'}</div>
         <div><span>Daily loss limit</span>${A.dailyLimit != null ? usd(A.dailyLimit) : '—'}</div><div><span>Drawdown limit</span>${A.drawdownLimit != null ? usd(A.drawdownLimit) : '—'}</div>
-        <div><span>Open P&amp;L (sum)</span>${r.upnlSum != null ? usd(r.upnlSum) : '— (not on screen)'}</div><div><span>Balance${A.balance != null ? ' (read directly)' : ' (equity − open P&amp;L)'}</span>${r.balance != null ? usd(r.balance) : '—'}</div>${A.usedMargin != null ? `<div><span>Used margin</span>${usd(A.usedMargin)}</div>` : ''}</div>
+        <div><span>Open P&amp;L (sum)</span>${r.upnlSum != null ? usd(r.upnlSum) : '— (not on screen)'}</div><div><span>Balance${A.balanceFrom === 'ledger' ? ' (Ledger, newest row)' : A.balance != null ? ' (read directly)' : ' (equity − open P&amp;L)'}</span>${r.balance != null ? usd(r.balance) : '—'}</div>${A.usedMargin != null ? `<div><span>Used margin</span>${usd(A.usedMargin)}</div>` : ''}</div>
       ${r.positions.length ? `<table><tr><th>Side</th><th class=num>Qty</th><th class=num>Entry</th><th class=num>P&amp;L</th><th>Stop</th></tr>${r.positions.map(p => `<tr><td class="${p.side === 'short' ? 'dn' : 'up'}">${esc(p.side)} ${esc(p.base)}</td><td class=num>${p.qty}</td><td class=num>${px(p.entry)}</td><td class="num ${cls(p.upnl)}">${p.upnl != null ? usd(p.upnl) : '—'}</td><td>${p.hasSL ? 'SL on platform' : '<b class=dn>NO SL</b>'}${p.hasTP ? ' · TP' : ''}</td></tr>`).join('')}</table>` : ''}
       ${(() => { const ac = acctById(($('#impAcct') || {}).value) || S.accounts.find(x => x.label && x.label === A.label); if (!ac || !(r.positions.length || r.flat)) return '';
         const P = C.planSync(S.positions.filter(p => p.acct === ac.id && !p.closed), r.positions, r.closedRows);
         const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} @ ${px(q.entry)}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} @ ${px(k.pos.entry)}`));
         P.close.forEach(c => li.push(`<b class=dn>− Closed</b> ${esc(c.pos.side)} ${c.pos.qty} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result counted in balance'}`));
         return `<p class=small><b>Changes:</b> ${li.length ? '' : 'none to positions'}${P.keep.length ? ` · ${P.keep.length} unchanged` : ''}</p>${li.length ? '<div class=small>' + li.join('<br>') + '</div>' : ''}`; })()}
+      ${r.ledger && r.ledger.length ? `<p class=small><b>Ledger read:</b> ${r.ledger.length} row(s)${r.ledgerOk ? ', every running balance adds up' : ''} · swap fees ${usd(r.ledgerSum.swap)} · trades and commissions ${usd(r.ledgerSum.trade)}</p>` : ''}
       ${r.fills.length ? `<p class=small><b>Trades read:</b> ${r.fills.length} fill(s) · ${r.fills.filter(f => f.action === 'open' && f.t != null).length} opening today${r.fills.some(f => f.t == null) ? ' (older dated rows kept for history)' : ''}</p>` : ''}
       ${r.details.length ? `<table><tr><th>Position details read</th><th class=num>Size</th><th class=num>Stop</th><th class=num>Target</th><th>Opened</th></tr>${r.details.map(d => `<tr><td class="${d.side === 'short' ? 'dn' : 'up'}">${esc(d.side)} ${esc(d.base)}${d.entry ? ' @ ' + px(d.entry) : ''}</td><td class=num>${d.qty}</td><td class=num>${d.sl != null ? px(d.sl) : '—'}</td><td class=num>${d.tp != null ? px(d.tp) : '—'}</td><td class=small>${d.openedMs ? fmtTime(d.openedMs, true) : '—'}</td></tr>`).join('')}</table>` : ''}
       ${!r.positions.length && !r.flat ? '<p class=small>No position list in these screenshots: your open positions stay as they are' + (r.details.length ? '; details are added to the matching ones.' : '.') + '</p>' : ''}
@@ -920,25 +950,18 @@
     // it's already in the imported balance). Everything is dated at the sync so nothing counts twice.
     const open = S.positions.filter(p => p.acct === acct.id && !p.closed);
     const reconcile = r.positions.length > 0 || r.flat;
-    const plan = { keep: [], add: [], close: [], partial: [] };
+    let plan = { keep: [], add: [], close: [], partial: [] };
     if (reconcile) {
-      const left = open.slice();
-      for (const q of r.positions) {
-        let i = left.findIndex(p => p.side === q.side && p.sym === q.sym && Math.abs(p.entry - q.entry) < 0.01 && Math.abs(C.openQty(p) - q.qty) < 1e-9);
-        if (i < 0) i = left.findIndex(p => p.side === q.side && p.sym === q.sym && Math.abs(p.entry - q.entry) < 0.01);
-        if (i >= 0) { const p = left.splice(i, 1)[0]; if (Math.abs(C.openQty(p) - q.qty) > 1e-9) { p.qty = q.qty; p.partials = []; plan.partial.push(p); } else plan.keep.push(p); p.krakenSL = q.hasSL; p.krakenTP = q.hasTP; continue; }
+      // Same plan the preview showed (C.planSync), so what he approved is exactly what is applied.
+      plan = C.planSync(open, r.positions, r.closedRows);
+      for (const k of plan.keep) { k.pos.krakenSL = k.snap.hasSL; k.pos.krakenTP = k.snap.hasTP; }
+      for (const k of plan.partial) { const p = k.pos; p.qty = k.snap.qty; p.partials = []; p.krakenSL = k.snap.hasSL; p.krakenTP = k.snap.hasTP; }
+      for (const q of plan.add)
         S.positions.push({ id: uid(), acct: acct.id, sym: q.sym, side: q.side, qty: q.qty, entry: q.entry, stop: null, origStop: null, tp1: null, tp2: null,
           tf: 15, setup: 'Imported', thesis: '', opened: t - 2, openedUnknown: true, partials: [], stopHist: [], krakenSL: q.hasSL, krakenTP: q.hasTP, source: 'kraken-import' });
-        plan.add.push(q);
-      }
-      const rows = (r.closedRows || []).slice();
-      for (const p of left) {
-        const j = rows.findIndex(x => x.side === p.side && x.sym === p.sym && Math.abs(x.entry - p.entry) < 0.01);
-        const row = j >= 0 ? rows.splice(j, 1)[0] : null;
+      for (const { pos: p, row } of plan.close)
         p.closed = { t: t - 1, price: row ? row.exit : null, realized: row ? row.realized : 0, resultKnown: !!row,
           note: row ? 'Closed on platform (result from its Closed list)' : 'Closed on platform (result in balance)', synced: true };
-        plan.close.push(p);
-      }
     }
     // Trades tab: keep the platform's fills (deduped) for the trade count and real open times.
     let fillN = 0, storyN = 0;
@@ -970,9 +993,10 @@
       if (d.openedMs && d.openedMs <= now) { p.opened = d.openedMs; p.openedUnknown = false; }
       setN++;
     }
-    // The screenshot also shows Prop's real price: use it to calibrate, if it's fresh.
+    // The screenshot also shows Prop's real price: use it to calibrate only if the screenshot is under 2 min old
+    // (it's compared with the live estimate now; an older shot would bake price drift into the calibration).
     const withPx = r.positions.find(q => q.price > 0) || r.details.find(q => q.price > 0);
-    if (withPx && now - t < 10 * 60000) { const qq = pnlQuote(withPx.sym); if (qq.raw && Math.abs(withPx.price / qq.raw - 1) < 0.01) S.calib.push({ t, sym: withPx.sym, prop: withPx.price, est: qq.raw }); }
+    if (withPx && now - shotTime < 2 * 60000) { const qq = pnlQuote(withPx.sym); if (qq.raw && Math.abs(withPx.price / qq.raw - 1) < 0.01) S.calib.push({ t, sym: withPx.sym, prop: withPx.price, est: qq.raw }); }
     save(); ensureFeeds(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impText').value = ''; $('#impText').hidden = true;
     const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' size updated', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${L.fills ? ` · ${L.fills} new fill(s)` : ''}${L.story ? ` · ${L.story} open time(s) from fills` : ''}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} off, now matched` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
     posFormDirty = true; autoPush('import'); switchTab('coach');
@@ -998,36 +1022,45 @@
     const t = ntTopic(); if (!t) return false;
     try { const r = await fetch('https://ntfy.sh/' + encodeURIComponent(t), { method: 'POST', body, headers: { Title: title.replace(/[^\x20-\x7E]/g, '').trim() || 'Prop Desk', Priority: String(prio || 3) } }); return r.ok; } catch (e) { return false; }
   }
-  // Same anti-spam rule as the 24/7 monitor: alert when a condition starts or gets worse; 2h cooldown per alert.
-  function alertCheck() {
-    if (!ntTopic() || F.demo) return;
-    let mem; try { mem = JSON.parse(localStorage.getItem(MEM_KEY)) || {}; } catch (e) { mem = {}; }
-    const active = {}, now = Date.now(), out = [];
-    const fire = (key, level, title, body, prio) => { active[key] = level; const was = (mem.active || {})[key], last = (mem.sent || {})[key];
-      if ((was == null || level > was) && (!last || now - last >= 2 * 3600e3 || (was != null && level > was))) { out.push({ title, body, prio }); (mem.sent = mem.sent || {})[key] = now; } };
-    const P = prices();
-    for (const a of liveAccts()) {
-      const A = C.accountState(a, S.positions, P, now), name = a.label || C.planOf(a).name;
-      if (A.breached) fire(a.id + '|breach', 3, `${name}: at the breach line`, `Equity ~${usd(A.equity)} vs floor ${usd(A.floor)}. Check your platform now.`, 5);
-      else if (A.room < A.profRisk) fire(a.id + '|room', 2, `${name}: room below one trade`, `Room ${usd(A.room)}. No new trades today.`, 4);
-      if (!A.riskKnown && A.open) fire(a.id + '|nostop', 2, `${name}: a position has no stop`, 'Risk is unlimited until it has one.', 4);
-      for (const p of S.positions.filter(p => p.acct === a.id && !p.closed)) {
-        const px = P[p.sym]; if (px == null) continue; const d = p.side === 'short' ? -1 : 1, tag = `${p.sym} ${p.side} ${p.qty}`;
-        if (p.stop != null) { const to = d * (px - p.stop), a1 = (analyses[p.sym] && analyses[p.sym].atr[60]) || px * 0.004;
-          if (to <= 0) fire(p.id + '|stophit', 3, `${tag}: price through the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Re-import to sync.`, 4);
-          else if (to < a1 * 0.3) fire(p.id + '|stopnear', 2, `${tag}: close to the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Hold or exit per plan; don't widen it.`, 3); }
-        const tgt = p.tp1 != null ? p.tp1 : p.tp2; if (tgt != null && d * (px - tgt) >= 0) fire(p.id + '|tp', 1, `${tag}: target reached`, `Price ${px.toFixed(1)} at target ${tgt}.`, 3);
-        const h = lastHealth[p.id]; if (h && h.score != null && h.score <= 2) fire(p.id + '|health', 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal, 4);
+  // Same rules as the 24/7 monitor (shared C.alertGate): alert when a condition starts or gets worse, 2h cooldown,
+  // most urgent first, at most 4 per check; anything over the cap or not accepted by ntfy is sent on the next check.
+  let alertBusy = false;
+  async function alertCheck() {
+    if (!ntTopic() || F.demo || alertBusy) return;
+    alertBusy = true;
+    try {
+      let prev; try { prev = JSON.parse(localStorage.getItem(MEM_KEY)) || {}; } catch (e) { prev = {}; }
+      const now = Date.now(), G = C.alertGate(prev, now), fire = G.fire;
+      const P = prices();
+      for (const a of liveAccts()) {
+        const A = C.accountState(a, S.positions, P, now), name = a.label || C.planOf(a).name;
+        if (A.breached) fire(a.id + '|breach', 3, `${name}: at the breach line`, `Equity ~${usd(A.equity)} vs floor ${usd(A.floor)}. Check your platform now.`, 5);
+        else if (A.room < A.profRisk) fire(a.id + '|room', 2, `${name}: room below one trade`, `Room ${usd(A.room)}. No new trades today.`, 4);
+        if (!A.riskKnown && A.open) fire(a.id + '|nostop', 2, `${name}: a position has no stop`, 'Risk is unlimited until it has one.', 4);
+        else if (A.stopsBreach) fire(a.id + '|stopsbreach', 2, `${name}: stops sit past the breach line`, `If every stop fills, equity lands near ${usd(A.equityIfStopped)}; floor ${usd(A.floor)}.`, 4);
+        if (A.reachedTarget) fire(a.id + '|target', 1, `${name}: equity at the profit target`, 'Check your platform (Kraken auto-closes at the target).', 4);
+        for (const p of S.positions.filter(p => p.acct === a.id && !p.closed)) {
+          const px = P[p.sym];
+          if (px == null) { fire(p.sym + '|noprice', 2, `${p.sym}: app can't see the price`, `Live data for ${p.sym} isn't loading, so stop and target checks are paused. Check your platform yourself.`, 4); continue; }
+          const d = p.side === 'short' ? -1 : 1, tag = `${p.sym} ${p.side} ${p.qty}`;
+          if (p.stop != null) { const to = d * (px - p.stop), a1 = (analyses[p.sym] && analyses[p.sym].atr[60]) || px * 0.004;
+            if (to <= 0) fire(p.id + '|stophit', 3, `${tag}: price through the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Re-import to sync.`, 4);
+            else if (to < a1 * 0.3) fire(p.id + '|stopnear', 2, `${tag}: close to the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Hold or exit per plan; don't widen it.`, 3); }
+          const tgt = p.tp1 != null ? p.tp1 : p.tp2; if (tgt != null && d * (px - tgt) >= 0) fire(p.id + '|tp', 1, `${tag}: target reached`, `Price ${px.toFixed(1)} at target ${tgt}.`, 3);
+          const h = lastHealth[p.id]; if (h && h.score != null && h.score <= 2) fire(p.id + '|health', 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal, 4);
+        }
       }
-    }
-    // Setups both ways, no account involved; you weigh them by ticking one.
-    const A2 = analyses[T().sym] || analyze(T().sym);
-    for (const e of C.scanSetups(T().sym, A2, now))
-      if (e.ready && C.alertGrade(e).ok) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
-    mem.active = active; try { localStorage.setItem(MEM_KEY, JSON.stringify(mem)); } catch (e) { }
-    for (const o of out.slice(0, 4)) ntSend(o.title, o.body, o.prio);
+      // Setups both ways, no account involved; you weigh them by ticking one.
+      const A2 = analyses[T().sym] || analyze(T().sym);
+      for (const e of C.scanSetups(T().sym, A2, now))
+        if (e.ready && C.alertGrade(e).ok) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
+      const q = C.alertQueue(G.fired), undelivered = q.slice(4);
+      for (const o of q.slice(0, 4)) if (!(await ntSend(o.title, o.body, o.prio))) undelivered.push(o);
+      C.alertSettle(G.state, prev, undelivered);
+      try { localStorage.setItem(MEM_KEY, JSON.stringify(G.state)); } catch (e) { }
+    } finally { alertBusy = false; }
   }
-  setInterval(() => { try { alertCheck(); } catch (e) { console.warn(e); } }, 60000);
+  setInterval(() => { alertCheck().catch(e => console.warn(e)); }, 60000);
 
   function runCoach() {
     analyses = {};
