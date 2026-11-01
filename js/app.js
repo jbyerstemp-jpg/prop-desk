@@ -612,7 +612,7 @@
     const wins = s.winsToPass ? [1.5, 2, 3].map(r => `${s.winsToPass(r)} at ${r}R`).join(', ') : '';
     return `<div class=card>
       <div class=acct-head><div><b>${esc(a.label || (s.plan.name + ' ' + usd(a.size)))}</b> <span class=tag>${a.phase}</span> <span class="tag">${s.plan.name}: target ${pct(s.plan.target, 0)}, daily ${pct(s.plan.mdl, 0)}, max ${pct(s.plan.mdd, 0)} static</span></div>
-      <div class=row style="margin:0"><button class="btn sm" data-act="reconcile" data-id="${a.id}">Match platform balance</button><button class="btn sm" data-act="edit" data-id="${a.id}">Edit</button></div></div>
+      <div class=row style="margin:0"><button class="btn sm" data-act="reconcile" data-id="${a.id}">Match platform balance</button><button class="btn sm" data-act="edit" data-id="${a.id}">Edit</button><button class="btn sm" data-act="resetday" data-id="${a.id}">Reset my day</button></div></div>
       ${live ? `<div class=kv>
         <div><span>Equity (live, ${esc(pnlQuote(a.sym || T().sym).basis)})</span><b>${usd(s.equity)}</b>${s.priceComplete ? '' : ' <span class=dn small>price missing: valued at stop</span>'}</div>
         <div><span>Balance (closed)</span>${usd(s.balance)}</div>
@@ -640,6 +640,16 @@
     const b = e.target.closest('[data-act]'); if (!b) return; e.preventDefault();
     const a = acctById(b.dataset.id);
     if (b.dataset.act === 'edit') acctForm(a);
+    if (b.dataset.act === 'resetday') {
+      const st = C.accountState(a, S.positions, prices(), Date.now());
+      showModal(`<h3>Reset my day</h3><p class=small>Clears the app's count of today's trades (${st.tradesToday}) and losses (${st.lossesToday}) so its warnings stop blocking you. <b>Your platform's real loss limits don't change</b>; the app keeps enforcing them.</p>
+        <div class=form><label class=chk><input type=radio name=rk value=mistake checked> Mistake: the app or my log was wrong</label><label class=chk><input type=radio name=rk value=rulebreak> Rule break: I'm choosing to keep trading past my rules</label>
+        <label class=wide>What happened?<input id=rkNote placeholder="optional"></label></div>
+        <div class=row style="margin-top:10px"><button class="btn pri" id=rkOk>Reset</button><button class=btn data-close>Cancel</button></div>`);
+      $('#rkOk').onclick = () => { const kind = (document.querySelector('[name=rk]:checked') || {}).value || 'mistake';
+        a.dayResetAt = Date.now(); (a.dayLog = a.dayLog || []).push({ t: a.dayResetAt, kind, note: $('#rkNote').value, trades: st.tradesToday, losses: st.lossesToday });
+        saveAndSync('day reset'); closeModal(); renderAll(true); };
+    }
     if (b.dataset.act === 'reconcile') {
       showModal(`<h3>Match your platform's numbers</h3><p class=small>Type what your prop platform's Portfolio widget shows. Use this when the app drifts (fees, slippage, a trade you didn't log).</p>
         <div class=form><label>Balance now<input id=rcBal type=number step=any></label><label>Max Daily Loss limit shown (optional)<input id=rcMdl type=number step=any></label></div>
@@ -754,6 +764,8 @@
       if (!p.entry || !p.qty) { alert('Entry and quantity are required.'); return; }
       if (p.stop == null && !confirm('No stop logged. Your rules say every trade needs one. Log anyway?')) return;
       if (!p.thesis && !confirm('No thesis written. Every trade needs a plan. Log anyway?')) return;
+      if (T().dirRule !== false) { const dc = C.directionCheck(p.side, p.sym, analyze(p.sym).struct, S.positions, p.acct);
+        if (!dc.ok) { if (!confirm('This breaks your rule "both ways only when it makes sense":\n- ' + dc.reasons.join('\n- ') + '\n\nLog it anyway? It will be marked as a rule break.')) return; p.tag = 'rulebreak'; p.tagNote = dc.reasons.join('; '); } }
       p.origStop = p.stop; p.stopHist.push({ t: Date.now(), stop: p.stop });
       S.positions.push(p); posDraft = null; posFormDirty = true; saveAndSync('new'); ensureFeeds(); renderAll(true);
     };
@@ -773,11 +785,19 @@
         <div class=row><button class="btn sm" data-pa="stop" data-id="${p.id}">Update stop/targets</button><button class="btn sm" data-pa="partial" data-id="${p.id}">Partial close</button><button class="btn sm" data-pa="close" data-id="${p.id}">Close</button><button class="btn sm" data-pa="del" data-id="${p.id}">Delete</button></div></div>`;
     }).join('') : '<p class=mu>No open positions logged.</p>';
     const closed = S.positions.filter(p => p.closed).sort((a, b) => b.closed.t - a.closed.t).slice(0, 50);
-    $('#posClosed').innerHTML = closed.length ? `<table><tr><th>Closed</th><th>Trade</th><th class=num>Net</th><th class=num>R</th><th>Notes</th></tr>${closed.map(p => {
-      const tot = C.realizedOfPos(p), risk = Math.abs(p.entry - (p.origStop != null ? p.origStop : p.entry)) * p.qty;
-      return `<tr><td class=small>${fmtTime(p.closed.t, true)}</td><td>${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)} → ${px(p.closed.price)} <span class=small>${esc(p.setup)}</span></td><td class="num ${cls(tot)}">${usd(tot)}</td><td class=num>${risk ? (tot / risk).toFixed(2) : '—'}</td><td class=small>${esc(p.closed.note || '')}${p.widened ? ' <span class=warn>stop widened</span>' : ''}</td></tr>`;
-    }).join('')}</table>` : '<p class=mu>Nothing closed yet.</p>';
+    const wk = Date.now() - 7 * 864e5, recent = S.positions.filter(p => p.closed && p.closed.t > wk);
+    const resets = S.accounts.flatMap(a => (a.dayLog || []).filter(d => d.t > wk));
+    const cnt = k => recent.filter(p => (p.tag || 'plan') === k).length;
+    const stats = `<p class=small>Last 7 days: <b class=up>${cnt('plan')}</b> followed plan · <b class=warn>${cnt('mistake')}</b> mistakes · <b class=dn>${cnt('rulebreak')}</b> rule breaks · ${cnt('data')} data problems · day resets: ${resets.filter(d => d.kind === 'mistake').length} mistake, <b class=dn>${resets.filter(d => d.kind === 'rulebreak').length}</b> rule break</p>`;
+    $('#posClosed').innerHTML = stats + (closed.length ? `<table><tr><th>Closed</th><th>Trade</th><th class=num>Net</th><th>Tag</th></tr>${closed.map(p => {
+      const tot = C.realizedOfPos(p), known = !p.closed.synced || p.closed.resultKnown;
+      return `<tr><td class=small>${fmtTime(p.closed.t, true)}</td><td>${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)}${p.closed.price ? ' → ' + px(p.closed.price) : ''}<div class=small>${esc(p.closed.note || '')}${p.widened ? ' <span class=warn>stop widened</span>' : ''}${p.tagNote ? ' <span class=dn>' + esc(p.tagNote) + '</span>' : ''}</div></td>
+        <td class="num ${cls(tot)}">${known ? usd(tot) : '—'}</td><td><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>`;
+    }).join('')}</table>` : '<p class=mu>Nothing closed yet.</p>');
+    const dl = S.accounts.flatMap(a => (a.dayLog || []).map(d => Object.assign({ acct: a.label || C.planOf(a).name }, d))).sort((x, y) => y.t - x.t).slice(0, 10);
+    if (dl.length) $('#posClosed').innerHTML += `<h3 style="margin-top:12px">Day resets</h3><table>${dl.map(d => `<tr><td class=small>${fmtTime(d.t, true)}</td><td>${esc(d.acct)}</td><td class="${d.kind === 'rulebreak' ? 'dn' : 'warn'}">${d.kind === 'rulebreak' ? 'Rule break' : 'Mistake'}</td><td class=small>${d.trades} trades, ${d.losses} losses${d.note ? ' · ' + esc(d.note) : ''}</td></tr>`).join('')}</table>`;
   }
+  $('#posClosed').addEventListener('change', e => { const sel = e.target.closest('[data-tag]'); if (!sel) return; const p = S.positions.find(x => x.id === sel.dataset.tag); if (p) { p.tag = sel.value; save(); renderPositions(); } });
   $('#posOpen').addEventListener('click', e => {
     const b = e.target.closest('[data-pa]'); if (!b) return;
     const p = S.positions.find(x => x.id === b.dataset.id); if (!p) return;
@@ -804,7 +824,8 @@
       <label>Exit price<input id=clP type=number step=any value="${price != null ? +price.toFixed(6) : ''}"></label>
       <label>Realized $ from your platform (optional, overrides estimate)<input id=clR type=number step=any></label>
       <label>Closed at<input id=clT type=datetime-local value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}"></label>
-      <label class=wide>Note (followed plan? mistake?)<input id=clN></label></div>
+      <label>How did it go?<select id=clTag>${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k]}</option>`).join('')}</select></label>
+      <label class=wide>Note<input id=clN></label></div>
       <p class=small id=clEst></p><div class=row><button class="btn pri" id=clOk>Save</button><button class=btn data-close>Cancel</button></div>`);
     const est = () => { const q = isP ? num($('#clQ').value) : C.openQty(p), xp = num($('#clP').value); if (!q || !xp) return null; const v = C.realizedFor(p, q, xp, Date.parse($('#clT').value) || Date.now()); $('#clEst').textContent = `Estimated net after fees: ${usd(v)}`; return v; };
     document.querySelectorAll('#clP,#clT' + (isP ? ',#clQ' : '')).forEach(x => x.addEventListener('input', est)); est();
@@ -814,6 +835,7 @@
       const rv = num($('#clR').value), v = rv != null ? rv : C.realizedFor(p, q, xp, t);
       if (isP) { p.partials.push({ t, qty: q, price: xp, realized: v }); if (C.openQty(p) <= 1e-12) p.closed = { t, price: xp, realized: 0, note: $('#clN').value }; }
       else p.closed = { t, price: xp, realized: v, note: $('#clN').value };
+      p.tag = $('#clTag').value;
       saveAndSync('close'); closeModal(); renderAll(true);
     };
   });
@@ -1006,7 +1028,7 @@
       const cx = coachCtx(p), plan = cx.ageSec != null && cx.ageSec <= T().maxAge ? C.levelPlan(p, cx) : [];
       const TY = { stop: 'Move stop to', tp: 'Take profit at', partial: 'Take a partial at' };
       return `<div class=card><div class=acct-head><b>${esc(p.sym)} ${p.side.toUpperCase()} · ${C.tfName(p.tf)} ${esc(p.setup)}</b><span class="score s${h.score || 0}">${h.score || '–'}/5 ${h.label}</span></div>
-        <p><b>Proposal:</b> ${esc(h.proposal)}</p><div class=items>${h.items.map(i => `<div class="${i.k}"><b>${i.k}</b>${esc(i.t)}</div>`).join('')}</div>
+        <p><b>Proposal:</b> ${esc(h.proposal)}</p>${T().dirRule !== false ? (() => { const dc = C.directionCheck(p.side, p.sym, (analyses[p.sym] || analyze(p.sym)).struct, S.positions.filter(x => x.id !== p.id), p.acct); return dc.ok || !dc.known ? '' : `<p class=small><b class=dn>Against your both-ways rule now:</b> ${esc(dc.reasons.join('; '))}</p>`; })() : ''}<div class=items>${h.items.map(i => `<div class="${i.k}"><b>${i.k}</b>${esc(i.t)}</div>`).join('')}</div>
         ${plan.length ? `<h4 style="margin:10px 0 4px">Suggested levels</h4><table><tr><th>Action</th><th class=num>Price</th><th class=num>R</th><th>Why</th><th></th></tr>${plan.map((x, i) => `<tr><td class=small><b class="${x.type === 'stop' ? 'warn' : 'up'}">${TY[x.type]}</b>${x.rule ? '<div class=tag>your rule</div>' : ''}</td><td class=num>${px(x.price)}</td><td class=num>${x.r == null ? '—' : (x.r >= 0 ? '+' : '') + x.r.toFixed(2) + 'R'}</td><td class=small>${esc(x.why)}</td><td>${x.type !== 'partial' ? `<button class="btn sm" data-setlvl="${esc(p.id)}" data-type="${x.type}" data-px="${x.price}">I set it</button>` : ''}</td></tr>`).join('')}</table>
           <p class="small mu">Set it on your prop platform first, then tap "I set it" so the app matches. Stops shown only tighten, stay at least 1 ATR from price, and are options unless marked "your rule". Not a signal; your plan decides.</p>` : ''}
         ${notes.length ? `<div class=items>${notes.map(t => `<div class=warn><b>research</b>${esc(t)}</div>`).join('')}</div><p class="small mu">Research notes (experimental): what the engine sees against this trade. They don't change the score and never mean widen the stop.</p>` : ''}</div>`;
@@ -1056,7 +1078,7 @@
   });
   // Monitor hand-off. Build the watch file (positions, stops, limits; no keys).
   function buildWatch() {
-    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'anchor', 'dayStartOverride', 'created'];
+    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'dayResetAt', 'anchor', 'dayStartOverride', 'created'];
     const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
     const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
       stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [] }));
@@ -1138,6 +1160,7 @@
       <label>P&L price<select id=stBasis><option value=usdt ${t.priceBasis === 'usdt' ? 'selected' : ''}>Prop estimate: Kraken Futures mark in USDT (default)</option><option value=mark ${t.priceBasis === 'mark' ? 'selected' : ''}>Kraken Futures mark (USD)</option><option value=spot ${t.priceBasis === 'spot' ? 'selected' : ''}>Kraken spot last</option></select></label></div>
       <p class="small mu">Kraken Prop values positions at a mark price from its own liquidity providers. The app's perp mark is a stand-in; compare it with your platform once and keep the closer one.</p></div>
       <div class=card><h3>My rules</h3><div class=form>
+      <label class=chk><input type=checkbox id=stDir ${t.dirRule !== false ? 'checked' : ''}> Trade both ways only when it makes sense (4h trend that way, or 1h + 15m both turned; never long and short on one coin)</label>
       <label class=chk><input type=checkbox id=stBe ${t.beAt1R ? 'checked' : ''}> Move stop to breakeven at +1R (coach enforces it)</label>
       <label>Monthly eval budget $ (after bills, cushion, weekly buy)<input id=stBud type=number step=any value="${t.budget || ''}"></label></div>
       <p class="small mu">Profiles (per trade, % of starting balance): ${C.PROFILES.map(p => `${p.name} ${p.riskPct}% · max ${p.maxTrades} trades · stop after ${p.stopAfterLosses} losses`).join(' | ')}.</p></div>
@@ -1169,7 +1192,7 @@
     bind('#stSyms', el => { const v = el.value.split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z0-9]+\/[A-Z]+$/.test(x)); if (v.length) { T().symbols = v; if (!v.includes(T().sym)) T().sym = v[0]; ensureFeeds(); initChart(); } });
     bind('#stAge', el => { T().maxAge = Math.max(10, +el.value || 90); });
     bind('#stBasis', el => { T().priceBasis = ['usdt', 'mark', 'spot'].includes(el.value) ? el.value : 'usdt'; });
-    bind('#stBe', el => { T().beAt1R = el.checked; }); bind('#stBud', el => { T().budget = num(el.value) || 0; });
+    bind('#stBe', el => { T().beAt1R = el.checked; }); bind('#stDir', el => { T().dirRule = el.checked; }); bind('#stBud', el => { T().budget = num(el.value) || 0; });
     $('#ghRepo').onchange = e => { const v = e.target.value.trim(); if (/^[\w.-]+\/[\w.-]+$/.test(v)) { T().monRepo = v; save(); } else alert('Use owner/repo, like you/prop-desk.'); };
     $('#ghSave').onclick = async () => { const v = $('#ghTok').value.trim(); if (!/^(github_pat_|ghp_)\w+/.test(v)) { alert('That doesn\'t look like a GitHub key.'); return; }
       try { localStorage.setItem(GH_KEY, v); } catch (e) { } $('#ghStat').textContent = 'Testing…'; const r = await pushWatch('key test');

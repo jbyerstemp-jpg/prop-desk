@@ -375,8 +375,10 @@
     const isFunded = a.phase === 'funded';
     const equityIfStopped = equity - riskToStops;
     // A loss = a position fully closed after the reset whose total result is negative.
-    const lossesToday = positions.filter(p => p.acct === a.id && p.closed && p.closed.t > reset && realizedOfPos(p) < 0).length;
-    const tradesToday = positions.filter(p => p.acct === a.id && p.opened > reset && !p.openedUnknown).length;
+    // "Reset my day" restarts the app's own counters (never the platform's loss limits).
+    const countFrom = Math.max(reset, a.dayResetAt || 0);
+    const lossesToday = positions.filter(p => p.acct === a.id && p.closed && p.closed.t > countFrom && realizedOfPos(p) < 0).length;
+    const tradesToday = positions.filter(p => p.acct === a.id && p.opened > countFrom && !p.openedUnknown).length;
     const prof = profileById(a.profile);
     const openRiskAtEntry = open.reduce((s, p) => s + (p.stop != null ? Math.abs(p.entry - p.stop) * openQty(p) : 0), 0);
     const profRisk = start * prof.riskPct / 100;
@@ -1178,6 +1180,18 @@
     return plan;
   }
 
+  /* Owner's rule: trade both ways only when it makes sense. A side is OK when the 4h trend is that way, or when the
+     1h and 15m have both turned that way (an early reversal). Never long and short on the same coin at once. */
+  function directionCheck(side, sym, struct, positions, acctId) {
+    const want = side === 'long' ? 'bull' : 'bear', reasons = [];
+    const b4 = struct && struct['240'] && struct['240'].bias, b1 = struct && struct['60'] && struct['60'].bias, b15 = struct && struct['15'] && struct['15'].bias;
+    const trendOk = b4 === want || (b1 === want && b15 === want);
+    if (!trendOk) reasons.push(`${side} against structure (4h ${b4 || '?'}, 1h ${b1 || '?'}, 15m ${b15 || '?'})`);
+    if (positions.some(p => !p.closed && p.acct === acctId && p.sym === sym && p.side !== side && openQty(p) > 0)) reasons.push(`already ${side === 'long' ? 'short' : 'long'} ${sym}`);
+    return { ok: !reasons.length, reasons, known: !!(b4 || b1) };
+  }
+  const TRADE_TAGS = { plan: 'Followed plan', mistake: 'Mistake (execution/logging)', rulebreak: 'Rule break', data: 'Data problem' };
+
   // ---- Formatting --------------------------------------------------------
   function fmtUsd(x) {
     if (x == null || !isFinite(x)) return '—';
@@ -1192,7 +1206,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
