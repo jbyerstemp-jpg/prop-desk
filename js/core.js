@@ -128,6 +128,11 @@
       const m = /(?:^|\n)\s*([\d,]+\.\d{2,})\s*us/i.exec(head);
       if (m && T.length > head.length) out.account.equity = num(m[1]);
     }
+    // Portfolio screen: Balance and open P&L are shown directly (most reliable source for the balance).
+    out.account.balance = grab(/(?:^|\n)\s*Balance\s+([\d,]+\.\d+)\s*US/i);
+    out.account.upnl = (m => m ? num(m[1]) : null)(/(?:^|\n)\s*UP\s*&\s*L\s+([-+]?[\d,]*\.?\d+)/i.exec(T));
+    out.account.usedMargin = grab(/Used\s+margin\s+([\d,]+\.\d+)/i);
+    out.account.availMargin = grab(/Available\s+margin\s+([\d,]+\.\d+)/i);
     out.account.target = grab(/(?:Target\s+equity|Profit\s+target(?:\s+balance)?)[^\d]{0,10}([\d,]+\.\d+)/i);
     out.account.dailyLimit = grab(/(?:Daily\s+loss\s+limit|Daily\s+drawdown\s+limit|Max(?:imum)?\s+daily\s+loss\s+(?:limit|level))[^\d]{0,10}([\d,]+\.\d+)/i);
     out.account.drawdownLimit = grab(/(?:Drawdown\s+limit|Max(?:imum)?\s+(?:drawdown|loss)\s+(?:limit|level))[^\d]{0,10}([\d,]+\.\d+)/i);
@@ -211,7 +216,9 @@
     out.flat = /Positions\s*\W?\s*0\b/i.test(T) && !out.positions.length;
     const known = out.positions.every(p => p.upnl != null);
     out.upnlSum = out.positions.length && known ? out.positions.reduce((a, p) => a + p.upnl, 0) : (out.flat ? 0 : null);
-    out.balance = out.account.equity != null && out.upnlSum != null ? out.account.equity - out.upnlSum : null;
+    out.balance = out.account.balance != null ? out.account.balance
+      : out.account.equity != null && out.account.upnl != null ? out.account.equity - out.account.upnl
+      : out.account.equity != null && out.upnlSum != null ? out.account.equity - out.upnlSum : null;
     return out;
   }
   /* Account size from Kraken's limits: drawdown limit = size x (1 - MDD). */
