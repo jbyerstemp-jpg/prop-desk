@@ -131,7 +131,7 @@
     out.account.target = grab(/(?:Target\s+equity|Profit\s+target(?:\s+balance)?)[^\d]{0,10}([\d,]+\.\d+)/i);
     out.account.dailyLimit = grab(/(?:Daily\s+loss\s+limit|Daily\s+drawdown\s+limit|Max(?:imum)?\s+daily\s+loss\s+(?:limit|level))[^\d]{0,10}([\d,]+\.\d+)/i);
     out.account.drawdownLimit = grab(/(?:Drawdown\s+limit|Max(?:imum)?\s+(?:drawdown|loss)\s+(?:limit|level))[^\d]{0,10}([\d,]+\.\d+)/i);
-    const openPart = T.split(/\n\s*Closed\b/i)[0];
+    const parts = T.split(/\n\s*Closed\b/i), openPart = parts[0], closedPart = parts.slice(1).join('\n');
     const lines = openPart.split('\n').map(l => l.trim()).filter(Boolean);
     const sideRe = /\b(Short|Long)\b\s*([-+]?\d+(?:\.\d+)?)\s*%/i;
     const qtyRe = /^([\d]*\.?\d+)\s*([A-Z]{2,6})\b(?!\/)\s*([-+]?[\d,]*\.?\d+)?/;
@@ -165,6 +165,16 @@
       }
       if (out.positions.length) out.warnings.push('Read with the general reader (not a known platform layout): check every number before syncing.');
     }
+    // Closed list (Kraken shows each closed position's realized P&L, fees included).
+    out.closedRows = [];
+    { const cl = closedPart.split('\n').map(l => l.trim()).filter(Boolean);
+      for (let i = 0; i < cl.length; i++) {
+        const sm = /\b(Short|Long)\b/i.exec(cl[i]); if (!sm || !cl[i + 1]) continue;
+        const qm = /^([\d]*\.?\d+)\s*([A-Z]{2,6})\b(?!\/)\s*([-+]?[\d,]*\.?\d+)?/.exec(cl[i + 1].replace(/\s+(?=BTC|ETH|SOL|XRP|HYPE|WLD)/, ''));
+        const em = cl[i + 2] ? /@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?\s*([\d,]+\.?\d*)?/i.exec(cl[i + 2]) : null;
+        if (!qm || !em || qm[3] == null) continue;
+        out.closedRows.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD', realized: num(qm[3]), entry: num(em[1]), exit: em[2] ? num(em[2]) : null });
+      } }
     // De-duplicate (the same position can appear on two overlapping screenshots)
     const seen = new Set();
     out.positions = out.positions.filter(p => { const k = [p.side, p.qty, p.entry].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
@@ -1148,6 +1158,26 @@
     return out;
   }
 
+  /* Reconcile the app's open positions with a platform snapshot. Only what differs changes:
+     matched (same side, coin, entry) stays (qty drop = partial close); new ones are added; missing ones are
+     closed, with the platform's realized result when its Closed list shows it. Pure: returns a plan. */
+  function planSync(appOpen, snap, closedRows) {
+    const used = new Set(), usedClosed = new Set(), plan = { keep: [], partial: [], add: [], close: [] };
+    const same = (p, q) => p.side === q.side && p.sym === q.sym && Math.abs(p.entry - q.entry) < 0.01;
+    for (const q of snap) {
+      const exact = appOpen.find(p => !used.has(p.id) && same(p, q) && Math.abs(openQty(p) - q.qty) < 1e-9);
+      const m = exact || appOpen.find(p => !used.has(p.id) && same(p, q) && openQty(p) > q.qty + 1e-9);
+      if (m) { used.add(m.id); if (exact) plan.keep.push({ pos: m, snap: q }); else plan.partial.push({ pos: m, snap: q, closedQty: +(openQty(m) - q.qty).toFixed(10) }); }
+      else plan.add.push(q);
+    }
+    for (const p of appOpen) if (!used.has(p.id)) {
+      const ci = (closedRows || []).findIndex((c, i) => !usedClosed.has(i) && same(p, c) && Math.abs(c.qty - openQty(p)) < 1e-9);
+      if (ci >= 0) usedClosed.add(ci);
+      plan.close.push({ pos: p, row: ci >= 0 ? closedRows[ci] : null });
+    }
+    return plan;
+  }
+
   // ---- Formatting --------------------------------------------------------
   function fmtUsd(x) {
     if (x == null || !isFinite(x)) return '—';
@@ -1162,7 +1192,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
