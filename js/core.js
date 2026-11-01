@@ -1530,9 +1530,9 @@
   }
   /* Phone alerts for a setup (model M2, owner's choice Nov 1 2026): the replay's alert grade AND valid in the market now. */
   function alertWorthy(e, price, atr1h) { return !!(e.ready && alertGrade(e).ok && liveCheck(e, price, atr1h).status === 'valid'); }
-  function sortLive(list, check) {   // valid first, then most checks passing, then best R:R now, then replay grade
+  function sortLive(list, check, fits) {   // valid first, then what his account can take now, then most checks passing, best R:R now, replay grade
     const S = { valid: 0, partial: 1, invalid: 2 };
-    return list.map(u => ({ u, c: check(u) })).sort((a, b) => S[a.c.status] - S[b.c.status] || (b.c.passed / b.c.total) - (a.c.passed / a.c.total) || (b.c.rr || 0) - (a.c.rr || 0) || alertGrade(b.u).ok - alertGrade(a.u).ok).map(x => x.u);
+    return list.map(u => ({ u, c: check(u), f: fits ? (fits(u) ? 1 : 0) : 0 })).sort((a, b) => S[a.c.status] - S[b.c.status] || b.f - a.f || (b.c.passed / b.c.total) - (a.c.passed / a.c.total) || (b.c.rr || 0) - (a.c.rr || 0) || alertGrade(b.u).ok - alertGrade(a.u).ok).map(x => x.u);
   }
   /* Order type (owner's rule, Nov 1 2026): MARKET when price is within 0.25 x 1h ATR of the setup's level (the same "at the zone"
      distance the setup rules use) or already past the level on the good side (a limit there would fill at once); otherwise a
@@ -1564,6 +1564,104 @@
   function matchPlanned(planned, q) {
     const c = (planned || []).filter(x => x.sym === q.sym && x.side === q.side);
     return c.find(x => x.qty && Math.abs(x.qty - q.qty) < 1e-9) || c.find(x => Math.abs(x.entry - q.entry) <= x.entry * 0.005) || null;
+  }
+
+  /* Order history + "what happened" for a closed trade (owner's request, Nov 1 2026). Facts only, from his own log and the candles:
+     - timeline: opened, every stop/target change (with why, and widened), partial closes, the close;
+     - how it exited: stop / target / by hand / unknown (the exit price vs the stop and target at that time);
+     - stop placement: distance in 1h ATR at entry (under 1 ATR = inside normal noise);
+     - slippage past the stop; best and worst price while open in R (MFE/MAE, from 15m candles after the open);
+     - after the exit (24 h): did price reach the target, or come back through the entry, after he was stopped?
+     Never guesses: no candles or no open time -> it says so. */
+  function tradeReview(p, c15, c60, nowMs) {
+    const d = p.side === 'short' ? -1 : 1, stop0 = p.origStop != null ? p.origStop : (p.stopHist && p.stopHist[0] ? p.stopHist[0].stop : p.stop);
+    const risk = stop0 != null ? Math.abs(p.entry - stop0) : null, R = x => risk ? d * (x - p.entry) / risk : null, tgt = p.tp1 != null ? p.tp1 : p.tp2;
+    const ev = [{ t: p.opened, kind: 'open', text: `Opened ${p.side} ${p.qty} @ ${fmtPx(p.entry)}${stop0 != null ? ', stop ' + fmtPx(stop0) : ', NO STOP'}${tgt != null ? ', target ' + fmtPx(tgt) : ''}${p.openedUnknown ? ' (open time unknown)' : ''}` }];
+    let last = stop0;
+    for (const h of (p.stopHist || [])) { if (h.stop == null || h.stop === last) continue;
+      const wider = last != null && d * (h.stop - last) < 0;
+      ev.push({ t: h.t, kind: wider ? 'widened' : 'stop', text: `Stop ${last != null ? fmtPx(last) + ' → ' : ''}${fmtPx(h.stop)}${wider ? ' (WIDER)' : ''}${h.why ? ' · ' + h.why : ''}` }); last = h.stop; }
+    for (const h of (p.tpHist || [])) ev.push({ t: h.t, kind: 'target', text: `Target → ${fmtPx(h.tp)}${h.why ? ' · ' + h.why : ''}` });
+    for (const x of (p.partials || [])) ev.push({ t: x.t, kind: 'partial', text: `Closed ${x.qty}${x.price ? ' @ ' + fmtPx(x.price) : ''}${x.resultKnown === false ? ' (result in balance)' : ' · ' + fmtUsd(x.realized || 0)}` });
+    const cl = p.closed, out = { events: null, lines: [], exit: 'unknown', mfeR: null, maeR: null, stopAtr: null };
+    const finalStop = last;
+    if (cl) {
+      const xp = cl.price;
+      if (xp != null && finalStop != null && Math.abs(xp - finalStop) <= Math.max(finalStop * 0.0015, 1e-9) || (xp != null && finalStop != null && d * (xp - finalStop) < 0)) out.exit = 'stop';
+      else if (xp != null && tgt != null && d * (xp - tgt) >= -Math.abs(tgt) * 0.0015) out.exit = 'target';
+      else if (xp != null) out.exit = 'manual';
+      ev.push({ t: cl.t, kind: 'close', text: `Closed${xp != null ? ' @ ' + fmtPx(xp) : ''} · ${out.exit === 'stop' ? 'stop' : out.exit === 'target' ? 'target' : out.exit === 'manual' ? 'by hand / other' : 'exit price not known'}${cl.resultKnown === false && cl.synced ? '' : ' · ' + fmtUsd(realizedOfPos(p))}${cl.note ? ' · ' + cl.note : ''}` });
+    }
+    out.events = ev.filter(e => e.t != null).sort((a, b) => a.t - b.t);
+    const L = (lvl, t) => out.lines.push({ lvl, t });
+    if (stop0 == null) L('bad', 'No stop was recorded at entry: risk was unlimited and R can\'t be measured.');
+    if ((p.stopHist || []).some((h, i, a) => i > 0 && a[i - 1].stop != null && h.stop != null && d * (h.stop - a[i - 1].stop) < 0) || p.widened) L('bad', 'The stop was moved farther away during the trade (your rule: never widen a stop).');
+    // stop placement vs normal noise (1h ATR from closed candles before the open)
+    if (risk && !p.openedUnknown && c60 && c60.length) { const before = c60.filter(b => (b.time + 3600) * 1000 <= p.opened).slice(-40);
+      if (before.length > 15) { const a = atr(before, 14); if (a > 0) { out.stopAtr = risk / a;
+        L(out.stopAtr < 1 ? 'warn' : 'ok', `Stop was ${fmtPx(risk)} from entry = ${out.stopAtr.toFixed(2)}× the 1h ATR${out.stopAtr < 1 ? ': inside normal noise, easy to get wicked out' : ''}.`); } } }
+    // slippage on a stop exit
+    if (out.exit === 'stop' && cl && cl.price != null && finalStop != null && risk) { const slip = d * (finalStop - cl.price);
+      if (slip > 0) L(slip / risk > 0.1 ? 'warn' : 'ok', `Filled ${fmtPx(slip)} past the stop (${(slip / risk).toFixed(2)}R slippage).`); }
+    // excursions while open and after the exit (15m candles that opened after the trade opened)
+    if (risk && cl && !p.openedUnknown && c15 && c15.length) {
+      const inT = c15.filter(b => b.time * 1000 >= p.opened && (b.time + 900) * 1000 <= cl.t);
+      if (inT.length) { out.mfeR = Math.max(...inT.map(b => R(d > 0 ? b.high : b.low))); out.maeR = Math.min(...inT.map(b => R(d > 0 ? b.low : b.high)));
+        L('ok', `While open: best +${Math.max(0, out.mfeR).toFixed(2)}R, worst ${Math.min(0, out.maeR).toFixed(2)}R.`);
+        if (realizedOfPos(p) < 0 && out.mfeR >= 1) L('warn', `It was +${out.mfeR.toFixed(2)}R in your favor before turning into a loss: a stop to breakeven at +1R would have saved it.`);
+        if (tgt != null && out.mfeR >= R(tgt) && out.exit !== 'target') L('warn', 'Price reached your target while the trade was open, but it wasn\'t taken there.'); }
+      else L('ok', 'Not enough 15m candles inside the trade to measure how far price went.');
+      const after = c15.filter(b => b.time * 1000 >= cl.t && b.time * 1000 < cl.t + 86400e3);
+      if (after.length && out.exit === 'stop') {
+        const hitT = tgt != null ? after.find(b => d > 0 ? b.high >= tgt : b.low <= tgt) : null, back = after.find(b => d > 0 ? b.high >= p.entry : b.low <= p.entry);
+        if (hitT) L('warn', `After you were stopped, price reached your target ${((hitT.time * 1000 - cl.t) / 3600e3).toFixed(1)} h later: the idea was right, the stop was too tight or too early.`);
+        else if (back) L('ok', `After the stop, price came back to your entry ${((back.time * 1000 - cl.t) / 3600e3).toFixed(1)} h later but didn't reach the target.`);
+        else L('ok', 'After the stop, price did not come back to your entry within 24 h: the stop did its job.'); }
+    } else if (cl && (p.openedUnknown || !c15 || !c15.length)) L('ok', p.openedUnknown ? 'Open time unknown (import a History → Trades screenshot), so price movement inside the trade isn\'t checked.' : 'Candles for that time aren\'t loaded: price movement isn\'t checked.');
+    if (p.tag && p.tag !== 'plan') L(p.tag === 'rulebreak' ? 'bad' : 'warn', `Tagged: ${TRADE_TAGS[p.tag]}${p.tagNote ? ' — ' + p.tagNote : ''}.`);
+    // Lessons to save (machine-readable, for the Scorecard): one flag per finding.
+    const has = re => out.lines.some(l => re.test(l.t)), f = [];
+    if (stop0 == null) f.push('no_stop');
+    if (has(/never widen/)) f.push('stop_widened');
+    if (out.stopAtr != null && out.stopAtr < 1) f.push('stop_in_noise');
+    if (has(/slippage/) && out.lines.some(l => /slippage/.test(l.t) && l.lvl === 'warn')) f.push('big_slippage');
+    if (has(/breakeven at \+1R would have saved/)) f.push('be_would_save');
+    if (has(/reached your target .* later/)) f.push('target_after_stop');
+    if (has(/target while the trade was open, but it wasn't taken/)) f.push('target_not_taken');
+    if (has(/stop did its job/)) f.push('stop_did_job');
+    if (!p.thesis) f.push('no_plan');
+    out.flags = f;
+    out.complete = !!(cl && (out.exit !== 'stop' || nowMs - cl.t >= 86400e3) && !p.openedUnknown && c15 && c15.length);
+    return out;
+  }
+
+  const LESSON_FLAGS = { no_stop: 'No stop at entry', stop_widened: 'Stop widened', stop_in_noise: 'Stop inside normal noise (< 1 ATR)', big_slippage: 'Slipped past the stop (> 0.1R)',
+    be_would_save: 'Was +1R, then lost (breakeven would have saved it)', target_after_stop: 'Target hit after the stop', target_not_taken: 'Target reached but not taken', stop_did_job: 'Stop did its job', no_plan: 'No plan written' };
+  const LESSON_TAGS = { early: 'Entered early', late: 'Entered late (chased)', moved: 'Moved my stop/target', ignored: 'Ignored my plan', news: 'News / event', fomo: 'FOMO', revenge: 'Revenge trade', tired: 'Tired / distracted' };
+  /* The Coach's one-line verdict for a closed trade (most important finding first). */
+  function coachVerdict(rv, p) {
+    const f = rv.flags || [], o = tradeOutcome(p);
+    if (f.includes('no_stop')) return 'Coach: no stop at entry. Every trade needs one before anything else.';
+    if (f.includes('stop_widened')) return 'Coach: the stop was widened. Keep the first stop; size smaller if it needs more room.';
+    if (f.includes('target_after_stop') && f.includes('stop_in_noise')) return 'Coach: right idea, stop too tight: it sat inside normal noise and price hit your target after stopping you out. Next time give it at least 1× the 1h ATR and size down to keep the same dollar risk.';
+    if (f.includes('be_would_save')) return 'Coach: it was +1R and still lost. Move the stop to breakeven at +1R (Settings has the rule).';
+    if (f.includes('target_not_taken')) return 'Coach: price reached the target but it wasn\'t taken. Set the take profit on the platform when you enter.';
+    if (f.includes('target_after_stop')) return 'Coach: the idea was right but the stop got hit first. Check whether the entry was early or the stop too close.';
+    if (f.includes('big_slippage')) return 'Coach: slippage past the stop was large. Avoid fast news moments, or use a slightly smaller size.';
+    if (f.includes('stop_in_noise')) return 'Coach: the stop was inside normal noise (under 1 ATR). Wider stop with smaller size is usually steadier.';
+    if (o === 'loss' && f.includes('stop_did_job')) return 'Coach: a clean loss. The stop did its job and price kept going against you. Nothing to fix; this is the cost of trading.';
+    if (o === 'win') return 'Coach: plan followed and it worked. Keep doing that.';
+    if (f.includes('no_plan')) return 'Coach: no plan was written. Write one line before the next trade.';
+    return 'Coach: nothing stands out. ' + (rv.complete ? '' : 'More will show once the candles after the exit are in.');
+  }
+  /* Lessons across closed trades (owner's request, Nov 1 2026): how often each finding and each of his own tags happens, and the
+     average R of those trades. The evidence for changing the model (e.g. wider stops) — counted, never acted on automatically. */
+  function lessons(positions, model) {
+    const closed = (positions || []).filter(p => p.closed && (!model || ((p.ref && p.ref.model) || modelAt(p.opened)) === model)), out = {};
+    const add = (k, label, p) => { const o = out[k] = out[k] || { label, n: 0, rs: [] }; o.n++; const r = liveR(p); if (r != null) o.rs.push(r); };
+    for (const p of closed) { for (const k of ((p.review && p.review.flags) || [])) if (LESSON_FLAGS[k]) add('f:' + k, LESSON_FLAGS[k], p);
+      for (const k of ((p.lesson && p.lesson.tags) || [])) if (LESSON_TAGS[k]) add('t:' + k, LESSON_TAGS[k], p); }
+    return Object.entries(out).map(([k, o]) => ({ key: k, label: o.label, n: o.n, avgR: o.rs.length ? o.rs.reduce((a, x) => a + x, 0) / o.rs.length : null, of: closed.length })).sort((a, b) => b.n - a.n);
   }
 
   /* Owner's rule: trade both ways only when it makes sense. A side is OK when the 4h trend is that way, or when the
@@ -1606,7 +1704,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

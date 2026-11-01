@@ -385,10 +385,10 @@
     fv.sort((a, b) => Math.abs((a.top + a.bottom) / 2 - p) - Math.abs((b.top + b.bottom) / 2 - p));
     $('#fvgBox').innerHTML = fv.length ? `<table><tr><th>TF</th><th>Side</th><th class=num>Zone</th><th>State</th></tr>${fv.slice(0, 8).map(g => `<tr><td>${C.tfName(g.iv)}</td><td class="${g.dir}">${g.dir}</td><td class=num>${px(g.bottom)}–${px(g.top)}</td><td class=small>${g.status}</td></tr>`).join('')}</table>
       <p class="small mu">FVG = 3-candle gap ≥0.15 ATR, closed candles only. Filled ones are dropped.</p>` : '<p class=mu>None open near price (or still loading).</p>';
-    const ups = C.sortLive(C.scanSetups(A.sym, A, Date.now()), liveOf);
-    $('#setupBox').innerHTML = ups.length ? ups.map((u, i) => setupCard('chart', i, u, ` <button class="btn sm" data-weigh="${i}">Weigh it</button><div class=small data-weighout="${i}"></div>`)).join('')
-      + '<p class="small mu">Scanned both ways, all the time, without your account. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
-      : `<p class=mu>Nothing clean: no open FVG either way within 2 ATR with 2R+ to the next swing, and no fresh liquidity sweep. No trade is a valid answer.</p>`;
+    const ups = C.sortLive(C.scanSetups(A.sym, A, Date.now()), liveOf, fitsNow);
+    $('#setupBox').innerHTML = sizeAcctPicker() + (ups.length ? ups.map((u, i) => setupCard('chart', i, u, ` <button class="btn sm" data-weigh="${i}">Weigh it</button><div class=small data-weighout="${i}"></div>`)).join('')
+      + '<p class="small mu">Scanned both ways, all the time; sized and checked for the account picked above. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
+      : `<p class=mu>Nothing clean: no open FVG either way within 2 ATR with 2R+ to the next swing, and no fresh liquidity sweep. No trade is a valid answer.</p>`);
     lastUps = ups;
     renderResearch(A.sym);
     renderProfile(A.sym);
@@ -430,7 +430,7 @@
   }
   function renderScanAll() {
     const box = $('#scanAllBox'); if (!box) return;
-    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
+    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
     const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
       <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
     const body = top.length ? top.map((u, i) => setupCard('scan', i, u, ` <button class="btn sm" data-saweigh="${i}">Weigh</button><div class=small data-saout="${i}"></div>`)).join('')
@@ -529,11 +529,24 @@
     return `<div class=sc-p>${items.map(([l, v, d]) => v == null || v === '' ? `<div class="cp off"><span>${l}</span><b>—</b></div>`
       : `<button class=cp data-copy="${esc(String(v))}" aria-label="Copy ${l} ${esc(String(v))}"><span>${l} ⧉</span><b>${d != null ? d : px(+v)}</b></button>`).join('')}</div>`;
   }
-  function setupSize(u) { const a = liveAccts()[0]; if (!a) return null; try { const A = C.accountState(a, S.positions, prices(), Date.now()); const w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), Date.now(), { leverage: C.levMap(a) }); return w.size && w.size.qty > 0 ? w.size.qty : null; } catch (e) { return null; } }
+  // Setups are sized and judged for the account he's trading (owner's rule, Nov 1): pick it once; defaults to the first open one.
+  const sizeAcct = () => { const L = liveAccts(); return L.find(a => a.id === T().sizeAcct) || L[0] || null; };
+  function fitOf(u, entry) {
+    const a = sizeAcct(); if (!a) return null;
+    try { const now = Date.now(), A = C.accountState(a, S.positions, prices(), now), w = C.weighIdea(Object.assign({}, u, { entry: entry != null ? entry : u.entry }), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) });
+      const qty = w.size && w.size.qty > 0 ? w.size.qty : null;
+      return { acct: a, ok: !!(w.ok && qty), qty, risk: w.size ? w.size.lossAtStop : null, room: A.room, why: w.rules.filter(r => !r.ok).map(r => r.t) }; } catch (e) { return null; }
+  }
+  const fitsNow = u => { const lc = liveOf(u), f = fitOf(u, lc.entry); return !!(f && f.ok); };
+  function setupSize(u) { const f = fitOf(u); return f && f.qty ? f.qty : null; }
+  function sizeAcctPicker() { const L = liveAccts(); if (L.length < 2) return '';
+    return `<label class=small style="display:block;margin:0 0 6px">Sizing for <select data-sizeacct>${L.map(a => `<option value="${a.id}" ${sizeAcct() && sizeAcct().id === a.id ? 'selected' : ''}>${esc(acctName(a.id))} · ${esc(a.phase)}</option>`).join('')}</select></label>`; }
+  document.addEventListener('change', e => { const s = e.target.closest('[data-sizeacct]'); if (!s) return; T().sizeAcct = s.value; save(); renderAll(true); });
   function setupCard(list, i, u, extra) {
-    const g = C.alertGrade(u), lc = liveOf(u), op = { type: lc.order, entry: lc.entry }, ent = lc.entry, rr = lc.rr, q = setupSize(Object.assign({}, u, { entry: ent }));
+    const g = C.alertGrade(u), lc = liveOf(u), op = { type: lc.order, entry: lc.entry }, ent = lc.entry, rr = lc.rr, fit = fitOf(u, ent), q = fit && fit.qty ? fit.qty : null;
     return `<div class=sc><div class=sc-h><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span>${rr != null ? ` <span class="${rr >= 2 ? 'up' : rr >= 1 ? '' : 'dn'}" title="Reward:risk from this entry, stop and target, after fees">· ${rr.toFixed(1)}R</span>` : ''}</div>
       <div class=sc-t>${lc.status === 'valid' ? '<span class="tag up">✓ valid now</span>' : lc.status === 'invalid' ? '<span class="tag dn">✗ not valid now</span>' : `<span class="tag warn">partly valid ${lc.passed}/${lc.total}</span>`}<span class="tag ${g.ok ? 'up' : 'mu'}" title="From the replay on past candles">replay: ${g.ok ? 'alert grade' : 'below grade'}</span>${setupBadge(u.kind, u.tf)}</div>
+      ${fit ? `<div class="small ${fit.ok ? 'up' : 'warn'}" style="margin-top:4px">${fit.ok ? `Fits ${esc(acctName(fit.acct.id))}: risks ${usd(fit.risk)} of ${usd(fit.room)} room` : `${esc(acctName(fit.acct.id))} says not now: ${esc(fit.why.join(', ') || 'size 0')}`}</div>` : '<div class="small mu" style="margin-top:4px">Add your prop account on the Desk to size setups.</div>'}
       ${priceBoxes([[op.type === 'market' ? 'Market ~' : op.type === 'none' ? 'Past stop' : 'Limit', op.type === 'none' ? '' : cpVal(ent)], ['Stop', cpVal(u.stop)], ['Target', cpVal(u.target)], ['Size', q != null ? String(q) : '', q != null ? String(+q.toPrecision(4)) : null]])}
       <div class=sc-a>${lc.status === 'invalid' && !useOf(u) ? '<span class="small dn">Not valid now: price is past the stop or under 1R after fees. Skip it.</span>' : setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · ${op.type === 'market' ? 'market ~' : 'limit'} ${cpVal(ent)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
       <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary><div>${esc(u.text)}</div><div><b>Live check now:</b> ${lc.items.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
@@ -568,28 +581,31 @@
     const accts = liveAccts(); if (!accts.length) { alert('Add your prop account on the Desk first.'); return; }
     if (!fromPaper && !okToUse(u)) return;
     const now = Date.now(), P = prices();
-    const sizeIn = (a, entry) => { const A = C.accountState(a, S.positions, P, now); return C.weighIdea(Object.assign({}, u, { entry }), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }); };
+    const sizeIn = (a, entry, stop) => { const A = C.accountState(a, S.positions, P, now); return C.weighIdea(Object.assign({}, u, { entry }, stop != null && isFinite(stop) ? { stop } : {}), A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }); };
     const price = pnlPrice(u.sym), atr1 = (analyses[u.sym] && analyses[u.sym].atr[60]) || (analyze(u.sym).atr || {})[60];
     const op = C.orderPlan(u.entry, price, u.stop, u.dir, atr1);
     showModal(`<h3>Take it live: ${esc(u.sym)} ${u.dir.toUpperCase()}</h3>
       <p class=small>${fromPaper ? `From your open paper trade (opened ${fmtTime(fromPaper.opened, true)} at ${px(fromPaper.entry)}). The paper trade keeps running for reference, but once this is live only the live trade counts on the Scorecard.<br>` : ''}${esc(u.text)}</p>
-      <div class=form><label style="grid-column:1/-1">Which account<select id=tlA>${accts.map(a => { const A = C.accountState(a, S.positions, P, now); return `<option value="${a.id}">${esc(acctName(a.id))} · ${esc(a.phase)} · room ${usd(A.room)}</option>`; }).join('')}</select></label>
+      <div class=form><label style="grid-column:1/-1">Which account<select id=tlA>${accts.map(a => { const A = C.accountState(a, S.positions, P, now); return `<option value="${a.id}" ${sizeAcct() && sizeAcct().id === a.id ? 'selected' : ''}>${esc(acctName(a.id))} · ${esc(a.phase)} · room ${usd(A.room)}</option>`; }).join('')}</select></label>
         <label>Order<select id=tlType><option value=market ${op && op.type === 'market' ? 'selected' : ''}>Market</option><option value=limit ${!op || op.type !== 'market' ? 'selected' : ''}>Limit</option></select></label>
         <label>Entry<input id=tlE type=number step=any value="${pxIn((op && op.entry) || u.entry)}"></label>
         <div class=small style="grid-column:1/-1">${op ? `<b class="${op.type === 'none' ? 'dn' : 'up'}">${op.type === 'none' ? 'No trade' : op.type === 'market' ? 'Market' : 'Limit'}</b>: ${esc(op.why)}.` : ''} Level ${px(u.entry)}${price != null ? ' · price now ' + px(price) : ''}.</div>
         <label>Stop<input id=tlS type=number step=any value="${pxIn(u.stop)}"></label>
         <label>Target<input id=tlT type=number step=any value="${pxIn(u.target)}"></label>
-        <label>Size<input id=tlQ type=number step=any></label>
+        <label>Size<input id=tlQ type=number step=any></label><div style="align-self:end"><button class="btn sm" id=tlSize type=button>↻ Size to my room</button></div>
         <label style="grid-column:1/-1">Plan (why, and what makes you get out)<input id=tlTh value="${esc(u.text)}"></label></div>
       <div id=tlOut class=small></div>
       <p class="small mu">This saves a <b>planned</b> trade. Nothing counts on the Desk yet. Market: place it, then tap <b>It's live</b>. Limit: place it, tap <b>Limit placed</b>, and it becomes an open position by itself when price reaches it. Importing the screenshot also picks it up.</p>
       <div class=row><button class="btn pri" id=tlOk>Save plan</button><button class=btn data-close>Cancel</button></div>`);
     $('#tlType').onchange = () => { $('#tlE').value = $('#tlType').value === 'market' && pnlPrice(u.sym) != null ? pxIn(pnlPrice(u.sym)) : pxIn(u.entry); upd(true); };
-    ['#tlE', '#tlS', '#tlT'].forEach(id => $(id).addEventListener('input', () => upd(false))); $('#tlE').addEventListener('change', () => upd(true));
-    const upd = fill => { const a = acctById($('#tlA').value), w = sizeIn(a, num($('#tlE').value) || u.entry); const z = w.size;
+    ['#tlE', '#tlS', '#tlT'].forEach(id => $(id).addEventListener('input', () => upd(false))); ['#tlE', '#tlS'].forEach(id => $(id).addEventListener('change', () => upd(true)));
+    $('#tlSize').onclick = () => upd(true);
+    const upd = fill => { const a = acctById($('#tlA').value), w = sizeIn(a, num($('#tlE').value) || u.entry, num($('#tlS').value)); const z = w.size;
       if (fill && z && z.qty > 0) $('#tlQ').value = z.qty;
       const rrNow = C.rrOf(u.dir, num($('#tlE').value), num($('#tlS').value), num($('#tlT').value));
-      $('#tlOut').innerHTML = (rrNow != null ? `Reward:risk <b class="${rrNow >= 2 ? 'up' : rrNow >= 1 ? '' : 'dn'}">${rrNow.toFixed(2)}R</b> from this entry, stop and target, after fees. ` : '<span class=warn>Reward:risk unknown: needs a target on the right side.</span> ') + (z && z.qty > 0 ? `Your ${esc(C.profileById(a.profile).name)} pace: <b>${z.qty} ${esc(C.base(u.sym))}</b>, about ${usd(z.lossAtStop)} at the stop${z.levUnknown ? ' · <span class=warn>leverage unknown</span>' : ''}.` : '<b class=warn>Your account says size 0 right now.</b>')
+      const Ast = C.accountState(a, S.positions, P, now), stN = num($('#tlS').value);
+      const sizeLine = z && z.qty > 0 ? `Sized for <b>${esc(acctName(a.id))}</b>: ${esc(C.profileById(a.profile).name)} pace risks <b>${usd(z.lossAtStop)}</b> at the stop (room left ${usd(Ast.room)}, open risk ${usd(Ast.riskToStops)}). ` : '';
+      $('#tlOut').innerHTML = sizeLine + (rrNow != null ? `Reward:risk <b class="${rrNow >= 2 ? 'up' : rrNow >= 1 ? '' : 'dn'}">${rrNow.toFixed(2)}R</b> from this entry, stop and target, after fees. ` : '<span class=warn>Reward:risk unknown: needs a target on the right side.</span> ') + (z && z.qty > 0 ? `Your ${esc(C.profileById(a.profile).name)} pace: <b>${z.qty} ${esc(C.base(u.sym))}</b>, about ${usd(z.lossAtStop)} at the stop${z.levUnknown ? ' · <span class=warn>leverage unknown</span>' : ''}.` : '<b class=warn>Your account says size 0 right now.</b>')
         + (w.rules.some(r => !r.ok) ? `<div class=warn>Not passing: ${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ')}</div>` : '<div class=up>Every account rule passes.</div>'); };
     $('#tlA').onchange = () => upd(true); upd(true);
     $('#tlOk').onclick = () => {
@@ -706,6 +722,7 @@
       ${tagRows || sesRows ? `<details ${fold('sc:patterns')}><summary class=small><b>Your patterns</b></summary><table><tr><th>Live trades by tag</th><th class=num>Result</th></tr>${tagRows || '<tr><td colspan=2 class=mu>No live trades yet.</td></tr>'}</table>
         <table style="margin-top:6px"><tr><th>All trades by session (NY time)</th><th class=num>Result</th></tr>${sesRows}</table>
         <p class=small>Trades opened within 4h after a losing trade: ${cell(pat.afterLoss)}</p></details>` : ''}
+      ${(L => L.length ? `<details ${fold('sc:lessons')}><summary class=small><b>Lessons from closed trades</b> (the Coach's findings + your tags)</summary><table><tr><th>What went wrong</th><th class=num>Trades</th><th class=num>Avg R</th></tr>${L.map(x => `<tr><td>${esc(x.label)}</td><td class=num>${x.n} of ${x.of}</td><td class="num ${x.avgR > 0 ? 'up' : x.avgR < 0 ? 'dn' : ''}">${x.avgR == null ? '—' : r(x.avgR)}</td></tr>`).join('')}</table><p class="small mu">Counted, never acted on by itself. When one keeps showing up (e.g. stops inside normal noise), that's the evidence to change a rule; a change gets a new model version and its own record.</p></details>` : '')(C.lessons(S.positions))}
       <details ${fold('sc:models')}><summary class=small><b>Model versions</b></summary><table>${C.MODELS.slice().reverse().map(m => `<tr><td><b>${m.id}</b></td><td class=small>${m.from ? new Date(m.from).toISOString().slice(0, 10) : '—'}</td><td class=small>${esc(m.note)}</td></tr>`).join('')}</table></details></div>`;
   }
   function renderPaper() {
@@ -1026,6 +1043,42 @@
       S.positions.push(p); posDraft = null; posFormDirty = true; saveAndSync('new'); ensureFeeds(); renderAll(true);
     };
   }
+  // Order history + "what happened" for a closed trade (owner's request, Nov 1 2026): facts from his log and the candles.
+  // The Coach reviews every closed trade by itself and saves the findings (p.review) for the Scorecard's Lessons; it finishes the
+  // review once the candles 24 h after a stop-out are in. His own note and tags (p.lesson) are optional.
+  function coachReview(p) {
+    const rv = C.tradeReview(p, F.candles(p.sym, 15), F.candles(p.sym, 60), Date.now());
+    rv.verdict = C.coachVerdict(rv, p);
+    if (!p.review || !p.review.complete) {
+      const nr = { flags: rv.flags, verdict: rv.verdict, exit: rv.exit, stopAtr: rv.stopAtr, mfeR: rv.mfeR, maeR: rv.maeR, complete: rv.complete, at: Date.now() };
+      if (!p.review || JSON.stringify([p.review.flags, p.review.verdict, p.review.complete]) !== JSON.stringify([nr.flags, nr.verdict, nr.complete])) { p.review = nr; reviewsChanged = true; }
+    }
+    return rv;
+  }
+  let reviewsChanged = false;
+  function reviewAllClosed() { for (const p of S.positions.filter(p => p.closed && (!p.review || !p.review.complete))) { try { coachReview(p); } catch (e) { } } if (reviewsChanged) { reviewsChanged = false; save(); } }
+  setTimeout(reviewAllClosed, 10000); setInterval(reviewAllClosed, 5 * 60e3);
+  function historyFold(p) {
+    const rv = coachReview(p);
+    const ico = { open: '▶', stop: '⛔', widened: '⚠', target: '🎯', partial: '½', close: '■' };
+    const plan = C.rrOf(p.side, p.entry, p.origStop != null ? p.origStop : p.stop, p.tp1 != null ? p.tp1 : p.tp2), got = C.liveR(p), le = p.lesson || {};
+    return `<details class=sc-w ${fold('hist:' + p.id)}><summary>History &amp; what happened</summary>
+      <div class=small><div class="${rv.flags.some(f => f !== 'stop_did_job') ? 'warn' : 'up'}" style="margin:4px 0"><b>${esc(rv.verdict)}</b></div>
+      ${p.thesis ? `<div><b>Plan:</b> ${esc(p.thesis)}</div>` : '<div class=warn>No plan was written for this trade.</div>'}
+      <div><b>Planned</b> ${plan != null ? plan.toFixed(2) + 'R' : '—'} · <b>got</b> ${got != null ? (got >= 0 ? '+' : '') + got.toFixed(2) + 'R' : '—'}${p.closed && p.opened && !p.openedUnknown ? ` · held ${((p.closed.t - p.opened) / 3600e3).toFixed(1)} h` : ''}</div>
+      <table class=hist>${rv.events.map(e => `<tr class="${e.kind === 'widened' ? 'dn' : ''}"><td class=mu>${fmtTime(e.t, true)}</td><td>${ico[e.kind] || '·'} ${esc(e.text)}</td></tr>`).join('')}</table>
+      <div class=warns>${rv.lines.map(l => `<div class="${l.lvl === 'bad' ? 'bad' : l.lvl === 'warn' ? 'warn' : ''}">${esc(l.t)}</div>`).join('')}</div>
+      <div style="margin-top:6px"><b>Your side (optional):</b> ${Object.entries(C.LESSON_TAGS).map(([k, l]) => `<label class=chk style="display:inline-flex;margin-right:8px"><input type=checkbox data-ltag="${p.id}" value="${k}" ${(le.tags || []).includes(k) ? 'checked' : ''}> ${esc(l)}</label>`).join('')}
+        <input data-lnote="${p.id}" value="${esc(le.text || '')}" placeholder="What would you do differently?" style="width:100%;margin-top:4px"></div>
+      <div class=mu>Saved with the trade; the Scorecard's Lessons add these up across trades.</div></div></details>`;
+  }
+  document.addEventListener('change', e => {
+    const t = e.target.closest('[data-ltag]'), n = e.target.closest('[data-lnote]'); if (!t && !n) return;
+    const p = S.positions.find(x => x.id === (t ? t.dataset.ltag : n.dataset.lnote)); if (!p) return;
+    p.lesson = p.lesson || { tags: [], text: '' };
+    if (t) p.lesson.tags = t.checked ? [...new Set(p.lesson.tags.concat(t.value))] : p.lesson.tags.filter(x => x !== t.value); else p.lesson.text = n.value.trim();
+    save();
+  });
   function renderPositions() {
     const now = Date.now();
     const open = S.positions.filter(p => !p.closed);
@@ -1049,7 +1102,8 @@
     $('#posClosed').innerHTML = stats + (closed.length ? `<table><tr><th>Closed</th><th>Trade</th><th class=num>Net</th><th>Setup · tag</th></tr>${closed.map(p => {
       const tot = C.realizedOfPos(p), known = !p.closed.synced || p.closed.resultKnown;
       return `<tr><td class=small>${fmtTime(p.closed.t, true)}</td><td>${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)}${p.closed.price ? ' → ' + px(p.closed.price) : ''}<div class=small>${esc(p.closed.note || '')}${p.widened ? ' <span class=warn>stop widened</span>' : ''}${p.tagNote ? ' <span class=dn>' + esc(p.tagNote) + '</span>' : ''}</div></td>
-        <td class="num ${cls(tot)}">${(o => o === 'unknown' ? `— <div><button class="btn sm" data-res="${p.id}">Enter result</button></div>` : `${usd(tot)}<div class=small><b class="${o === 'win' ? 'up' : o === 'loss' ? 'dn' : ''}">${o === 'win' ? 'Win' : o === 'loss' ? 'Loss' : 'Breakeven'}</b>${(r => r == null ? '' : ' · ' + (r >= 0 ? '+' : '') + r.toFixed(2) + 'R')(C.liveR(p))}</div>`)(C.tradeOutcome(p))}</td><td><select data-setup="${p.id}" aria-label="Setup">${C.SETUP_CHOICES.map(([k, l]) => `<option value="${k}" ${k === (p.ref && p.ref.key ? p.ref.key : C.setupKey(p.setup, p.tf)) ? 'selected' : ''}>${l}</option>`).join('')}</select><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>`;
+        <td class="num ${cls(tot)}">${(o => o === 'unknown' ? `— <div><button class="btn sm" data-res="${p.id}">Enter result</button></div>` : `${usd(tot)}<div class=small><b class="${o === 'win' ? 'up' : o === 'loss' ? 'dn' : ''}">${o === 'win' ? 'Win' : o === 'loss' ? 'Loss' : 'Breakeven'}</b>${(r => r == null ? '' : ' · ' + (r >= 0 ? '+' : '') + r.toFixed(2) + 'R')(C.liveR(p))}</div>`)(C.tradeOutcome(p))}</td><td><select data-setup="${p.id}" aria-label="Setup">${C.SETUP_CHOICES.map(([k, l]) => `<option value="${k}" ${k === (p.ref && p.ref.key ? p.ref.key : C.setupKey(p.setup, p.tf)) ? 'selected' : ''}>${l}</option>`).join('')}</select><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>
+        <tr><td colspan=4 style="padding-top:0">${historyFold(p)}</td></tr>`;
     }).join('')}</table>` : '<p class=mu>Nothing closed yet.</p>');
     const dl = S.accounts.flatMap(a => (a.dayLog || []).map(d => Object.assign({ acct: a.label || C.planOf(a).name }, d))).sort((x, y) => y.t - x.t).slice(0, 10);
     if (dl.length) $('#posClosed').innerHTML += `<h3 style="margin-top:12px">Day resets</h3><table>${dl.map(d => `<tr><td class=small>${fmtTime(d.t, true)}</td><td>${esc(d.acct)}</td><td class="${d.kind === 'rulebreak' ? 'dn' : 'warn'}">${d.kind === 'rulebreak' ? 'Rule break' : 'Accident / technical'}</td><td class=small>${d.trades} trades, ${d.losses} losses${d.note ? ' · ' + esc(d.note) : ''}</td></tr>`).join('')}</table>`;
@@ -1083,7 +1137,8 @@
         if (wid && !confirm('Widen the stop anyway? This is a rule break and will be recorded.')) return;
         if (wid) p.widened = true;
         if (ns !== p.stop) p.stopHist.push({ t: Date.now(), stop: ns, why: $('#usWhy').value });
-        p.stop = ns; p.tp1 = num($('#usT1').value); p.tp2 = num($('#usT2').value); saveAndSync('stop'); closeModal(); renderAll(true);
+        const nt = num($('#usT1').value); if (nt !== p.tp1) (p.tpHist = p.tpHist || []).push({ t: Date.now(), tp: nt, why: $('#usWhy').value });
+        p.stop = ns; p.tp1 = nt; p.tp2 = num($('#usT2').value); saveAndSync('stop'); closeModal(); renderAll(true);
       };
       return;
     }
@@ -1265,7 +1320,7 @@
         p.stopHist.push({ t, stop: d.sl, why: wider ? 'moved farther on platform (import)' : 'from platform (import)' });
         p.stop = d.sl; if (p.origStop == null) p.origStop = d.sl;
       }
-      if (d.tp != null) p.tp1 = d.tp;
+      if (d.tp != null && d.tp !== p.tp1) { (p.tpHist = p.tpHist || []).push({ t, tp: d.tp, why: 'from platform (import)' }); p.tp1 = d.tp; }
       if (d.sl != null) p.krakenSL = true; if (d.tp != null) p.krakenTP = true;
       if (d.openedMs && d.openedMs <= now) { p.opened = d.openedMs; p.openedUnknown = false; }
       setN++;
@@ -1367,7 +1422,7 @@
     }).join('');
     const sym = T().sym, A = analyses[sym] || analyze(sym);
     const ups = C.scanSetups(sym, A, now);
-    coachUps = C.sortLive(ups, liveOf).slice(0, 5);
+    coachUps = C.sortLive(ups, liveOf, fitsNow).slice(0, 5);
     const reviews = liveAccts().map(a => {
       const R = C.accountReview(a, S.positions, P, now), st = R.state;
       const syms = [...new Set(S.positions.filter(p => p.acct === a.id && !p.closed && p.stop == null && p.krakenSL).map(p => p.sym + '|' + p.side))];
@@ -1380,7 +1435,7 @@
     }).join('');
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
-      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>top 5 · valid now first</span></h3>${coachUps.length ? coachUps.map((u, i) => setupCard('coach', i, u)).join('') + '<p class="small mu">Sorted by the live check: valid in the market now first, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
+      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>top 5 · valid now first</span></h3>${sizeAcctPicker()}${coachUps.length ? coachUps.map((u, i) => setupCard('coach', i, u)).join('') + '<p class="small mu">Sorted by the live check: valid in the market now first, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
   }
   var coachUps = [];
@@ -1394,7 +1449,7 @@
         if (p.stop != null && d * (v - p.stop) <= 0) { alert('That would widen the stop. Not allowed.'); return; }
         if (now != null && d * (now - v) <= 0) { alert('Stop must be ' + (d > 0 ? 'below' : 'above') + ' the current price.'); return; }
         p.stop = v; if (p.origStop == null) p.origStop = v; (p.stopHist = p.stopHist || []).push({ t: Date.now(), stop: v, why: 'coach suggestion, set on platform' });
-      } else { if (p.tp1 != null && now != null && d * (now - p.tp1) >= 0) p.tp2 = v; else p.tp1 = v; }
+      } else { if (p.tp1 != null && now != null && d * (now - p.tp1) >= 0) p.tp2 = v; else { (p.tpHist = p.tpHist || []).push({ t: Date.now(), tp: v, why: 'coach suggestion, set on platform' }); p.tp1 = v; } }
       saveAndSync('levels'); renderAll(true); return;
     }
     const b = e.target.closest('[data-bulkgo]'); if (!b) return;
