@@ -504,7 +504,9 @@
   // Every setup list shows "Not used yet" or how it was used. Taking it live creates a PLANNED trade (not counted anywhere)
   // until he marks it live after placing it on the platform, or a screenshot import shows it. Used setups stay used even if
   // the trade is later deleted (S.usedSetups); using one again needs a confirm.
-  const useOf = u => C.setupUse(u.key, S.paper, S.positions, S.planned, S.usedSetups);
+  const keysOf = u => [u.key].concat(u.alsoKeys || []);
+  const useOf = u => { for (const k of keysOf(u)) { const x = C.setupUse(k, S.paper, S.positions, S.planned, S.usedSetups); if (x) return Object.assign({ key: k }, x); } return null; };
+  const openPaperOf = u => S.paper.find(t => t.status === 'open' && keysOf(u).includes(t.setupKey));
   function markUsed(key, how, acct) { if (key && !S.usedSetups[key]) S.usedSetups[key] = { t: Date.now(), how, acct }; }
   const acctName = id => { const a = acctById(id); return a ? a.label || C.planOf(a).name + ' ' + usd(a.size) : ''; };
   function okToUse(u) { const use = useOf(u); return !use || confirm(`This setup was already used (${use.text}). Use it again anyway?`); }
@@ -512,6 +514,7 @@
   function setupActions(list, i, u) {
     const use = useOf(u);
     const badge = use ? `<span class="tag ${use.state === 'live' ? 'up' : use.state === 'used' ? 'mu' : 'warn'}">${use.state === 'live' ? '✅ ' : use.state === 'planned' ? '⏳ ' : use.state === 'paper' ? '📝 ' : '✔ '}${esc(use.text)}${use.acct && acctName(use.acct) ? ' · ' + esc(acctName(use.acct)) : ''}</span>` : '<span class="tag up">Not used yet</span>';
+    if (use && use.state === 'paper') return badge + ` <button class="btn sm pri" data-sl="${list}:${i}">Take it live</button>`;
     if (use && use.state !== 'used') return badge + (use.state === 'planned' ? ' <button class="btn sm" data-goplanned>Open it</button>' : '');
     return `${badge} <button class="btn sm" data-sp="${list}:${i}">Paper trade</button> <button class="btn sm pri" data-sl="${list}:${i}">Take it live</button>`;
   }
@@ -519,9 +522,13 @@
     const b = e.target.closest('[data-sp],[data-sl],[data-goplanned]'); if (!b) return;
     if (b.hasAttribute('data-goplanned')) { switchTab('pos'); setTimeout(() => { const el = $('#posPlanned'); if (el) el.scrollIntoView({ behavior: 'smooth' }); }, 50); return; }
     const [list, i] = (b.dataset.sp || b.dataset.sl).split(':'), u = (SETUP_LISTS[list] && SETUP_LISTS[list]() || [])[+i]; if (!u) return;
-    if (b.dataset.sp) paperAdd(u); else takeLive(u);
+    if (b.dataset.sp) paperAdd(u); else { const t = openPaperOf(u); if (t) paperToLive(t); else takeLive(u); }
   });
   const pxIn = v => v == null ? '' : +(+v).toFixed(Math.abs(v) >= 1000 ? 1 : Math.abs(v) >= 1 ? 4 : 6);   // price as the platform shows it
+  function paperToLive(t) {
+    if (!t.setupKey) t.setupKey = 'paper|' + t.id;
+    takeLive({ sym: t.sym, dir: t.side, entry: t.plannedEntry > 0 ? t.plannedEntry : t.entry, stop: t.stop, target: t.target, kind: t.kind, tf: t.tf, text: t.text || `${t.kind} ${C.tfName(t.tf)}`, key: t.setupKey }, t);
+  }
   function takeLive(u, fromPaper) {
     const accts = liveAccts(); if (!accts.length) { alert('Add your prop account on the Desk first.'); return; }
     if (!fromPaper && !okToUse(u)) return;
@@ -665,9 +672,7 @@
     if (e.target.id === 'ppNew') { const a = paperAcct(); if (a && !confirm('End this paper account and start a new one? Its result is kept in the list.')) return; newPaperAcct($('#ppPlan').value, +$('#ppSize').value, $('#ppProf').value); renderPaper(); return; }
     const b = e.target.closest('[data-pp]'); if (!b) return;
     const t = S.paper.find(x => x.id === b.dataset.id), now = Date.now();
-    if (b.dataset.pp === 'live' && t) {
-      const p0 = pnlPrice(t.sym); if (!t.setupKey) t.setupKey = 'paper|' + t.id;
-      takeLive({ sym: t.sym, dir: t.side, entry: t.plannedEntry > 0 ? t.plannedEntry : t.entry, stop: t.stop, target: t.target, kind: t.kind, tf: t.tf, text: t.text || `${t.kind} ${C.tfName(t.tf)}`, key: t.setupKey }, t); return; }
+    if (b.dataset.pp === 'live' && t) { paperToLive(t); return; }
     if (b.dataset.pp === 'close' && t) { const p0 = pnlPrice(t.sym); if (p0 == null) return; Object.assign(t, { status: 'closed', exit: p0, closed: now, why: 'closed by you', R: C.paperR(t, p0, now) }); t.log.push({ t: now, what: 'closed by you at ' + px(p0) }); savePaper('closed by hand'); renderPaper(); }
     if (b.dataset.pp === 'edit' && t) { const ns = prompt('Stop (paper):', t.stop); if (ns === null) return; const nt = prompt('Target (paper, blank = none):', t.target == null ? '' : t.target);
       const sv = num(ns), tv = nt === '' ? null : num(nt), d = t.side === 'short' ? -1 : 1, p0 = pnlPrice(t.sym);

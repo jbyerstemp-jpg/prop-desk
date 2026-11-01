@@ -1139,6 +1139,11 @@
           if (!(beyond >= minPen * a1) || !back) continue;
           const dir = long ? 'long' : 'short', key = [sym, tf, dir, 'sweep', L.id, k.time].join('|');
           if (seen.has(dir + L.id)) continue; seen.add(dir + L.id);
+          // One candle that swept several levels is ONE trade (same entry, stop, target): list it once, naming every level.
+          const twin = out.find(x => x.kind === 'sweep' && x.tf === tf && x.dir === dir && x.sweepTime === k.time);
+          if (twin) { twin.levels.push(L); twin.alsoKeys.push(key);
+            const nm = twin.levels.map(l => `${l.name} ${fmtPx(l.price)}`); twin.text = twin.text.replace(/sweep of .*? \(4h/, `sweep of ${nm.slice(0, -1).join(', ')} and ${nm[nm.length - 1]} (4h`);
+            twin.rules[0].t = `${tfName(tf)} swept ${twin.levels.map(l => l.name).join(', ')} and closed back`; continue; }
           const entry = k.close, stop = long ? k.low - 0.1 * a1 : k.high + 0.1 * a1, risk = Math.abs(entry - stop);
           const cands = pool.filter(q => q.side === (long ? 'H' : 'L') && (long ? q.price >= entry + risk * minRR : q.price <= entry - risk * minRR))
             .sort((x, y) => Math.abs(x.price - entry) - Math.abs(y.price - entry));
@@ -1153,7 +1158,7 @@
           out.push({ sym, tf, dir, kind: 'sweep', rvol: rv, pen: beyond / a1, level: L, entry, stop, target: tgt ? tgt.price : null, rr, sweepTime: k.time, sweepExtreme: long ? k.low : k.high, open,
             trend4h: s4 ? s4.bias : null, withTrend: !!(s4 && s4.bias === want),
             text: `${tfName(tf)} sweep of ${L.name} ${fmtPx(L.price)}${open ? ' at the ' + open : ''} (4h ${s4 ? s4.bias : '?'}${s4 && s4.bias !== want ? ', counter-trend' : ''}${rv != null ? `, sweep candle volume ${rv.toFixed(1)}× normal` : ''}). Ref entry ${fmtPx(entry)}, stop ${fmtPx(stop)}${tgt ? `, target ${tgt.name} ${fmtPx(tgt.price)} (${rr.toFixed(1)}R)` : ''}.`,
-            rules, ready: rules.every(r => r.ok), key });
+            rules, ready: rules.every(r => r.ok), key, levels: [L], alsoKeys: [] });
         }
       }
     }
@@ -1165,7 +1170,7 @@
   function scanSetups(sym, data, nowMs, opt) {
     opt = opt || {};
     const s4 = data.struct['240'], s1 = data.struct['60'], s15 = data.struct['15'], a1 = data.atr['60'] || 0;
-    return setupsToWatch(sym, data, { minRR: opt.minRR || 2, both: opt.both !== false }).map(u => {
+    const all = setupsToWatch(sym, data, { minRR: opt.minRR || 2, both: opt.both !== false }).map(u => {
       const want = u.dir === 'long' ? 'bull' : 'bear', rules = [], R = (ok, t) => rules.push({ ok: !!ok, t });
       R(s4 && s4.bias === want, '4h structure ' + (s4 ? s4.bias : '?'));
       R(s1 && s1.bias === want, '1h agrees with 4h');
@@ -1174,6 +1179,19 @@
       R(data.price != null && Math.abs(data.price - u.entry) <= Math.max(a1 * 0.25, data.price * 0.0005), 'price at the zone now');
       return Object.assign({}, u, { kind: 'fvg', rules, ready: rules.every(r => r.ok), key: [sym, u.tf, u.dir, Math.round(u.entry)].join('|') });
     }).concat(opt.both === false ? [] : sweepSetups(sym, data, nowMs, opt));
+    return dedupeSetups(all);
+  }
+  /* Every idea gets a trade ID (coin, side, entry, stop at the price's own precision). Two ideas that are the same trade are
+     listed once: the first keeps its key, the others' keys go into alsoKeys so anything logged under them still links up. */
+  function tradeId(u) { return fnv([u.sym, u.dir, fmtPx(u.entry), fmtPx(u.stop)].join('|')); }
+  function dedupeSetups(list) {
+    const out = [], byId = {};
+    for (const u of list) {
+      const id = tradeId(u), have = byId[id];
+      if (have) { have.alsoKeys = (have.alsoKeys || []).concat(u.key, u.alsoKeys || []); continue; }
+      const x = Object.assign({}, u, { tradeId: id, alsoKeys: (u.alsoKeys || []).slice() }); byId[id] = x; out.push(x);
+    }
+    return out;
   }
   /* Weigh one ticked idea against an account: account rules + size from the existing tested sizing. Never changes the idea. */
   function weighIdea(idea, A, positions, nowMs, opt) {
@@ -1519,7 +1537,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
