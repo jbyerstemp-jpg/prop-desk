@@ -1168,7 +1168,7 @@
           if (seen.has(dir + L.id)) continue; seen.add(dir + L.id);
           // One candle that swept several levels is ONE trade (same entry, stop, target): list it once, naming every level.
           const twin = out.find(x => x.kind === 'sweep' && x.tf === tf && x.dir === dir && x.sweepTime === k.time);
-          if (twin) { twin.levels.push(L); twin.alsoKeys.push(key);
+          if (twin) { if (!twin.levels.some(l => l.name === L.name && Math.abs(l.price - L.price) < 1e-9 * Math.max(1, L.price))) twin.levels.push(L); twin.alsoKeys.push(key);
             const nm = twin.levels.map(l => `${l.name} ${fmtPx(l.price)}`); twin.text = twin.text.replace(/sweep of .*? \(4h/, `sweep of ${nm.slice(0, -1).join(', ')} and ${nm[nm.length - 1]} (4h`);
             twin.rules[0].t = `${tfName(tf)} swept ${twin.levels.map(l => l.name).join(', ')} and closed back`; continue; }
           const entry = k.close, stop = long ? k.low - 0.1 * a1 : k.high + 0.1 * a1, risk = Math.abs(entry - stop);
@@ -1506,6 +1506,31 @@
     if (u) return { state: 'used', acct: u.acct, text: `Used ${u.how === 'paper' ? 'on paper' : u.how === 'planned' ? 'as a live plan' : 'live'} ${new Date(u.t).toISOString().slice(5, 10).replace('-', '/')} (trade since removed)` };
     return null;
   }
+  /* Reward:risk of one trade from ITS OWN entry, stop and target, after fees (owner's rule, Nov 1 2026): what he'd make at the
+     target over what he'd lose at the stop, per coin, with the 0.04% commission on both sides taken out. Same R the journal and the
+     paper record use when the trade closes. null when a number is missing or the stop/target are on the wrong side. */
+  function rrOf(side, entry, stop, target, f) {
+    f = f || FEES; const d = side === 'short' ? -1 : 1;
+    if (!(entry > 0) || stop == null || target == null || d * (entry - stop) <= 0 || d * (target - entry) <= 0) return null;
+    const risk = Math.abs(entry - stop) + (entry + stop) * f.commission, reward = Math.abs(target - entry) - (entry + target) * f.commission;
+    return reward / risk;
+  }
+  /* Live check (owner's rule, Nov 1 2026): is this setup valid in the market RIGHT NOW, not just in the replay? The setup's own rule
+     checks (structure on 4h/1h/15m, room to the next liquidity, price at the zone, stop not hit) re-run on live data every scan, plus
+     the reward:risk from the order he'd actually place now (market price or limit at the level) after fees. Invalid = price past
+     the stop or under 1R after fees. Lists sort by this first; the replay's "alert grade" is shown second. */
+  function liveCheck(u, price, atr1h) {
+    const op = orderPlan(u.entry, price, u.stop, u.dir, atr1h) || { type: 'limit', entry: u.entry };
+    const ent = op.type === 'market' ? op.entry : u.entry, rr = op.type === 'none' ? null : rrOf(u.dir, ent, u.stop, u.target);
+    const items = (u.rules || []).map(r => ({ ok: !!r.ok, t: r.t }));
+    items.push({ ok: rr != null && rr >= 2, t: rr != null ? `${rr.toFixed(1)}R from the ${op.type === 'market' ? 'market price' : 'limit'} after fees` : 'no reward:risk from here' });
+    const passed = items.filter(x => x.ok).length, invalid = op.type === 'none' || rr == null || rr < 1;
+    return { items, passed, total: items.length, rr, order: op.type, entry: ent, status: invalid ? 'invalid' : passed === items.length ? 'valid' : 'partial' };
+  }
+  function sortLive(list, check) {   // valid first, then most checks passing, then best R:R now, then replay grade
+    const S = { valid: 0, partial: 1, invalid: 2 };
+    return list.map(u => ({ u, c: check(u) })).sort((a, b) => S[a.c.status] - S[b.c.status] || (b.c.passed / b.c.total) - (a.c.passed / a.c.total) || (b.c.rr || 0) - (a.c.rr || 0) || alertGrade(b.u).ok - alertGrade(a.u).ok).map(x => x.u);
+  }
   /* Order type (owner's rule, Nov 1 2026): MARKET when price is within 0.25 x 1h ATR of the setup's level (the same "at the zone"
      distance the setup rules use) or already past the level on the good side (a limit there would fill at once); otherwise a
      LIMIT at the level. Price past the stop: no trade. */
@@ -1578,7 +1603,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

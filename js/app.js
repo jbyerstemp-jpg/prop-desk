@@ -385,7 +385,7 @@
     fv.sort((a, b) => Math.abs((a.top + a.bottom) / 2 - p) - Math.abs((b.top + b.bottom) / 2 - p));
     $('#fvgBox').innerHTML = fv.length ? `<table><tr><th>TF</th><th>Side</th><th class=num>Zone</th><th>State</th></tr>${fv.slice(0, 8).map(g => `<tr><td>${C.tfName(g.iv)}</td><td class="${g.dir}">${g.dir}</td><td class=num>${px(g.bottom)}–${px(g.top)}</td><td class=small>${g.status}</td></tr>`).join('')}</table>
       <p class="small mu">FVG = 3-candle gap ≥0.15 ATR, closed candles only. Filled ones are dropped.</p>` : '<p class=mu>None open near price (or still loading).</p>';
-    const ups = C.scanSetups(A.sym, A, Date.now());
+    const ups = C.sortLive(C.scanSetups(A.sym, A, Date.now()), liveOf);
     $('#setupBox').innerHTML = ups.length ? ups.map((u, i) => setupCard('chart', i, u, ` <button class="btn sm" data-weigh="${i}">Weigh it</button><div class=small data-weighout="${i}"></div>`)).join('')
       + '<p class="small mu">Scanned both ways, all the time, without your account. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
       : `<p class=mu>Nothing clean: no open FVG either way within 2 ATR with 2R+ to the next swing, and no fresh liquidity sweep. No trade is a valid answer.</p>`;
@@ -430,7 +430,7 @@
   }
   function renderScanAll() {
     const box = $('#scanAllBox'); if (!box) return;
-    const sa = scanAll, top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
+    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
     const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
       <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
     const body = top.length ? top.map((u, i) => setupCard('scan', i, u, ` <button class="btn sm" data-saweigh="${i}">Weigh</button><div class=small data-saout="${i}"></div>`)).join('')
@@ -509,6 +509,7 @@
   // until he marks it live after placing it on the platform, or a screenshot import shows it. Used setups stay used even if
   // the trade is later deleted (S.usedSetups); using one again needs a confirm.
   const keysOf = u => [u.key].concat(u.alsoKeys || []);
+  const liveOf = u => C.liveCheck(u, pnlPrice(u.sym), analyses[u.sym] && analyses[u.sym].atr ? analyses[u.sym].atr[60] : null);
   const useOf = u => { for (const k of keysOf(u)) { const x = C.setupUse(k, S.paper, S.positions, S.planned, S.usedSetups); if (x) return Object.assign({ key: k }, x); } return null; };
   const openPaperOf = u => S.paper.find(t => t.status === 'open' && keysOf(u).includes(t.setupKey));
   function markUsed(key, how, acct) { if (key && !S.usedSetups[key]) S.usedSetups[key] = { t: Date.now(), how, acct }; }
@@ -530,12 +531,12 @@
   }
   function setupSize(u) { const a = liveAccts()[0]; if (!a) return null; try { const A = C.accountState(a, S.positions, prices(), Date.now()); const w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), Date.now(), { leverage: C.levMap(a) }); return w.size && w.size.qty > 0 ? w.size.qty : null; } catch (e) { return null; } }
   function setupCard(list, i, u, extra) {
-    const g = C.alertGrade(u), q = setupSize(u);
-    return `<div class=sc><div class=sc-h><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span>${u.rr ? ` <span class=mu>· ${u.rr.toFixed(1)}R</span>` : ''}</div>
-      <div class=sc-t>${g.ok ? '<span class="tag up">alert grade</span>' : '<span class="tag mu">below alert grade</span>'}${u.ready ? '<span class="tag up">ready</span>' : '<span class="tag mu">not ready</span>'}${setupBadge(u.kind, u.tf)}</div>
-      ${priceBoxes([['Entry', cpVal(u.entry)], ['Stop', cpVal(u.stop)], ['Target', cpVal(u.target)], ['Size', q != null ? String(q) : '', q != null ? String(+q.toPrecision(4)) : null]])}
-      <div class=sc-a>${setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · entry ${cpVal(u.entry)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
-      <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary><div>${esc(u.text)}</div><div>${(u.rules || []).map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
+    const g = C.alertGrade(u), lc = liveOf(u), op = { type: lc.order, entry: lc.entry }, ent = lc.entry, rr = lc.rr, q = setupSize(Object.assign({}, u, { entry: ent }));
+    return `<div class=sc><div class=sc-h><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span>${rr != null ? ` <span class="${rr >= 2 ? 'up' : rr >= 1 ? '' : 'dn'}" title="Reward:risk from this entry, stop and target, after fees">· ${rr.toFixed(1)}R</span>` : ''}</div>
+      <div class=sc-t>${lc.status === 'valid' ? '<span class="tag up">✓ valid now</span>' : lc.status === 'invalid' ? '<span class="tag dn">✗ not valid now</span>' : `<span class="tag warn">partly valid ${lc.passed}/${lc.total}</span>`}<span class="tag ${g.ok ? 'up' : 'mu'}" title="From the replay on past candles">replay: ${g.ok ? 'alert grade' : 'below grade'}</span>${setupBadge(u.kind, u.tf)}</div>
+      ${priceBoxes([[op.type === 'market' ? 'Market ~' : op.type === 'none' ? 'Past stop' : 'Limit', op.type === 'none' ? '' : cpVal(ent)], ['Stop', cpVal(u.stop)], ['Target', cpVal(u.target)], ['Size', q != null ? String(q) : '', q != null ? String(+q.toPrecision(4)) : null]])}
+      <div class=sc-a>${lc.status === 'invalid' && !useOf(u) ? '<span class="small dn">Not valid now: price is past the stop or under 1R after fees. Skip it.</span>' : setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · ${op.type === 'market' ? 'market ~' : 'limit'} ${cpVal(ent)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
+      <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary><div>${esc(u.text)}</div><div><b>Live check now:</b> ${lc.items.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
   }
   async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch (e) { try { const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } catch (e2) { return false; } } }
   document.addEventListener('click', async e => {
@@ -584,10 +585,11 @@
       <p class="small mu">This saves a <b>planned</b> trade. Nothing counts on the Desk yet. Market: place it, then tap <b>It's live</b>. Limit: place it, tap <b>Limit placed</b>, and it becomes an open position by itself when price reaches it. Importing the screenshot also picks it up.</p>
       <div class=row><button class="btn pri" id=tlOk>Save plan</button><button class=btn data-close>Cancel</button></div>`);
     $('#tlType').onchange = () => { $('#tlE').value = $('#tlType').value === 'market' && pnlPrice(u.sym) != null ? pxIn(pnlPrice(u.sym)) : pxIn(u.entry); upd(true); };
-    $('#tlE').addEventListener('change', () => upd(true));
+    ['#tlE', '#tlS', '#tlT'].forEach(id => $(id).addEventListener('input', () => upd(false))); $('#tlE').addEventListener('change', () => upd(true));
     const upd = fill => { const a = acctById($('#tlA').value), w = sizeIn(a, num($('#tlE').value) || u.entry); const z = w.size;
       if (fill && z && z.qty > 0) $('#tlQ').value = z.qty;
-      $('#tlOut').innerHTML = (z && z.qty > 0 ? `Your ${esc(C.profileById(a.profile).name)} pace: <b>${z.qty} ${esc(C.base(u.sym))}</b>, about ${usd(z.lossAtStop)} at the stop${z.levUnknown ? ' · <span class=warn>leverage unknown</span>' : ''}.` : '<b class=warn>Your account says size 0 right now.</b>')
+      const rrNow = C.rrOf(u.dir, num($('#tlE').value), num($('#tlS').value), num($('#tlT').value));
+      $('#tlOut').innerHTML = (rrNow != null ? `Reward:risk <b class="${rrNow >= 2 ? 'up' : rrNow >= 1 ? '' : 'dn'}">${rrNow.toFixed(2)}R</b> from this entry, stop and target, after fees. ` : '<span class=warn>Reward:risk unknown: needs a target on the right side.</span> ') + (z && z.qty > 0 ? `Your ${esc(C.profileById(a.profile).name)} pace: <b>${z.qty} ${esc(C.base(u.sym))}</b>, about ${usd(z.lossAtStop)} at the stop${z.levUnknown ? ' · <span class=warn>leverage unknown</span>' : ''}.` : '<b class=warn>Your account says size 0 right now.</b>')
         + (w.rules.some(r => !r.ok) ? `<div class=warn>Not passing: ${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ')}</div>` : '<div class=up>Every account rule passes.</div>'); };
     $('#tlA').onchange = () => upd(true); upd(true);
     $('#tlOk').onclick = () => {
@@ -634,7 +636,7 @@
       const btns = placed ? `<button class="btn sm" data-golive="${pl.id}">It filled</button><button class="btn sm" data-dropplan="${pl.id}">Order cancelled</button>`
         : lim ? `<button class="btn sm pri" data-placed="${pl.id}">📌 Limit placed</button><button class="btn sm" data-dropplan="${pl.id}">Cancel plan</button>`
         : `<button class="btn sm pri" data-golive="${pl.id}">✅ It's live</button><button class="btn sm" data-dropplan="${pl.id}">Cancel plan</button>`;
-      return `<div class=sc><div class=sc-h><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${pl.side.toUpperCase()}</b> <b>${esc(C.base(pl.sym))}</b> <span>${lim ? 'Limit' : 'Market'}</span> <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span></div>
+      return `<div class=sc><div class=sc-h><b class="${pl.side === 'long' ? 'bull' : 'bear'}">${pl.side.toUpperCase()}</b> <b>${esc(C.base(pl.sym))}</b> <span>${lim ? 'Limit' : 'Market'}</span>${(r => r != null ? ` <span class="${r >= 2 ? 'up' : r >= 1 ? '' : 'dn'}">· ${r.toFixed(1)}R</span>` : '')(C.rrOf(pl.side, pl.entry, pl.stop, pl.tp1))} <span class=tag>${esc(a ? a.label || C.planOf(a).name : '?')}</span> <span class=tag>${esc(C.setupLabel(pl.ref && pl.ref.key))}</span></div>
         ${priceBoxes([[lim ? 'Limit' : 'Entry ~', cpVal(pl.entry)], ['Stop', cpVal(pl.stop)], ['Target', cpVal(pl.tp1)], ['Size', String(pl.qty), String(+(+pl.qty).toPrecision(4))]])}
         <div class=small>${state}</div>
         <div class=sc-a>${btns}</div>${pl.thesis ? `<details class=sc-w ${fold('plan:' + pl.id)}><summary>Plan</summary><div>${esc(pl.thesis)}</div></details>` : ''}</div>`; }).join('')}
@@ -1033,7 +1035,7 @@
       const h = lastHealth[p.id];
       return `<div class=card><div class=acct-head><div><b>${esc(p.sym)} ${p.side.toUpperCase()}</b> ${C.openQty(p)} @ ${px(p.entry)} <span class=tag>${esc(a ? a.label || C.planOf(a).name + ' ' + usd(a.size) : '?')}</span> <span class=tag>${esc(p.setup)} · ${C.tfName(p.tf)}</span></div>
         <div>${h ? `<span class="score s${h.score || 0}">${h.score || '–'}/5</span>` : ''}</div></div>
-        <div class=kv><div><span>Price</span>${px(price)}</div><div><span>Net P&L if closed now</span><b class="${cls(net)}">${usd(net)}</b></div><div><span>R</span>${r == null ? '—' : r.toFixed(2) + 'R'}</div>
+        <div class=kv><div><span>Price</span>${px(price)}</div><div><span>Net P&L if closed now</span><b class="${cls(net)}">${usd(net)}</b></div><div><span>R now</span>${r == null ? '—' : r.toFixed(2) + 'R'}</div><div><span>Planned R:R (after fees)</span>${(x => x == null ? '—' : x.toFixed(2) + 'R')(C.rrOf(p.side, p.entry, p.origStop != null ? p.origStop : p.stop, p.tp1 != null ? p.tp1 : p.tp2))}</div>
         <div><span>Stop</span>${px(p.stop)}${p.origStop != null && p.stop !== p.origStop ? ` <span class=small>(was ${px(p.origStop)})</span>` : ''}</div><div><span>TP1 / TP2</span>${px(p.tp1)} / ${px(p.tp2)}</div><div><span>Opened</span>${fmtTime(p.opened, true)}</div></div>
         ${p.thesis ? `<p class=small>Thesis: ${esc(p.thesis)}</p>` : ''}
         <div class=row><button class="btn sm" data-pa="stop" data-id="${p.id}">Update stop/targets</button><button class="btn sm" data-pa="partial" data-id="${p.id}">Partial close</button><button class="btn sm" data-pa="close" data-id="${p.id}">Close</button><button class="btn sm" data-pa="del" data-id="${p.id}">Delete</button></div></div>`;
@@ -1365,7 +1367,7 @@
     }).join('');
     const sym = T().sym, A = analyses[sym] || analyze(sym);
     const ups = C.scanSetups(sym, A, now);
-    coachUps = ups.slice().sort((a, b) => (C.alertGrade(b).ok - C.alertGrade(a).ok) || (b.ready - a.ready) || (b.rr - a.rr)).slice(0, 5);
+    coachUps = C.sortLive(ups, liveOf).slice(0, 5);
     const reviews = liveAccts().map(a => {
       const R = C.accountReview(a, S.positions, P, now), st = R.state;
       const syms = [...new Set(S.positions.filter(p => p.acct === a.id && !p.closed && p.stop == null && p.krakenSL).map(p => p.sym + '|' + p.side))];
@@ -1378,7 +1380,7 @@
     }).join('');
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
-      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>top 5 · paper or live, each once</span></h3>${coachUps.length ? coachUps.map((u, i) => setupCard('coach', i, u)).join('') + '<p class="small mu">Sorted: alert grade first, then ready, then best R. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
+      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>top 5 · valid now first</span></h3>${coachUps.length ? coachUps.map((u, i) => setupCard('coach', i, u)).join('') + '<p class="small mu">Sorted by the live check: valid in the market now first, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
   }
   var coachUps = [];
