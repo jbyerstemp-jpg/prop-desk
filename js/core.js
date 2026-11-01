@@ -1443,6 +1443,29 @@
     return out;
   }
 
+  /* Where a scanned setup stands (owner's rule, Nov 1 2026): each setup is used once, on paper OR live. Setup keys are stable
+     for the same zone (coin|timeframe|side|zone price). Returns null when it's free to use. */
+  function setupUse(key, paper, positions, planned, usedLog) {
+    if (!key) return null;
+    const pp = (paper || []).filter(t => t.setupKey === key), lv = (positions || []).filter(p => p.setupKey === key), pl = (planned || []).filter(x => x.setupKey === key);
+    const open = lv.find(p => !p.closed);
+    if (open) return { state: 'live', text: 'Live', acct: open.acct };
+    if (pl.length) return { state: 'planned', text: 'Planned: place it on your platform, then mark it live', acct: pl[0].acct };
+    if (pp.some(t => t.status === 'open')) return { state: 'paper', text: 'Paper trade open' };
+    const done = lv.find(p => p.closed), dp = pp.find(t => t.status === 'closed');
+    if (done) { const o = tradeOutcome(done); return { state: 'used', acct: done.acct, text: 'Used live' + (o && o !== 'unknown' ? ': ' + (o === 'win' ? 'win' : o === 'loss' ? 'loss' : 'breakeven') : '') }; }
+    if (dp) return { state: 'used', text: `Used on paper: ${dp.R >= 0 ? '+' : ''}${dp.R.toFixed(2)}R` };
+    // The trade itself may be gone (deleted, cleared, plan cancelled): the log still remembers the setup was used.
+    const u = usedLog && usedLog[key];
+    if (u) return { state: 'used', acct: u.acct, text: `Used ${u.how === 'paper' ? 'on paper' : u.how === 'planned' ? 'as a live plan' : 'live'} ${new Date(u.t).toISOString().slice(5, 10).replace('-', '/')} (trade since removed)` };
+    return null;
+  }
+  /* A planned live trade the platform screenshot now shows: same coin and side, and the same size or an entry within 0.5% of the plan. */
+  function matchPlanned(planned, q) {
+    const c = (planned || []).filter(x => x.sym === q.sym && x.side === q.side);
+    return c.find(x => x.qty && Math.abs(x.qty - q.qty) < 1e-9) || c.find(x => Math.abs(x.entry - q.entry) <= x.entry * 0.005) || null;
+  }
+
   /* Owner's rule: trade both ways only when it makes sense. A side is OK when the 4h trend is that way, or when the
      1h and 15m have both turned that way (an early reversal). Never long and short on the same coin at once. */
   function directionCheck(side, sym, struct, positions, acctId) {
@@ -1483,7 +1506,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
