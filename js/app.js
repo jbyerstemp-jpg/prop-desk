@@ -1330,7 +1330,7 @@
       // Setups both ways, no account involved; you weigh them by ticking one.
       const A2 = analyses[T().sym] || analyze(T().sym);
       for (const e of C.scanSetups(T().sym, A2, now))
-        if (e.ready && C.alertGrade(e).ok && !benchedKeys().includes(C.setupKey(e.kind, e.tf))) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
+        if (C.alertWorthy(e, pnlPrice(e.sym), A2.atr && A2.atr[60]) && !benchedKeys().includes(C.setupKey(e.kind, e.tf))) fire('entry|' + e.key, 1, `${T().sym} ${e.dir} setup: market rules pass`, `${e.text} Tick it to weigh it against your account. Untested idea, not a signal.`, 4);
       const q = C.alertQueue(G.fired), undelivered = q.slice(4);
       for (const o of q.slice(0, 4)) if (!(await ntSend(o.title, o.body, o.prio))) undelivered.push(o);
       C.alertSettle(G.state, prev, undelivered);
