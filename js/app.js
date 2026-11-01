@@ -1115,7 +1115,7 @@
   function showImport(text, shotTime) {
     const r = C.parseKrakenProp(text, Date.now()); lastImport = { r, shotTime, text };
     const A = r.account, st = $('#impStatus');
-    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length && !Object.keys(r.leverage || {}).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
+    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length && !Object.keys(r.leverage || {}).length && !(r.orders || []).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
     st.textContent = '';
     const size = A.plan ? C.sizeFromLimits(A.plan, A.drawdownLimit, A.target) : null;
     const opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${A.label && a.label === A.label ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
@@ -1131,6 +1131,7 @@
         const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} @ ${px(q.entry)}${C.matchPlanned(S.planned.filter(x => x.acct === ac.id), q) ? ' <b>= your planned setup: becomes live</b>' : ''}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} @ ${px(k.pos.entry)}`));
         P.close.forEach(c => li.push(`<b class=dn>− Closed</b> ${esc(c.pos.side)} ${c.pos.qty} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result counted in balance'}`));
         return `<p class=small><b>Changes:</b> ${li.length ? '' : 'none to positions'}${P.keep.length ? ` · ${P.keep.length} unchanged` : ''}</p>${li.length ? '<div class=small>' + li.join('<br>') + '</div>' : ''}`; })()}
+      ${(r.orders || []).length ? `<p class=small><b>Orders read</b> (not positions):<br>${r.orders.map(o => `${o.type === 'limit' ? 'Limit' : o.type === 'market' ? 'Market' : esc(o.type)} ${o.side === 'long' ? 'buy' : 'sell'} ${o.qty} ${esc(o.base)} @ ${px(o.price)} · <b class="${o.status === 'filled' ? 'up' : o.status === 'cancelled' ? 'mu' : 'warn'}">${o.status === 'working' ? 'working, ' + (o.filledPct || 0) + '% filled' : o.status === 'partial' ? o.filledPct + '% filled' : o.status || 'status not on screen'}</b>${o.tp != null ? ' · TP ' + px(o.tp) : ''}${o.sl != null ? ' · SL ' + px(o.sl) : ' · <b class=dn>no SL read</b>'}${o.openedMs ? ' · placed ' + fmtTime(o.openedMs, true) : ''}`).join('<br>')}</p>` : ''}
       ${r.leverage && Object.keys(r.leverage).length ? `<p class=small><b>Leverage read:</b> ${Object.entries(r.leverage).map(([k, v]) => esc(k) + ' ' + v + 'x').join(', ')} (saved to the account)</p>` : ''}
       ${r.ledger && r.ledger.length ? `<p class=small><b>Ledger read:</b> ${r.ledger.length} row(s)${r.ledgerOk ? ', every running balance adds up' : ''} · swap fees ${usd(r.ledgerSum.swap)} · trades and commissions ${usd(r.ledgerSum.trade)}</p>` : ''}
       ${r.fills.length ? `<p class=small><b>Trades read:</b> ${r.fills.length} fill(s) · ${r.fills.filter(f => f.action === 'open' && f.t != null).length} opening today${r.fills.some(f => f.t == null) ? ' (older dated rows kept for history)' : ''}</p>` : ''}
@@ -1184,6 +1185,24 @@
         p.closed = { t: t - 1, price: row ? row.exit : null, realized: row ? row.realized : 0, resultKnown: !!row,
           note: row ? 'Closed on platform (result from its Closed list)' : 'Closed on platform (result in balance)', synced: true };
     }
+    // Orders (owner's rule, Nov 1): an order is not a position. Working limit -> his matching plan becomes a working order (or a new
+    // working order is tracked); filled -> the matching plan becomes an open position (unless the position list is on screen, which
+    // does that itself); cancelled -> the matching plan is removed. Stop/TP orders belong to positions and are skipped here.
+    const ordN = { placed: 0, added: 0, filled: 0, cancelled: 0 };
+    for (const o of (r.orders || [])) {
+      if (o.type !== 'limit' && o.type !== 'market') continue;
+      const mine = S.planned.filter(x => x.acct === acct.id);
+      const pl = (o.orderId && mine.find(x => x.orderId === o.orderId)) || C.matchPlanned(mine, { sym: o.sym, side: o.side, qty: o.qty, entry: o.price });
+      if (o.status === 'working' || o.status === 'partial' || o.status == null) {
+        if (pl) { Object.assign(pl, { status: 'placed', placedAt: pl.placedAt || o.openedMs || t, entry: o.price, qty: o.qty, orderType: o.type, orderId: o.orderId || pl.orderId });
+          if (o.sl != null) pl.stop = o.sl; if (o.tp != null) pl.tp1 = o.tp; ordN.placed++; }
+        else { S.planned.push({ id: uid(), acct: acct.id, sym: o.sym, side: o.side, entry: o.price, stop: o.sl, tp1: o.tp, qty: o.qty, tf: 15, setup: 'Imported', thesis: '',
+          ref: { key: 'unlinked', model: C.MODEL }, created: t, status: 'placed', placedAt: o.openedMs || t, orderType: o.type, orderId: o.orderId, source: 'kraken-import' }); ordN.added++; }
+      } else if (o.status === 'filled' && pl && !reconcile) {
+        S.positions.push(liveFromPlan(pl, { entry: o.price, qty: o.qty, stop: o.sl != null ? o.sl : pl.stop, tp1: o.tp, opened: o.openedMs || t - 2, source: 'kraken-import' }));
+        S.planned = S.planned.filter(x => x.id !== pl.id); ordN.filled++;
+      } else if (o.status === 'cancelled' && pl) { S.planned = S.planned.filter(x => x.id !== pl.id); ordN.cancelled++; }
+    }
     // Trades tab: keep the platform's fills (deduped) for the trade count and real open times.
     let fillN = 0, storyN = 0;
     if (r.fills.length) {
@@ -1219,7 +1238,7 @@
     const withPx = r.positions.find(q => q.price > 0) || r.details.find(q => q.price > 0);
     if (withPx && now - shotTime < 2 * 60000) { const qq = pnlQuote(withPx.sym); if (qq.raw && Math.abs(withPx.price / qq.raw - 1) < 0.01) S.calib.push({ t, sym: withPx.sym, prop: withPx.price, est: qq.raw }); }
     save(); ensureFeeds(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impText').value = ''; $('#impText').hidden = true;
-    const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' size updated', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${L.fills ? ` · ${L.fills} new fill(s)` : ''}${L.story ? ` · ${L.story} open time(s) from fills` : ''}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} off, now matched` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
+    const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' size updated', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${ordN.placed ? ` · ${ordN.placed} plan(s) now working orders` : ''}${ordN.added ? ` · ${ordN.added} working order(s) added` : ''}${ordN.filled ? ` · ${ordN.filled} order(s) filled → open` : ''}${ordN.cancelled ? ` · ${ordN.cancelled} cancelled order(s) removed` : ''}${L.fills ? ` · ${L.fills} new fill(s)` : ''}${L.story ? ` · ${L.story} open time(s) from fills` : ''}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} off, now matched` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
     posFormDirty = true; autoPush('import'); switchTab('coach');
   }
 

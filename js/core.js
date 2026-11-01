@@ -158,12 +158,39 @@
       out.positions.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD',
         upnl: qm[3] != null ? num(qm[3]) : null, entry: num(em[1]), price: em[2] ? num(em[2]) : null, hasTP: tp, hasSL: sl });
     }
+    // Order sheets (tap an order in Kraken Prop, Nov 1 2026 layout): "Limit Buy / 0.094 BTC / @ 77692 USD", then on the Details tab
+    // "Status open - 0% filled", "Type buy-limit", "Price 77,692.00", "Open time …", "Order ID …", and on the TP/SL tab "Take profit
+    // price …", "Stop loss price …". An order is NOT a position: it's a working order until it's filled.
+    out.orders = [];
+    let Tg = T;   // text for the general position reader, with order sheets taken out (it would misread "Limit Buy 0.094 BTC @ 77692" as a position)
+    { const ore = /\b(Limit|Market|Stop[\s-]*(?:Limit|Market|Loss)?|Take[\s-]*Profit)\s+(Buy|Sell)\s*\n\s*([\d]*\.?\d+)\s*([A-Z]{2,6})\b[^\n]*\n\s*@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?([\s\S]*?)(?=\n\s*(?:Limit|Market|Stop|Take[\s-]*Profit)\s+(?:Buy|Sell)\s*\n|$)/gi;
+      let om;
+      while ((om = ore.exec(T))) {
+        const body = om[6], g = re => { const m = re.exec(body); return m ? num(m[1]) : null; };
+        const st = /Status\s+(open|filled|closed|cancel+ed|canceled|expired|partially\s*filled)\s*-?\s*(\d{1,3}(?:\.\d+)?)?\s*%?\s*(?:filled)?/i.exec(body);
+        const pct = st && st[2] != null ? +st[2] : null, word = st ? st[1].toLowerCase() : null;
+        const status = !st ? null : /cancel|expired/.test(word) ? 'cancelled' : (/filled|closed/.test(word) && pct == null) || pct >= 100 ? 'filled' : pct > 0 ? 'partial' : 'working';
+        const ot = /Open\s*time\s*([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2}),?\s*(\d{4})\s*(?:at)?\s*(\d{1,2}):(\d{2})\s*([AP])\.?M/i.exec(body);
+        let openedMs = null;
+        if (ot) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ot[1].toLowerCase()) / 3; let h = +ot[4] % 12; if (/p/i.test(ot[6])) h += 12;
+          if (mo >= 0) openedMs = new Date(+ot[3], mo, +ot[2], h, +ot[5]).getTime(); }
+        const idm = /Order\s*ID\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{3,}){1,4})/i.exec(body);
+        const type = /^limit/i.test(om[1]) ? 'limit' : /^market/i.test(om[1]) ? 'market' : /^stop/i.test(om[1]) ? 'stop' : 'take-profit';
+        out.orders.push({ type, side: /buy/i.test(om[2]) ? 'long' : 'short', qty: num(om[3]), base: om[4].toUpperCase(), sym: om[4].toUpperCase() + '/USD', price: num(om[5]),
+          status, filledPct: pct, tp: g(/Take\s*profit\s*price\s*([\d,]+\.?\d*)/i), sl: g(/Stop\s*loss\s*price\s*([\d,]+\.?\d*)/i), openedMs, orderId: idm ? idm[1].toUpperCase() : null });
+        Tg = Tg.replace(om[0], '\n');
+      }
+      // The Details tab and the TP/SL tab of one order are two screenshots: join them (same type, side, size and price).
+      const mo = [];
+      for (const o of out.orders) { const tw = mo.find(m => m.type === o.type && m.side === o.side && m.qty === o.qty && m.price === o.price && (m.orderId == null || o.orderId == null || m.orderId === o.orderId));
+        if (tw) { for (const k of Object.keys(o)) if (tw[k] == null && o[k] != null) tw[k] = o[k]; } else mo.push(Object.assign({}, o)); }
+      out.orders = mo; }
     // Generic one-line positions from other platforms, e.g. "BTCUSD Long 0.10 @ 77,606.10 P&L -11.36" or "Sell 0.1 BTC at 77606.1".
     out.layout = out.positions.length || /Avg\s*price|Total\s+equity/i.test(T) ? 'kraken' : 'generic';
     if (!out.positions.length) {
       const gre = /(?:\b([A-Z]{2,6})[-\/]?(?:USDT|USDC|USD)?\b[^\n]{0,12}?)?\b(long|short|buy|sell)\b\s*([\d]*\.?\d+)\s*([A-Z]{2,6})?(?:[-\/]?(?:USDT|USDC|USD))?\s*(?:@|at|entry(?:\s*price)?:?)\s*\$?([\d,]+\.?\d*)(?:[^\n]*?(?:P&L|PnL|uPnL|Unrealized)[:\s]*([-+]?\$?[\d,]*\.?\d+))?/gi;
       let gm;
-      while ((gm = gre.exec(T))) {
+      while ((gm = gre.exec(Tg))) {
         const base = (gm[4] || gm[1] || '').toUpperCase(); if (!base || /^(USD|USDT|USDC)$/.test(base)) continue;
         out.positions.push({ side: /short|sell/i.test(gm[2]) ? 'short' : 'long', qty: num(gm[3]), base, sym: base + '/USD', entry: num(gm[5]),
           upnl: gm[6] != null ? num(gm[6].replace('$', '')) : null, price: null, hasTP: false, hasSL: false });
@@ -1332,7 +1359,7 @@
   function sampleReasons(r) {
     const why = [];
     const A = r.account || {};
-    const nothing = !r.positions.length && !r.details.length && !(r.fills || []).length && A.equity == null && A.balance == null && !(r.ledger || []).length && !r.flat && !Object.keys(r.leverage || {}).length;
+    const nothing = !r.positions.length && !r.details.length && !(r.fills || []).length && A.equity == null && A.balance == null && !(r.ledger || []).length && !r.flat && !Object.keys(r.leverage || {}).length && !(r.orders || []).length;
     if (nothing) why.push('nothing-read');
     if ((r.ledger || []).length && r.ledgerOk === false) why.push('ledger-mismatch');
     if (r.warnings.some(w => /Could not read a position/.test(w))) why.push('position-unread');
