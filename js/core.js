@@ -1574,11 +1574,55 @@
     for (const [k, m] of gone) { rows.push({ u: m.u, rank: null, move: null, gone: true, lastSeen: m.last, firstSeen: m.firstSeen }); next[k] = Object.assign({}, m, { gone: true }); }
     return { rows, mem: next };
   }
+  /* ---------- Card verdict (MASTER-HANDOFF §3[E], §4, §5 verdict logic; display only, Nov 2 2026) ----------
+     Code decides, nothing is predicted. Gates run in order; the first one that fails = NO TRADE and the card says which.
+     Evidence label (§4): untested 1 · replay_reproduced 3 · held_out_confirmed 4 · paper_forward 5 · live_record 6 (2 is for outside
+     publications and is never set by the app). Below label 4, or not starred by the owner, the best a card can be is PAPER ONLY.
+     A gate the app can't check yet (the event calendar) is shown as unknown and also caps the card at PAPER ONLY: ELIGIBLE is never
+     claimed on an unchecked gate. ELIGIBLE means "passes your rules", not "will win". This does not change alerts, stops or sizing. */
+  const LABEL_RANK = { untested: 1, publisher_reported: 2, replay_reproduced: 3, held_out_confirmed: 4, paper_forward: 5, live_record: 6 };
+  const LABEL_NAMES = { untested: 'Untested', publisher_reported: 'Publisher-reported', replay_reproduced: 'Replay-reproduced', held_out_confirmed: 'Held-out confirmed', paper_forward: 'Paper-forward', live_record: 'Live record' };
+  /* rep: the replay group for this setup type {all, heldOut} (2-year run when there is one); row: its Scorecard row {paper, live}.
+     Held-out confirmed = decided-before-looking pass bar from HYPOTHESES.md: held-out n >= 100 and average R above +0.05 after fees. */
+  function evidenceLabel(rep, row) {
+    if (row && row.live && row.live.n >= 30) return 'live_record';
+    if (row && row.paper && row.paper.n >= 30) return 'paper_forward';
+    if (rep && rep.heldOut && rep.heldOut.n >= 100 && rep.heldOut.avgR > 0.05) return 'held_out_confirmed';
+    if (rep && rep.all && rep.all.n > 0) return 'replay_reproduced';
+    return 'untested';
+  }
+  const costHurdle = (entry, stop) => { const feeR = 2 * FEES.commission * entry / Math.abs(entry - stop); return { ok: feeR <= 0.2, feeR }; };
+  const GATE_NAMES = { data_health: 'Data health', event_blackout_clear: 'Event blackout', structure: 'Structure rule', cost_hurdle: 'Cost hurdle', risk_room: 'Owner rules and risk room', model_m2: 'Model gate (M2)' };
+  function cardVerdict(c) {
+    const unk = (id, why) => ({ id, name: GATE_NAMES[id], ok: true, known: false, why });
+    const G = [
+      { id: 'data_health', name: GATE_NAMES.data_health, ok: !!c.dataOk, known: true, why: (c.dataIssues || []).join('; ') },
+      c.eventsKnown ? { id: 'event_blackout_clear', name: GATE_NAMES.event_blackout_clear, ok: !c.inBlackout, known: true, why: 'inside the news window' } : unk('event_blackout_clear', 'no event calendar yet, so FOMC/CPI/NFP windows are not checked'),
+      { id: 'structure', name: GATE_NAMES.structure, ok: !!(c.structure && c.structure.ok), known: true, why: ((c.structure && c.structure.reasons) || []).join('; ') },
+      { id: 'cost_hurdle', name: GATE_NAMES.cost_hurdle, ok: !!(c.cost && c.cost.ok), known: true, why: c.cost ? `fees are ${c.cost.feeR.toFixed(2)}R of the stop risk (limit 0.2R)` : '' },
+      c.room ? { id: 'risk_room', name: GATE_NAMES.risk_room, ok: !!c.room.ok, known: true, why: (c.room.why || []).join('; ') || 'size 0' } : unk('risk_room', 'add your prop account to check your rules and room'),
+      { id: 'model_m2', name: GATE_NAMES.model_m2, ok: !!c.modelOk && !c.benched && !['disproven', 'below replay'].includes(c.scoreStatus), known: true,
+        why: c.benched ? 'you benched this setup type' : ['disproven', 'below replay'].includes(c.scoreStatus) ? `Scorecard says ${c.scoreStatus}` : 'not valid now, or below the replay grade' }
+    ];
+    const label = c.label || 'untested', rank = LABEL_RANK[label], bad = G.find(g => g.known && !g.ok), unknown = G.filter(g => !g.known);
+    let verdict, why = [];
+    if (bad) verdict = 'NO TRADE';
+    else {
+      if (rank < LABEL_RANK.held_out_confirmed) why.push(`evidence is ${LABEL_NAMES[label].toLowerCase()}, needs held-out confirmed`);
+      if (!c.starred) why.push('not starred by you');
+      for (const g of unknown) why.push(g.why);
+      verdict = why.length ? 'PAPER ONLY' : 'ELIGIBLE';
+    }
+    const evidenceLine = rank < LABEL_RANK.held_out_confirmed ? (c.starred ? 'Starred by you, but evidence is still below held-out confirmed: paper trade only.' : 'Untested idea — paper trade only unless you\'ve starred it.')
+      : c.starred ? `${LABEL_NAMES[label]} and starred by you.` : `${LABEL_NAMES[label]}, not starred by you yet.`;
+    return { verdict, failedGate: bad ? bad.id : null, failedName: bad ? bad.name : null, failedWhy: bad ? bad.why : null, gates: G, label, labelName: LABEL_NAMES[label], why, evidenceLine };
+  }
+
   /* Phone alerts for a setup (model M2, owner's choice Nov 1 2026): the replay's alert grade AND valid in the market now. */
   function alertWorthy(e, price, atr1h) { return !!(e.ready && alertGrade(e).ok && liveCheck(e, price, atr1h).status === 'valid'); }
-  function sortLive(list, check, fits) {   // valid first, then what his account can take now, then most checks passing, best R:R now, replay grade
-    const S = { valid: 0, partial: 1, invalid: 2 };
-    return list.map(u => ({ u, c: check(u), f: fits ? (fits(u) ? 1 : 0) : 0 })).sort((a, b) => S[a.c.status] - S[b.c.status] || b.f - a.f || (b.c.passed / b.c.total) - (a.c.passed / a.c.total) || (b.c.rr || 0) - (a.c.rr || 0) || alertGrade(b.u).ok - alertGrade(a.u).ok).map(x => x.u);
+  function sortLive(list, check, fits, verdictOf) {   // verdict class first (when given), then valid now, what his account can take, checks passing, R:R now, replay grade
+    const S = { valid: 0, partial: 1, invalid: 2 }, V = { ELIGIBLE: 0, 'PAPER ONLY': 1, 'NO TRADE': 2 };
+    return list.map(u => ({ u, c: check(u), f: fits ? (fits(u) ? 1 : 0) : 0, v: verdictOf ? (V[verdictOf(u)] ?? 1) : 0 })).sort((a, b) => a.v - b.v || S[a.c.status] - S[b.c.status] || b.f - a.f || (b.c.passed / b.c.total) - (a.c.passed / a.c.total) || (b.c.rr || 0) - (a.c.rr || 0) || alertGrade(b.u).ok - alertGrade(a.u).ok).map(x => x.u);
   }
   /* Order type (owner's rule, Nov 1 2026): MARKET when price is within 0.25 x 1h ATR of the setup's level (the same "at the zone"
      distance the setup rules use) or already past the level on the good side (a limit there would fill at once); otherwise a
@@ -1750,7 +1794,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

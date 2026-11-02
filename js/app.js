@@ -385,7 +385,7 @@
     fv.sort((a, b) => Math.abs((a.top + a.bottom) / 2 - p) - Math.abs((b.top + b.bottom) / 2 - p));
     $('#fvgBox').innerHTML = fv.length ? `<table><tr><th>TF</th><th>Side</th><th class=num>Zone</th><th>State</th></tr>${fv.slice(0, 8).map(g => `<tr><td>${C.tfName(g.iv)}</td><td class="${g.dir}">${g.dir}</td><td class=num>${px(g.bottom)}–${px(g.top)}</td><td class=small>${g.status}</td></tr>`).join('')}</table>
       <p class="small mu">FVG = 3-candle gap ≥0.15 ATR, closed candles only. Filled ones are dropped.</p>` : '<p class=mu>None open near price (or still loading).</p>';
-    const ups = C.sortLive(C.scanSetups(A.sym, A, Date.now()), liveOf, fitsNow);
+    const ups = C.sortLive(C.scanSetups(A.sym, A, Date.now()), liveOf, fitsNow, verdictRank);
     const cb = C.rankBoard(ups, chartMem[A.sym] || {}, Date.now()); chartMem[A.sym] = cb.mem;
     $('#setupBox').innerHTML = sizeAcctPicker() + (cb.rows.length ? cb.rows.map(r => r.gone ? goneCard(r) : setupCard('chart', r.rank - 1, r.u, ` <button class="btn sm" data-weigh="${r.rank - 1}">Weigh it</button><div class=small data-weighout="${r.rank - 1}"></div>`, r)).join('')
       + '<p class="small mu">Scanned both ways, all the time; sized and checked for the account picked above. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
@@ -431,7 +431,7 @@
   }
   function renderScanAll() {
     const box = $('#scanAllBox'); if (!box) return;
-    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
+    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow, verdictRank); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
     const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
       <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
     const sb = C.rankBoard(sa.rows, scanMem, Date.now()); scanMem = sb.mem;
@@ -456,7 +456,7 @@
   let paperPushTimer = null, paperMsg = '';
   function savePaper(why) { save(); clearTimeout(paperPushTimer); paperPushTimer = setTimeout(async () => { const r = await pushFile('monitor/paper.json', { v: 2, updated: Date.now(), accounts: S.paperAccts, trades: S.paper }, 'paper trades: ' + why); paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)'); if (tab === 'paper') renderPaper(); }, 4000); }
   function paperMeta(u) {
-    const m = { alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
+    const vd = verdictOf(u), m = { verdict: vd.verdict, failedGate: vd.failedGate, label: vd.label, alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
     try { const h = F.candles(u.sym, 60).slice(0, -1), d = F.candles(u.sym, 1440).slice(0, -1), x = window.PDTraits && h.length > 240 ? PDTraits.ctxAt(h, d, h.length - 1) : null;
       if (x) { const sh = PDProfile.shardName(x.f), prof = PROF[sh] ? { keys: PROF[sh], minN: PDProfile.MIN_N } : null; m.traits = {}; for (const t of PDTraits.TRAITS) m.traits[t.id] = t.side(x, prof); m.profile = x.f;
         const pm = prof && PDProfile.match(prof, x.f); if (pm) m.profileMatch = { n: pm.n, upShare24: pm.upShare24, med24: pm.med24 }; } } catch (e) { }
@@ -517,6 +517,37 @@
   // until he marks it live after placing it on the platform, or a screenshot import shows it. Used setups stay used even if
   // the trade is later deleted (S.usedSetups); using one again needs a confirm.
   const keysOf = u => [u.key].concat(u.alsoKeys || []);
+  // ---------- Card verdict (MASTER-HANDOFF, Nov 2 2026): built from the app's existing model, not a second rulebook ----------
+  // data health = the feed checks the Desk already shows; structure = his both-ways rule (directionCheck); cost = the replay's fee
+  // rule; room = fitOf/weighIdea (his profile, open risk, room); model gate = M2 (replay grade AND valid now) + his bench + the
+  // Scorecard's status; evidence label from the 2-year replay and the Scorecard's paper/live counts; star = his accepted "trusted".
+  const vMemo = new Map(); let vMemoT = 0;
+  function replayFor(u) { const src = BT && ((BT.long && BT.long.groups) || BT.groups); return src ? src[C.setupKey(u.kind, u.tf)] || null : null; }
+  let scMemo = { t: 0, rows: {} };
+  function scoreRow(key) {
+    if (Date.now() - scMemo.t > 5000) { const sc = C.scorecard(C.tradeRecords(S.paper, S.positions), { replay: C.replayByKey(BT), pool: POOL || {} }); scMemo = { t: Date.now(), rows: Object.fromEntries(sc.rows.map(r => [r.key, r])) }; }
+    return scMemo.rows[key] || null;
+  }
+  function verdictOf(u) {
+    const now = Date.now(); if (now - vMemoT > 2000) { vMemo.clear(); vMemoT = now; }
+    if (vMemo.has(u.key)) return vMemo.get(u.key);
+    const key = C.setupKey(u.kind, u.tf), lc = liveOf(u), price = pnlPrice(u.sym), A = analyses[u.sym] || analyze(u.sym), acct = sizeAcct(), fit = fitOf(u, lc.entry), row = scoreRow(key);
+    const age = F.age(u.sym), issues = []; if (!F.demo) { if (age == null) issues.push('no live price'); else if (age > T().maxAge) issues.push(`price feed ${Math.round(age)} s old`); }
+    try { const cs = C.consensus(F.sources(u.sym), 60, 15); if (cs.outliers && cs.outliers.length) issues.push(`${cs.outliers.join(', ')} differs from the other feeds`); } catch (e) { }
+    const dc = T().dirRule === false ? { ok: true, reasons: [] } : C.directionCheck(u.dir, u.sym, A.struct, S.positions, acct ? acct.id : null);
+    const v = C.cardVerdict({ dataOk: !issues.length, dataIssues: issues, eventsKnown: false, structure: dc, cost: C.costHurdle(lc.entry || u.entry, u.stop),
+      room: fit ? { ok: fit.ok, why: fit.why } : null, modelOk: C.alertWorthy(u, price, A.atr && A.atr[60]), benched: scoreMark(key) === 'benched', starred: scoreMark(key) === 'trusted',
+      scoreStatus: row ? row.status : 'gathering', label: C.evidenceLabel(replayFor(u), row) });
+    vMemo.set(u.key, v); return v;
+  }
+  const verdictRank = u => verdictOf(u).verdict;
+  // The numbers behind the label, from the 2-year replay (or the 120-day one): what this setup type did, and vs random entries.
+  function evidenceNumbers(u) {
+    const g = replayFor(u), src = BT && (BT.long || BT), V = src && src.variants && src.variants[C.alertGrade(u).ok ? 'V4' : 'V0'], r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R';
+    if (!g || !g.all || !g.all.n) return 'No replay results for this setup type.';
+    return `Replay (${BT && BT.long ? '2 years' : '120 days'}, all ${C.setupLabel(C.setupKey(u.kind, u.tf))} setups): ${g.all.n} trades, ${r(g.all.avgR)} each, held-out ${r(g.heldOut.avgR)} (${g.heldOut.n}).`
+      + (V && V.placebo && V.placebo.n >= 2 ? ` Versus random entries: ${r(V.placebo.diff)} (z ${V.placebo.z})${V.placebo.z != null && V.placebo.z < 2 ? ', no better than chance' : ''}.` : '');
+  }
   const liveOf = u => C.liveCheck(u, pnlPrice(u.sym), analyses[u.sym] && analyses[u.sym].atr ? analyses[u.sym].atr[60] : null);
   const useOf = u => { for (const k of keysOf(u)) { const x = C.setupUse(k, S.paper, S.positions, S.planned, S.usedSetups); if (x) return Object.assign({ key: k }, x); } return null; };
   const openPaperOf = u => S.paper.find(t => t.status === 'open' && keysOf(u).includes(t.setupKey));
@@ -553,11 +584,13 @@
   function setupCard(list, i, u, extra, rk) {
     const g = C.alertGrade(u), lc = liveOf(u), op = { type: lc.order, entry: lc.entry }, ent = lc.entry, rr = lc.rr, fit = fitOf(u, ent), q = fit && fit.qty ? fit.qty : null;
     return `<div class=sc><div class=sc-h>${rk ? `<b class=rank>#${rk.rank}</b>${rk.move ? `<span class="${rk.move > 0 ? 'up' : 'dn'}" title="Moved ${rk.move > 0 ? 'up' : 'down'} ${Math.abs(rk.move)} in the last 10 min">${rk.move > 0 ? '↑' : '↓'}${Math.abs(rk.move)}</span>` : ''} ` : ''}<b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span>${rr != null ? ` <span class="${rr >= 2 ? 'up' : rr >= 1 ? '' : 'dn'}" title="Reward:risk from this entry, stop and target, after fees">· ${rr.toFixed(1)}R</span>` : ''}</div>
-      <div class=sc-t>${lc.status === 'valid' ? '<span class="tag up">✓ valid now</span>' : lc.status === 'invalid' ? '<span class="tag dn">✗ not valid now</span>' : `<span class="tag warn">partly valid ${lc.passed}/${lc.total}</span>`}<span class="tag ${g.ok ? 'up' : 'mu'}" title="From the replay on past candles">replay: ${g.ok ? 'alert grade' : 'below grade'}</span>${setupBadge(u.kind, u.tf)}</div>
+      <div class=sc-t>${(vd => `<span class="tag ${vd.verdict === 'ELIGIBLE' ? 'up' : vd.verdict === 'NO TRADE' ? 'dn' : 'warn'}" title="${esc(vd.verdict === 'NO TRADE' ? vd.failedName + ': ' + (vd.failedWhy || '') : vd.why.join('; ') || 'passes your rules')}"><b>${vd.verdict}</b>${vd.failedName ? ' · ' + esc(vd.failedName) : ''}</span>`)(verdictOf(u))}${lc.status === 'valid' ? '<span class="tag up">✓ valid now</span>' : lc.status === 'invalid' ? '<span class="tag dn">✗ not valid now</span>' : `<span class="tag warn">partly valid ${lc.passed}/${lc.total}</span>`}<span class="tag ${g.ok ? 'up' : 'mu'}" title="From the replay on past candles">replay: ${g.ok ? 'alert grade' : 'below grade'}</span>${setupBadge(u.kind, u.tf)}</div>
       ${fit ? `<div class="small ${fit.ok ? 'up' : 'warn'}" style="margin-top:4px">${fit.ok ? `Fits ${esc(acctName(fit.acct.id))}: risks ${usd(fit.risk)} of ${usd(fit.room)} room` : `${esc(acctName(fit.acct.id))} says not now: ${esc(fit.why.join(', ') || 'size 0')}`}</div>` : '<div class="small mu" style="margin-top:4px">Add your prop account on the Desk to size setups.</div>'}
       ${priceBoxes([[op.type === 'market' ? 'Market ~' : op.type === 'none' ? 'Past stop' : 'Limit', op.type === 'none' ? '' : cpVal(ent)], ['Stop', cpVal(u.stop)], ['Target', cpVal(u.target)], ['Size', q != null ? String(q) : '', q != null ? String(+q.toPrecision(4)) : null]])}
       <div class=sc-a>${lc.status === 'invalid' && !useOf(u) ? '<span class="small dn">Not valid now: price is past the stop or under 1R after fees. Skip it.</span>' : setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · ${op.type === 'market' ? 'market ~' : 'limit'} ${cpVal(ent)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
-      <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary><div>${esc(u.text)}</div><div><b>Live check now:</b> ${lc.items.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
+      <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary>${(vd => `<div><b>Verdict: ${vd.verdict}</b> — ${vd.verdict === 'NO TRADE' ? esc(vd.failedName + ': ' + (vd.failedWhy || '')) : vd.verdict === 'ELIGIBLE' ? 'passes your rules (not a prediction).' : esc(vd.why.join('; '))}</div>
+        <div><b>Gates:</b> ${vd.gates.map(g => `<span class="${!g.known ? 'mu' : g.ok ? 'up' : 'warn'}">${!g.known ? '?' : g.ok ? '✓' : '✗'} ${esc(g.name)}${!g.known ? ' (not checked)' : !g.ok && g.why ? ' (' + esc(g.why) + ')' : ''}</span>`).join(' · ')}</div>
+        <div><b>Evidence:</b> ${esc(vd.labelName)}. ${esc(vd.evidenceLine)} ${esc(evidenceNumbers(u))}</div>`)(verdictOf(u))}<div>${esc(u.text)}</div><div><b>Live check now:</b> ${lc.items.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
   }
   // A setup the scanner no longer finds: kept at the bottom, greyed, with why (as far as the price now tells) and when last seen.
   function goneCard(r) {
@@ -602,6 +635,7 @@
     const price = pnlPrice(u.sym), atr1 = (analyses[u.sym] && analyses[u.sym].atr[60]) || (analyze(u.sym).atr || {})[60];
     const op = C.orderPlan(u.entry, price, u.stop, u.dir, atr1);
     showModal(`<h3>Take it live: ${esc(u.sym)} ${u.dir.toUpperCase()}</h3>
+      ${(vd => `<p class="small ${vd.verdict === 'NO TRADE' ? 'dn' : vd.verdict === 'PAPER ONLY' ? 'warn' : 'up'}"><b>Coach verdict: ${vd.verdict}</b> — ${vd.verdict === 'NO TRADE' ? esc(vd.failedName + ': ' + (vd.failedWhy || '')) : vd.verdict === 'ELIGIBLE' ? 'passes your rules.' : esc(vd.why.join('; '))}. ${esc(vd.evidenceLine)} It's your call; this only tells you where it stands.</p>`)(verdictOf(u))}
       <p class=small>${fromPaper ? `From your open paper trade (opened ${fmtTime(fromPaper.opened, true)} at ${px(fromPaper.entry)}). The paper trade keeps running for reference, but once this is live only the live trade counts on the Scorecard.<br>` : ''}${esc(u.text)}</p>
       <div class=form><label style="grid-column:1/-1">Which account<select id=tlA>${accts.map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned }); return `<option value="${a.id}" ${sizeAcct() && sizeAcct().id === a.id ? 'selected' : ''}>${esc(acctName(a.id))} · ${esc(a.phase)} · room ${usd(A.room)}</option>`; }).join('')}</select></label>
         <label>Order<select id=tlType><option value=market ${op && op.type === 'market' ? 'selected' : ''}>Market</option><option value=limit ${!op || op.type !== 'market' ? 'selected' : ''}>Limit</option></select></label>
@@ -631,7 +665,11 @@
       if (!(q > 0) || !(e0 > 0)) { alert('Entry and size are required.'); return; }
       if (st == null || d * (e0 - st) <= 0) { alert('Every trade needs a stop on the right side of the entry.'); return; }
       if (!$('#tlTh').value.trim()) { alert('Every trade needs a plan: write one line.'); return; }
-      S.planned.push({ id: uid(), acct: $('#tlA').value, sym: u.sym, side: u.dir, entry: e0, stop: st, tp1: num($('#tlT').value), qty: q, tf: u.tf,
+      let tag = 'plan', tagNote;   // your both-ways rule, same as the manual form: breaking it needs a yes and is logged as a rule break
+      if (T().dirRule !== false) { const dc = C.directionCheck(u.dir, u.sym, analyze(u.sym).struct, S.positions, $('#tlA').value);
+        if (!dc.ok) { if (!confirm('This breaks your rule "both ways only when it makes sense":\n- ' + dc.reasons.join('\n- ') + '\n\nTake it anyway? It will be marked as a rule break.')) return; tag = 'rulebreak'; tagNote = dc.reasons.join('; '); } }
+      const vd0 = verdictOf(u);
+      S.planned.push({ id: uid(), acct: $('#tlA').value, sym: u.sym, side: u.dir, entry: e0, stop: st, tp1: num($('#tlT').value), qty: q, tf: u.tf, tag, tagNote, verdictAtEntry: { verdict: vd0.verdict, failedGate: vd0.failedGate, label: vd0.label, model: C.MODEL },
         setup: u.kind === 'sweep' ? 'Liquidity sweep' : 'FVG', thesis: $('#tlTh').value.trim(), ref: { key: C.setupKey(u.kind, u.tf), model: C.MODEL }, setupKey: u.key, created: Date.now(), fromPaper: fromPaper ? fromPaper.id : undefined, orderType: $('#tlType').value });
       markUsed(u.key, 'planned', $('#tlA').value); save(); closeModal(); switchTab('pos');
     };
@@ -659,7 +697,7 @@
     if (pl.setupKey) S.usedSetups[pl.setupKey] = { t: Date.now(), how: 'live', acct: pl.acct };
     return { id: uid(), acct: pl.acct, sym: pl.sym, side: pl.side, qty: o.qty, entry: o.entry, stop: o.stop, origStop: o.stop, tp1: o.tp1 != null ? o.tp1 : pl.tp1, tp2: null,
       tf: pl.tf, setup: pl.setup, thesis: pl.thesis, opened: o.opened, openedUnknown: !!o.openedUnknown, partials: [], stopHist: [{ t: Date.now(), stop: o.stop, why: 'live from plan' }],
-      ref: pl.ref, setupKey: pl.setupKey, tag: 'plan', source: o.source || 'plan' };
+      ref: pl.ref, setupKey: pl.setupKey, tag: pl.tag || 'plan', tagNote: pl.tagNote, verdictAtEntry: pl.verdictAtEntry, source: o.source || 'plan' };
   }
   function plannedHtml() {
     if (!S.planned.length) return '';
@@ -1442,7 +1480,7 @@
     }).join('');
     const sym = T().sym, A = analyses[sym] || analyze(sym);
     const ups = C.scanSetups(sym, A, now);
-    coachUps = C.sortLive(ups, liveOf, fitsNow);
+    coachUps = C.sortLive(ups, liveOf, fitsNow, verdictRank); loadTrack();
     const board = C.rankBoard(coachUps, coachMem[sym] || {}, now); coachMem[sym] = board.mem;
     const reviews = liveAccts().map(a => {
       const R = C.accountReview(a, S.positions, P, now, { orders: S.planned }), st = R.state;
@@ -1456,7 +1494,8 @@
     }).join('');
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
-      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>ranked · most valid first</span></h3>${sizeAcctPicker()}${board.rows.length ? board.rows.map(r => r.gone ? goneCard(r) : setupCard('coach', r.rank - 1, r.u, '', r)).join('') + '<p class="small mu">Ranked by the live check, re-ranked every few seconds: valid in the market now first, then what your account can take, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. ↑/↓ shows a move in the last 10 min. Setups the scanner no longer finds stay at the bottom for 4 h. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
+      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>ranked · most valid first</span></h3>${sizeAcctPicker()}${(rows => { const n = k => rows.filter(r => !r.gone && verdictOf(r.u).verdict === k).length, ev = rows.some(r => !r.gone && ['held_out_confirmed', 'paper_forward', 'live_record'].includes(verdictOf(r.u).label));
+        return rows.length ? `<p class=small><b>Verdicts:</b> ${n('ELIGIBLE')} eligible · ${n('PAPER ONLY')} paper only · ${n('NO TRADE')} no trade${ev ? '' : ' — nothing is held-out confirmed yet, so paper only is the best any setup can be'}.</p>` : ''; })(board.rows)}${board.rows.length ? board.rows.map(r => r.gone ? goneCard(r) : setupCard('coach', r.rank - 1, r.u, '', r)).join('') + '<p class="small mu">Ranked by the live check, re-ranked every few seconds: valid in the market now first, then what your account can take, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. ↑/↓ shows a move in the last 10 min. Setups the scanner no longer finds stay at the bottom for 4 h. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
   }
   var coachUps = [], coachMem = {};
