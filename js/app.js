@@ -456,7 +456,7 @@
   let paperPushTimer = null, paperMsg = '';
   function savePaper(why) { save(); clearTimeout(paperPushTimer); paperPushTimer = setTimeout(async () => { const r = await pushFile('monitor/paper.json', { v: 2, updated: Date.now(), accounts: S.paperAccts, trades: S.paper }, 'paper trades: ' + why); paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)'); if (tab === 'paper') renderPaper(); }, 4000); }
   function paperMeta(u) {
-    const vd = verdictOf(u), m = { verdict: vd.verdict, failedGate: vd.failedGate, label: vd.label, alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
+    const vd = verdictOf(u), m = { ctxAtEntry: ctxSnapshot(u.sym), verdict: vd.verdict, failedGate: vd.failedGate, label: vd.label, alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
     try { const h = F.candles(u.sym, 60).slice(0, -1), d = F.candles(u.sym, 1440).slice(0, -1), x = window.PDTraits && h.length > 240 ? PDTraits.ctxAt(h, d, h.length - 1) : null;
       if (x) { const sh = PDProfile.shardName(x.f), prof = PROF[sh] ? { keys: PROF[sh], minN: PDProfile.MIN_N } : null; m.traits = {}; for (const t of PDTraits.TRAITS) m.traits[t.id] = t.side(x, prof); m.profile = x.f;
         const pm = prof && PDProfile.match(prof, x.f); if (pm) m.profileMatch = { n: pm.n, upShare24: pm.upShare24, med24: pm.med24 }; } } catch (e) { }
@@ -517,6 +517,51 @@
   // until he marks it live after placing it on the platform, or a screenshot import shows it. Used setups stay used even if
   // the trade is later deleted (S.usedSetups); using one again needs a confirm.
   const keysOf = u => [u.key].concat(u.alsoKeys || []);
+  // ---------- Market context (data/market/now.json from the "Market data" job, every 3 h) ----------
+  // Funding, open interest, liquidations, basis (Kraken Futures), Hyperliquid funding (PROXY), DVOL, Fear & Greed and macro. Background,
+  // NOT a signal: nothing here changes a verdict, a size or an alert until a pre-registered test earns it (MASTER-HANDOFF item 15).
+  let MKT = null, mktAt = 0;
+  async function loadMarket() {
+    if (Date.now() - mktAt < 10 * 60e3) return; mktAt = Date.now();
+    try { const r = await fetch('data/market/now.json', { cache: 'no-store' }); if (r.ok) { MKT = await r.json(); if (tab === 'coach' || tab === 'desk') renderAll(true); } } catch (e) { }
+  }
+  setTimeout(loadMarket, 1500);
+  const ago = iso => { const h = (Date.now() - Date.parse(iso)) / 3600e3; return h < 1 ? Math.max(1, Math.round(h * 60)) + ' min ago' : h < 48 ? Math.round(h) + ' h ago' : Math.round(h / 24) + ' days ago'; };
+  const sgn = (x, d, u) => x == null || !isFinite(x) ? '—' : (x >= 0 ? '+' : '') + x.toFixed(d) + (u || '');
+  const ord = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th');
+  const pctl = x => x == null ? '' : ` <span class=mu>(${ord(Math.round(x * 100))} percentile of the year)</span>`;
+  function coinCtx(sym) { const c = MKT && MKT.coins && MKT.coins[C.base(sym).replace('XBT', 'BTC')]; return c || null; }
+  function ctxSnapshot(sym) {   // saved with each paper/live trade so the Scorecard can later test whether context matters
+    const c = coinCtx(sym); if (!MKT) return null;
+    return { at: MKT.made, fundingPctile: c && c.funding ? c.funding.pctile1y : null, fundingAnn: c && c.funding ? +c.funding.annualPct.toFixed(2) : null, oi24h: c && c.oi ? c.oi.chg24h : null,
+      liqRatio: c && c.liquidations ? c.liquidations.ratio : null, labels: c ? c.labels : [], dvolPctile: MKT.vol && MKT.vol.BTC ? MKT.vol.BTC.pctile1y : null,
+      fearGreed: MKT.sentiment ? MKT.sentiment.value : null, weather: MKT.weather ? MKT.weather.label : null };
+  }
+  function weatherLine() {
+    if (!MKT || !MKT.weather) return '';
+    const m = MKT.macro || {}, w = MKT.weather, bits = [];
+    if (m.vix) bits.push(`VIX ${m.vix.value.toFixed(1)}`); if (m.y10) bits.push(`10y ${m.y10.value.toFixed(2)}% (${sgn(m.y10.chg4w, 2)} in 4 wk)`);
+    if (m.dollar) bits.push(`dollar ${sgn(m.dollar.chg4w * 100, 1, '%')} 4 wk`); if (MKT.sentiment) bits.push(`Fear & Greed ${MKT.sentiment.value} (${MKT.sentiment.label})`);
+    return `<b>Macro: ${esc(w.label)}</b>${w.against.length ? ' · against: ' + esc(w.against.join(', ')) : ''}${w.for.length ? ' · for: ' + esc(w.for.join(', ')) : ''} · ${esc(bits.join(' · '))} <span class=mu>· updated ${esc(ago(MKT.made))} · background, not a signal</span>`;
+  }
+  function marketCardHtml() {
+    loadMarket();
+    if (!MKT) return '<div class=card><h3>Market context</h3><p class=mu>Loading… (data/market/now.json, refreshed every 3 hours by the Market data job)</p></div>';
+    const row = (k, c) => `<tr><td><b>${esc(k)}</b>${c.labels && c.labels.length ? `<div class="small warn">${esc(c.labels.join('; '))}</div>` : ''}</td>
+      <td class=num>${c.funding ? sgn(c.funding.annualPct, 1, '%') + '/yr' + pctl(c.funding.pctile1y) : '—'}</td>
+      <td class=num>${c.oi ? sgn(c.oi.chg24h * 100, 1, '%') : '—'}</td>
+      <td class=num>${c.liquidations && c.liquidations.ratio != null ? c.liquidations.ratio.toFixed(1) + '×' : '—'}</td>
+      <td class=num>${c.basis ? sgn(c.basis.value * 1e4, 1, ' bp') : '—'}</td></tr>`;
+    const m = MKT.macro || {}, mrow = (k) => m[k] ? `<tr><td>${esc(m[k].label)}</td><td class=num>${(+m[k].value).toFixed(2)}</td><td class=num>${m[k].chg4w == null ? '—' : m[k].chgKind === 'percent' ? sgn(m[k].chg4w * 100, 1, '%') : sgn(m[k].chg4w, 2)}</td><td class="small mu">${esc(m[k].at.slice(0, 10))}</td></tr>` : '';
+    const v = MKT.vol || {};
+    return `<div class=card><h3>Market context <span class=tag>background, not a signal</span></h3>
+      <p class=small>${weatherLine()}</p>
+      <table><tr><th>Coin</th><th class=num>Funding (Kraken)</th><th class=num>Open int. 24 h</th><th class=num>Liq. 24 h vs avg</th><th class=num>Basis</th></tr>${Object.entries(MKT.coins || {}).map(([k, c]) => row(k, c)).join('')}</table>
+      <p class=small>${v.BTC ? `BTC options fear gauge (DVOL) ${v.BTC.dvol.toFixed(1)} ${pctl(v.BTC.pctile1y)} · ` : ''}${Object.entries(MKT.coins || {}).filter(([, c]) => c.hlFunding).map(([k, c]) => `${esc(k)} Hyperliquid funding ${sgn(c.hlFunding.annualPct, 1, '%')}/yr`).join(' · ')} <span class=mu>(PROXY)</span></p>
+      <details class=sc-w ${fold('mkt:macro')}><summary>Macro details</summary><table><tr><th>Series</th><th class=num>Latest</th><th class=num>4-week change</th><th>Date</th></tr>${['y2', 'y10', 'real10', 'dollar', 'usdjpy', 'vix', 'hy', 'spx', 'ndx', 'oil', 'netLiq'].map(mrow).join('')}</table>
+        <p class="small mu">Sources: Kraken Futures (funding, open interest, liquidations, basis), Hyperliquid and Deribit (PROXY), alternative.me Fear & Greed, FRED (St. Louis Fed). Macro data is daily or weekly, so it can't time an entry. "Crowded long/short" = funding in the top/bottom 10% of the past year; liquidations "3×" = the last 24 h vs the 30-day daily average.</p></details>
+      <p class="small mu">Updated ${esc(ago(MKT.made))}. None of this is tested as a trade rule yet (hypotheses H5, H6, H9): it never changes a verdict, a size or an alert. Every paper and live trade saves this context at entry so the Scorecard can test it later.</p></div>`;
+  }
   // ---------- Card verdict (MASTER-HANDOFF, Nov 2 2026): built from the app's existing model, not a second rulebook ----------
   // data health = the feed checks the Desk already shows; structure = his both-ways rule (directionCheck); cost = the replay's fee
   // rule; room = fitOf/weighIdea (his profile, open risk, room); model gate = M2 (replay grade AND valid now) + his bench + the
@@ -590,6 +635,7 @@
       <div class=sc-a>${lc.status === 'invalid' && !useOf(u) ? '<span class="small dn">Not valid now: price is past the stop or under 1R after fees. Skip it.</span>' : setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · ${op.type === 'market' ? 'market ~' : 'limit'} ${cpVal(ent)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
       <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary>${(vd => `<div><b>Verdict: ${vd.verdict}</b> — ${vd.verdict === 'NO TRADE' ? esc(vd.failedName + ': ' + (vd.failedWhy || '')) : vd.verdict === 'ELIGIBLE' ? 'passes your rules (not a prediction).' : esc(vd.why.join('; '))}</div>
         <div><b>Gates:</b> ${vd.gates.map(g => `<span class="${!g.known ? 'mu' : g.ok ? 'up' : 'warn'}">${!g.known ? '?' : g.ok ? '✓' : '✗'} ${esc(g.name)}${!g.known ? ' (not checked)' : !g.ok && g.why ? ' (' + esc(g.why) + ')' : ''}</span>`).join(' · ')}</div>
+        ${(c => c ? `<div><b>Context (${esc(C.base(u.sym))}):</b> funding ${c.funding ? sgn(c.funding.annualPct, 1, '%') + '/yr' + (c.funding.pctile1y != null ? ' (' + ord(Math.round(c.funding.pctile1y * 100)) + ' percentile)' : '') : '—'}, open interest 24 h ${c.oi ? sgn(c.oi.chg24h * 100, 1, '%') : '—'}${c.labels.length ? ' · ' + esc(c.labels.join('; ')) : ''} <span class=mu>(background, not a signal)</span></div>` : '')(coinCtx(u.sym))}
         <div><b>Evidence:</b> ${esc(vd.labelName)}. ${esc(vd.evidenceLine)} ${esc(evidenceNumbers(u))}</div>`)(verdictOf(u))}<div>${esc(u.text)}</div><div><b>Live check now:</b> ${lc.items.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
   }
   // A setup the scanner no longer finds: kept at the bottom, greyed, with why (as far as the price now tells) and when last seen.
@@ -669,7 +715,7 @@
       if (T().dirRule !== false) { const dc = C.directionCheck(u.dir, u.sym, analyze(u.sym).struct, S.positions, $('#tlA').value);
         if (!dc.ok) { if (!confirm('This breaks your rule "both ways only when it makes sense":\n- ' + dc.reasons.join('\n- ') + '\n\nTake it anyway? It will be marked as a rule break.')) return; tag = 'rulebreak'; tagNote = dc.reasons.join('; '); } }
       const vd0 = verdictOf(u);
-      S.planned.push({ id: uid(), acct: $('#tlA').value, sym: u.sym, side: u.dir, entry: e0, stop: st, tp1: num($('#tlT').value), qty: q, tf: u.tf, tag, tagNote, verdictAtEntry: { verdict: vd0.verdict, failedGate: vd0.failedGate, label: vd0.label, model: C.MODEL },
+      S.planned.push({ id: uid(), acct: $('#tlA').value, sym: u.sym, side: u.dir, entry: e0, stop: st, tp1: num($('#tlT').value), qty: q, tf: u.tf, tag, tagNote, ctxAtEntry: ctxSnapshot(u.sym), verdictAtEntry: { verdict: vd0.verdict, failedGate: vd0.failedGate, label: vd0.label, model: C.MODEL },
         setup: u.kind === 'sweep' ? 'Liquidity sweep' : 'FVG', thesis: $('#tlTh').value.trim(), ref: { key: C.setupKey(u.kind, u.tf), model: C.MODEL }, setupKey: u.key, created: Date.now(), fromPaper: fromPaper ? fromPaper.id : undefined, orderType: $('#tlType').value });
       markUsed(u.key, 'planned', $('#tlA').value); save(); closeModal(); switchTab('pos');
     };
@@ -697,7 +743,7 @@
     if (pl.setupKey) S.usedSetups[pl.setupKey] = { t: Date.now(), how: 'live', acct: pl.acct };
     return { id: uid(), acct: pl.acct, sym: pl.sym, side: pl.side, qty: o.qty, entry: o.entry, stop: o.stop, origStop: o.stop, tp1: o.tp1 != null ? o.tp1 : pl.tp1, tp2: null,
       tf: pl.tf, setup: pl.setup, thesis: pl.thesis, opened: o.opened, openedUnknown: !!o.openedUnknown, partials: [], stopHist: [{ t: Date.now(), stop: o.stop, why: 'live from plan' }],
-      ref: pl.ref, setupKey: pl.setupKey, tag: pl.tag || 'plan', tagNote: pl.tagNote, verdictAtEntry: pl.verdictAtEntry, source: o.source || 'plan' };
+      ref: pl.ref, setupKey: pl.setupKey, tag: pl.tag || 'plan', tagNote: pl.tagNote, verdictAtEntry: pl.verdictAtEntry, ctxAtEntry: pl.ctxAtEntry || ctxSnapshot(pl.sym), source: o.source || 'plan' };
   }
   function plannedHtml() {
     if (!S.planned.length) return '';
@@ -947,7 +993,7 @@
       ['Live P&L (open)', `<span class="${cls(D.upnl)}">${usd(D.upnl)}</span>`], ['Risk if all stops fill', isFinite(D.riskToStops) ? usd(D.riskToStops) : '<span class=dn>Unlimited</span>', isFinite(D.riskToStops) ? '' : 'a position has no stop'],
       ['Spent on evals', usd(D.cost), `this month ${usd(monthCost)}${budgetMsg}`], ['Payouts received', usd(D.paid)],
       ['Program net', `<span class="${cls(D.net)}">${usd(D.net)}</span>`, 'payouts − all fees']
-    ].map(x => `<div class=stat><div class=k>${x[0]}</div><div class=v>${x[1]}</div>${x[2] ? `<div class="k">${x[2]}</div>` : ''}</div>`).join('');
+    ].map(x => `<div class=stat><div class=k>${x[0]}</div><div class=v>${x[1]}</div>${x[2] ? `<div class="k">${x[2]}</div>` : ''}</div>`).join('') + (MKT ? `<div class=small style="grid-column:1/-1;margin-top:4px">${weatherLine()}</div>` : (loadMarket(), ''));
     if (!S.accounts.length) { $('#deskList').innerHTML = '<div class=card><p>No accounts yet. Add your prop evaluation or funded account. Rules default to the official plan values (Advanced: 9% target, 3% daily, 3% max).</p></div>'; return; }
     const order = { eval: 0, funded: 0, passed: 1, breached: 2, closed: 3 };
     $('#deskList').innerHTML = S.accounts.slice().sort((a, b) => order[a.phase] - order[b.phase]).map(a => acctCard(a, D.states[a.id])).join('');
@@ -1516,6 +1562,7 @@
     }).join('');
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
+      ${marketCardHtml()}
       <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>ranked · most valid first</span></h3>${sizeAcctPicker()}${(rows => { const n = k => rows.filter(r => !r.gone && verdictOf(r.u).verdict === k).length, ev = rows.some(r => !r.gone && ['held_out_confirmed', 'paper_forward', 'live_record'].includes(verdictOf(r.u).label));
         return rows.length ? `<p class=small><b>Verdicts:</b> ${n('ELIGIBLE')} eligible · ${n('PAPER ONLY')} paper only · ${n('NO TRADE')} no trade${ev ? '' : ' — nothing is held-out confirmed yet, so paper only is the best any setup can be'}.</p>` : ''; })(board.rows)}${board.rows.length ? board.rows.map(r => r.gone ? goneCard(r) : setupCard('coach', r.rank - 1, r.u, '', r)).join('') + '<p class="small mu">Ranked by the live check, re-ranked every few seconds: valid in the market now first, then what your account can take, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. ↑/↓ shows a move in the last 10 min. Setups the scanner no longer finds stay at the bottom for 4 h. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
