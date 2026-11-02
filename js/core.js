@@ -1574,6 +1574,39 @@
     for (const [k, m] of gone) { rows.push({ u: m.u, rank: null, move: null, gone: true, lastSeen: m.last, firstSeen: m.firstSeen }); next[k] = Object.assign({}, m, { gone: true }); }
     return { rows, mem: next };
   }
+  /* ---------- Pass odds (owner's request, Nov 2 2026) ----------
+     Monte Carlo of an evaluation under HIS rules: each day the daily floor is (balance at the reset) x (1 - daily limit); the static
+     drawdown floor never moves; pass = equity reaches the target; breach = equity at or below the higher floor. Per trade he risks
+     the LOWER of his profile amount and 90% of the room left (the app's sizing rule); a win pays rr x risk, a loss costs the risk, and
+     fees cost feeR x risk either way. At most maxTrades a day, and the day ends after stopAfterLosses losses.
+     outcomes: optional list of R results (his own closed trades, net of fees) to resample instead of the no-edge coin.
+     No edge = win chance 1/(1+rr), so the average trade makes 0 before fees. A pass chance above that is luck, not skill. */
+  function passOdds(o) {
+    const sims = o.sims || 4000, maxDays = o.maxDays || 120, rr = o.rr || 2, pWin = o.pWin != null ? o.pWin : 1 / (1 + rr), feeR = o.feeR != null ? o.feeR : 0;
+    let s = (o.seed >>> 0) || 12345; const rnd = () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    let pass = 0, breach = 0, stuck = 0; const days = [], trades = [];
+    for (let k = 0; k < sims; k++) {
+      let eq = o.equity, end = null, d = 0, nT = 0;
+      for (; d < maxDays && !end; d++) {
+        const dayFloor = o.dailyPct != null ? eq * (1 - o.dailyPct) : -Infinity, floor = Math.max(dayFloor, o.maxFloor);
+        let losses = 0;
+        for (let t = 0; t < o.maxTrades && losses < o.stopAfterLosses; t++) {
+          const room = eq - floor, risk = o.fixedSize ? o.riskUsd : Math.min(o.riskUsd, 0.9 * room);
+          // Out of room: the next trade would risk under a tenth of his normal amount; in practice the eval is over.
+          if (!o.fixedSize && risk < 0.1 * o.riskUsd && eq - o.maxFloor < 0.1 * o.riskUsd / 0.9) { end = 'stuck'; break; }
+          if (!(risk > 0.01)) break;
+          let R; if (o.outcomes && o.outcomes.length) R = o.outcomes[Math.floor(rnd() * o.outcomes.length)]; else R = (rnd() < pWin ? rr : -1) - feeR;
+          eq += R * risk; nT++; if (R < 0) losses++;
+          if (eq <= floor + 1e-9) { end = 'breach'; break; }
+          if (eq >= o.target - 1e-9) { end = 'pass'; break; }
+        }
+      }
+      if (end === 'pass') { pass++; days.push(d); trades.push(nT); } else if (end === 'breach') breach++; else if (end === 'stuck') stuck++;
+    }
+    days.sort((a, b) => a - b); trades.sort((a, b) => a - b);
+    return { pass: pass / sims, breach: breach / sims, stuck: stuck / sims, fail: (breach + stuck) / sims, open: (sims - pass - breach - stuck) / sims, medianDays: days.length ? days[Math.floor(days.length / 2)] : null, medianTrades: trades.length ? trades[Math.floor(trades.length / 2)] : null, sims, rr, pWin, feeR };
+  }
+
   /* ---------- Card verdict (MASTER-HANDOFF §3[E], §4, §5 verdict logic; display only, Nov 2 2026) ----------
      Code decides, nothing is predicted. Gates run in order; the first one that fails = NO TRADE and the card says which.
      Evidence label (§4): untested 1 · replay_reproduced 3 · held_out_confirmed 4 · paper_forward 5 · live_record 6 (2 is for outside
@@ -1794,7 +1827,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

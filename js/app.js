@@ -915,6 +915,27 @@
   function switchTab(t) { document.querySelector(`#tabs button[data-tab="${t}"]`).click(); }
 
   // ---------- Desk ----------
+  // ---------- Pass odds per risk profile (owner's request, Nov 2 2026) ----------
+  // Simulated from where the account stands now, under his rules (C.passOdds). Baseline = no edge: a 2R target hit 1 time in 3, so
+  // the average trade makes 0 before fees; fees 0.12R a trade (typical of the replay's setups). If he has 30+ closed trades under the
+  // current model (paper + live followed-plan), his own R results are also resampled. Cached a minute per account.
+  const poMemo = {};
+  function passOddsHtml(a, s) {
+    const key = a.id + '|' + Math.round(s.equity) + '|' + Math.round(s.maxFloor) + '|' + Math.round(s.targetBal);
+    let m = poMemo[a.id];
+    if (!m || m.key !== key || Date.now() - m.t > 60e3) {
+      const own = C.tradeRecords(S.paper, S.positions).filter(r => r.model === C.MODEL && (r.src === 'paper' || r.tag === 'plan')).map(r => r.R);
+      const base = { equity: s.equity, target: s.targetBal, maxFloor: s.maxFloor, dailyPct: s.plan.mdl, sims: 3000, seed: 11 };
+      const rows = C.PROFILES.map(p => { const o = Object.assign({}, base, { riskUsd: s.start * p.riskPct / 100, maxTrades: p.maxTrades, stopAfterLosses: p.stopAfterLosses });
+        return { p, none: C.passOdds(Object.assign({}, o, { rr: 2, feeR: 0.12 })), mine: own.length >= 30 ? C.passOdds(Object.assign({}, o, { outcomes: own })) : null }; });
+      m = poMemo[a.id] = { key, t: Date.now(), rows, own: own.length };
+    }
+    const pc = x => Math.round(x * 100) + '%';
+    return `<details class=sc-w ${fold('odds:' + a.id)}><summary>Pass odds by risk profile (from here)</summary>
+      <table><tr><th>Profile</th><th class=num>Pass</th><th class=num>Fail</th><th class=num>Unfinished 120 d</th><th class=num>Days (median pass)</th>${m.rows[0].mine ? '<th class=num>With your record</th>' : ''}<th class=num>Eval cost per pass</th></tr>
+      ${m.rows.map(r => `<tr class="${r.p.id === s.profile.id ? 'up' : ''}"><td>${esc(r.p.name)}${r.p.id === s.profile.id ? ' (yours)' : ''}</td><td class=num>${pc(r.none.pass)}</td><td class=num>${pc(r.none.fail)}</td><td class=num>${pc(r.none.open)}</td><td class=num>${r.none.medianDays ?? '—'}</td>${r.mine ? `<td class=num>${pc(r.mine.pass)}</td>` : ''}<td class=num>${a.fee > 0 && r.none.pass > 0 ? usd(a.fee / r.none.pass) : '—'}</td></tr>`).join('')}</table>
+      <p class="small mu">Simulated ${m.rows[0].none.sims.toLocaleString()} times from your equity now, with your floors and target, each profile's risk, trades a day and loss stop. <b>No edge</b>: a 2R target hit 1 time in 3, so the average trade makes nothing before fees; fees about 0.12R a trade. Any pass at these odds is luck, not skill. ${m.own >= 30 ? `"With your record" resamples your ${m.own} closed trades under model ${C.MODEL}.` : `Your own record is added once you have 30 closed trades under model ${C.MODEL} (now ${m.own}).`} "Fail" includes running out of room. Eval cost per pass = what you paid ÷ pass chance. <b>Why bigger profiles pass more here:</b> with no edge, fees take a little every trade, so fewer, bigger trades give fees fewer chances. It's still a losing game on average at every size; the only thing that truly raises the odds is an edge. Your rule stands: never raise risk to catch up.</p></details>`;
+  }
   function renderDesk() {
     const now = Date.now(), P = prices();
     const D = C.deskTotals(S.accounts, S.positions, P, now, { orders: S.planned });
@@ -957,6 +978,7 @@
       ${a.phase === 'eval' ? `<div class=small>Target progress</div><div class=bar><i style="width:${Math.max(0, Math.min(1, s.progress)) * 100}%"></i></div>` : ''}
       <div style="margin-top:8px"><div class=small>Risk profile (per trade, % of start)</div><div class=profiles>${prof}</div>
       <p class=small>${esc(s.profile.note)} Per trade <b>${usd(s.profRisk)}</b> · next trade may risk <b>${usd(s.nextRisk)}</b> · about <b>${s.lossesToBreach}</b> losses of room${wins ? ` · wins to pass: ${wins}` : ''} · max ${s.profile.maxTrades} trades/day, stop after ${s.profile.stopAfterLosses} losses.</p></div>
+      ${a.phase === 'eval' ? passOddsHtml(a, s) : ''}
       ${(w => w.length ? `<p class=small>Orders: ${w.map(pl => `${esc(pl.sym)} ${pl.side} ${pl.orderType !== 'market' ? 'limit @ ' + px(pl.entry) : 'market'} ${pl.status === 'placed' ? '<b>working</b> (counts in risk and margin, not equity)' : 'planned only (counts nothing)'}`).join(' · ')}</p>` : '')(S.planned.filter(pl => pl.acct === a.id))}
       ${(m => m.length ? `<div class=warns>${m.map(x => `<div class=warn>Missing: ${esc(x.text)}. Import it in Positions → 📷 Import screenshots.</div>`).join('')}</div>` : '')(C.missingInfo(a, [T().sym]).filter(x => !S.positions.some(p => p.acct === a.id && !p.closed && p.sym === x.sym)))}
       ${s.warnings.length ? `<div class=warns>${s.warnings.map(w => `<div class="${w.lvl}">${esc(w.text)}</div>`).join('')}</div>` : ''}` : `<p class=small>Final balance ${usd(s.balance)}.</p>`}
