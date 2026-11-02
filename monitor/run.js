@@ -105,6 +105,7 @@ function evaluate(watch, market, prev, now, opt) {
       }
       const tgt = p.tp1 != null ? p.tp1 : p.tp2;
       if (tgt != null && d * (px - tgt) >= 0) fire(`${p.id}|tp`, 1, `${tag}: target reached`, `Price ${C.fmtPx(px)} at/through target ${C.fmtPx(tgt)}. Re-import to sync.`, 3);
+      if (p.partialAt != null && d * (px - p.partialAt) >= 0) fire(`${p.id}|partial|${p.partialAt}`, 1, `${tag}: at your partial level`, `Price ${C.fmtPx(px)} reached ${C.fmtPx(p.partialAt)}. If your plan banks a partial here, close part by hand (Kraken Prop has no partial TP orders), then re-import.`, 3);
       const dd = data[p.sym];
       if (dd && !dd.light) { const h = C.health(p, { price: px, ageSec: 0, struct: dd.struct, fvg: dd.fvg, levels: dd.levels, atr: dd.atr, acct: A, rules: watch.rules || {}, entryStruct: dd.struct[p.tf] || dd.struct[15], now });
         if (h.score != null && h.score <= 2) fire(`${p.id}|health`, 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal + '. ' + h.items.filter(i => i.k !== 'inferred').slice(0, 2).map(i => i.t).join(' '), 4); }
@@ -174,10 +175,9 @@ function evaluate(watch, market, prev, now, opt) {
     const l15 = c15[c15.length - 2], l60 = c60[c60.length - 2];
     if (!l15 || !a15) continue;
     const move15 = l15.close - l15.open, big15 = Math.abs(l15.high - l15.low) > 2 * a15, move60 = l60 && a1 ? l60.close - l60.open : 0;
-    const oiDrop = false;   // open interest history not kept (keeps the repo quiet)
     const up = move15 > 0 && (big15 || move60 > 1.5 * a1), dn = move15 < 0 && (big15 || -move60 > 1.5 * a1);
-    if (up && m.funding != null && m.funding < 0) fire(`${s}|sqz|up`, 2, `⚡ ${s}: short squeeze signs`, `Fast push up (${C.fmtPx(l15.low)}→${C.fmtPx(l15.high)} on 15m) with negative funding${oiDrop ? ' and open interest falling' : ''}. Shorts at risk.`, 4);
-    else if (dn && m.funding != null && m.funding > 0) fire(`${s}|sqz|dn`, 2, `⚡ ${s}: long squeeze signs`, `Fast drop (${C.fmtPx(l15.high)}→${C.fmtPx(l15.low)} on 15m) with positive funding${oiDrop ? ' and open interest falling' : ''}. Longs at risk.`, 4);
+    if (up && m.funding != null && m.funding < 0) fire(`${s}|sqz|up`, 2, `⚡ ${s}: short squeeze signs`, `Fast push up (${C.fmtPx(l15.low)}→${C.fmtPx(l15.high)} on 15m) with negative funding. Shorts at risk.`, 4);
+    else if (dn && m.funding != null && m.funding > 0) fire(`${s}|sqz|dn`, 2, `⚡ ${s}: long squeeze signs`, `Fast drop (${C.fmtPx(l15.high)}→${C.fmtPx(l15.low)} on 15m) with positive funding. Longs at risk.`, 4);
     else if (Math.abs(l15.high - l15.low) > 2.5 * a15) fire(`${s}|fast`, 1, `${s}: fast 15m move`, `Range ${C.fmtPx(Math.abs(l15.high - l15.low))} vs normal ${C.fmtPx(a15)}.`, 3);
   }
   if (positions.length && watchAgeH != null && watchAgeH > 24) fire('watch|stale', 1, 'Monitor data is over a day old', 'Re-import your Kraken screenshots and tap "Send to monitor" so alerts match your real positions.', 2);

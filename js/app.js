@@ -44,11 +44,21 @@
       upFill: c(55, .14), dnFill: c(55, .07), day: c(70), week: c(80), open: c(45), vwap: c(85), session: c(35), orb: c(75), entry: c(70), tp: c(62), hollow: true,
       glow: T().glow === false ? 'none' : `0 0 6px ${c(55, .55)}` };
   }
+  // Text contrast (owner, Nov 2): brighten text toward white and darken cards, or make all text white. Gains/losses stay green/red and
+  // danger/caution stay red/yellow in every setting (owner's rule).
+  const toHex = c => { try { const x = document.createElement('canvas').getContext('2d'); x.fillStyle = '#000'; x.fillStyle = c; return /^#[0-9a-f]{6}$/i.test(x.fillStyle) ? x.fillStyle : null; } catch (e) { return null; } };
+  const mixHex = (a, b, k) => { const A = toHex(a), B = toHex(b); if (!A || !B) return a; const h = (s, i) => parseInt(s.slice(i, i + 2), 16);
+    return '#' + [1, 3, 5].map(i => Math.round(h(A, i) + (h(B, i) - h(A, i)) * k).toString(16).padStart(2, '0')).join(''); };
   function applyTheme() {
     PAL = themeColors();
+    const boost = Math.max(0, Math.min(100, +T().textBoost || 0)) / 100;
+    if (T().textWhite) Object.assign(PAL, { tx: '#ffffff', mu: '#ffffff' });
+    else if (boost) Object.assign(PAL, { tx: mixHex(PAL.tx, '#ffffff', boost), mu: mixHex(PAL.mu, '#ffffff', boost * 0.85) });
+    if (boost) Object.assign(PAL, { card: mixHex(PAL.card, '#000000', boost * 0.7) });
     if (T().chartStyle !== 'theme') Object.assign(PAL, { up: '#26a69a', dn: '#ef5350', upFill: 'rgba(38,166,154,.16)', dnFill: 'rgba(239,83,80,.16)', day: '#8fa3bf', week: '#b18cff',
       open: '#6e7f94', vwap: '#e3b341', session: '#4d6a8a', orb: '#f778ba', entry: '#5b9cff', tp: '#3fb950', hollow: false, chartBg: '#000000', chartTx: '#c9d1d9', chartGrid: '#11161d', chartLine: '#1e2630' });
     else Object.assign(PAL, { chartBg: PAL.bg, chartTx: PAL.tx, chartGrid: PAL.card, chartLine: PAL.line });
+    if (T().textWhite) PAL.chartTx = '#ffffff'; else if (boost) PAL.chartTx = mixHex(PAL.chartTx, '#ffffff', boost);
     const r = document.documentElement, st = r.style;
     r.dataset.mode = PAL.mode; r.dataset.scan = PAL.mode === 'pip' && T().scan ? 'on' : 'off';
     // Gains/losses and bull/bear always read green/red, whatever the theme (owner's rule).
@@ -146,7 +156,18 @@
   }
   $('#updBar').onclick = () => location.reload();
   checkUpdate(); setInterval(checkUpdate, 30 * 60e3);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkUpdate(); });
+  // Coming back to the app (owner, Nov 2: Kraken Prop's chart goes stale after you leave it; ours must not). After 30 s+ away, or when
+  // the connection comes back, reload the candle history for everything watched and reconnect, so no candles are missing.
+  let hiddenAt = 0, lastCatchUp = 0;
+  const catchUp = why => { if (F.demo || Date.now() - lastCatchUp < 60000) return;   /* at most once a minute (Kraken REST limits) */ lastCatchUp = Date.now(); F.refresh().then(() => renderAll(true)).catch(e => console.warn('catch-up', why, e)); };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+    checkUpdate();
+    if (hiddenAt && Date.now() - hiddenAt >= 30000) catchUp('back in app');
+    hiddenAt = 0;
+  });
+  window.addEventListener('pageshow', e => { if (e.persisted) catchUp('restored page'); });
+  window.addEventListener('online', () => catchUp('back online'));
 
   // ---------- Help + questions (owner's choice, Nov 1 2026) ----------
   // Questions and comments go to the repo's GitHub Issues, prefilled; nothing is sent until the user submits it there.
@@ -178,17 +199,17 @@
   renderHelp();
 
   // ---------- Chart ----------
-  const TFS = [5, 15, 60, 240, 1440];
+  const TFS = [1, 5, 15, 60, 240, 1440];   // 1m is for watching price move (chart only: no setups, alerts or replay use it)
   const LAYERS = { levels: 'Day/week levels', vwap: 'VWAP', sessions: 'Sessions', orb: 'Opening range', fvg: 'Fair value gaps', marks: 'BOS / CHoCH marks', fib: 'Impulse legs + fib retracements',
-    pos: 'My trades and orders (entry/stop/target)', ema9: 'EMA 9', ema21: 'EMA 21', ema50: 'EMA 50', ema200: 'EMA 200', volume: 'Volume' };
-  const LAYER_DEF = { fib: true, levels: true, vwap: true, sessions: true, orb: true, fvg: true, marks: true, pos: true, ema9: false, ema21: false, ema50: false, ema200: false, volume: false };
+    pos: 'My trades and orders (entry/stop/target)', paperStops: 'Paper trade stops (ticked paper trades)', openR: 'Open R next to entries', ema9: 'EMA 9', ema21: 'EMA 21', ema50: 'EMA 50', ema200: 'EMA 200', volume: 'Volume' };
+  const LAYER_DEF = { openR: true, paperStops: true, fib: true, levels: true, vwap: true, sessions: true, orb: true, fvg: true, marks: true, pos: true, ema9: false, ema21: false, ema50: false, ema200: false, volume: false };
   const CTYPES = { candles: 'Candles', hollow: 'Hollow candles', heikin: 'Heikin Ashi', bars: 'Bars (OHLC)', line: 'Line', area: 'Area' };
   const EMA_COL = { ema9: '#f0b90b', ema21: '#2962ff', ema50: '#e040fb', ema200: '#ff9800' };
   let extra = {}, curType = null;
   let chart, series, priceLines = [], lastDataKey = '';
   function initChart() {
     $('#symSel').innerHTML = T().symbols.map(s => `<option ${s === T().sym ? 'selected' : ''}>${esc(s)}</option>`).join('');
-    $('#tfSeg').innerHTML = TFS.map(tf => `<button data-tf="${tf}" class="${tf === T().tf ? 'on' : ''}">${C.tfName(tf)}</button>`).join('');
+    $('#tfSeg').innerHTML = TFS.map(tf => `<button data-tf="${tf}" class="${tf === T().tf ? 'on' : ''}"${tf === 1 ? ' title="1-minute candles (Kraken, last 12 h). For watching price only: setups, alerts and tests do not use 1m."' : ''}>${C.tfName(tf)}</button>`).join('');
     for (const k in LAYER_DEF) if (T().layers[k] === undefined) T().layers[k] = LAYER_DEF[k];
     $('#layerSeg').innerHTML = `<select id=ctypeSel aria-label="Chart type">${Object.keys(CTYPES).map(k => `<option value="${k}" ${k === (T().ctype || 'candles') ? 'selected' : ''}>${CTYPES[k]}</option>`).join('')}</select>
       <button class="btn sm" id=indBtn>Indicators (${Object.keys(LAYERS).filter(k => T().layers[k]).length})</button>`;
@@ -207,11 +228,12 @@
       crosshair: { mode: 0 }
     });
     makeSeries(T().ctype || 'candles');
+    chart.subscribeClick(p => missClick(p));
     chart.timeScale().subscribeVisibleTimeRangeChange(drawOverlay);
     new ResizeObserver(() => drawOverlay()).observe(el);
   }
   $('#symSel').onchange = e => { T().sym = e.target.value; save(); lastDataKey = ''; ensureFeeds(); renderAll(true); };
-  $('#tfSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; T().tf = +b.dataset.tf; save(); lastDataKey = ''; initChart(); renderAll(true); };
+  $('#tfSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; T().tf = +b.dataset.tf; save(); lastDataKey = ''; initChart(); ensureFeeds(); renderAll(true); };
   $('#layerSeg').onchange = e => { if (e.target.id === 'ctypeSel') { T().ctype = e.target.value; save(); lastDataKey = ''; renderChart(true); } };
   $('#layerSeg').onclick = e => { if (e.target.id !== 'indBtn') return;
     showModal(`<h3>Indicators</h3><div class=form>${Object.keys(LAYERS).map(k => `<label class=chk><input type=checkbox data-lay="${k}" ${T().layers[k] ? 'checked' : ''}> ${esc(LAYERS[k])}</label>`).join('')}</div><div class=row style="margin-top:10px"><button class="btn pri" data-close>Done</button></div>`);
@@ -219,20 +241,31 @@
 
   // Full screen: real fullscreen where supported, CSS fill on iPhone.
   const wrap = $('#chartWrap');
+  // Keep the screen on while the chart is full screen (owner, Nov 2): Screen Wake Lock API. The phone drops the lock when the app goes
+  // to the background, so it's taken again on return while still full screen. Where it isn't supported, say so instead of pretending.
+  let wakeLock = null;
+  const wakeMsg = t => { const el = $('#fsWake'); if (el) el.textContent = t; };
+  async function keepAwake(on) {
+    if (!on) { try { if (wakeLock) await wakeLock.release(); } catch (e) { } wakeLock = null; return; }
+    if (!('wakeLock' in navigator)) { wakeMsg('Screen may sleep: this browser can\'t keep it on'); return; }
+    try { wakeLock = await navigator.wakeLock.request('screen'); wakeMsg('☀ Screen stays on'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+    catch (e) { wakeMsg('Screen may sleep (' + (e.name === 'NotAllowedError' ? 'blocked by the phone, e.g. Low Power Mode' : 'not available') + ')'); }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wrap.classList.contains('fs') && !wakeLock) keepAwake(true); });
   function enterFs() {
-    wrap.classList.add('fs');
+    wrap.classList.add('fs'); keepAwake(true);
     const r = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
     if (r) { try { const p = r.call(wrap); if (p && p.catch) p.catch(() => { }); } catch (e) { } }
     try { screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => { }); } catch (e) { }
     setTimeout(drawOverlay, 300);
   }
   function exitFs() {
-    wrap.classList.remove('fs');
+    wrap.classList.remove('fs'); keepAwake(false);
     if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => { });
     setTimeout(drawOverlay, 300);
   }
   $('#fsBtn').onclick = enterFs; $('#fsExit').onclick = exitFs;
-  document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) wrap.classList.remove('fs'); setTimeout(drawOverlay, 200); });
+  document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && wrap.classList.contains('fs')) { wrap.classList.remove('fs'); keepAwake(false); } setTimeout(drawOverlay, 200); });
   document.addEventListener('keydown', e => { if (e.key === 'f' && tab === 'chart' && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) wrap.classList.contains('fs') ? exitFs() : enterFs(); });
 
   let curA = null;
@@ -292,11 +325,25 @@
     // Heikin Ashi's own last value is an average, not a price: show the real one instead.
     if ((T().ctype || 'candles') === 'heikin' && cs.length) pl(cs[cs.length - 1].close, 'Price', PAL.acc, 0, 1);
     if (L.pos) for (const p of S.positions.filter(p => !p.closed && p.sym === sym)) {
-      pl(p.entry, `${p.side} entry`, PAL.entry, 0, 2);
+      const rNow = L.openR !== false && pnlPrice(sym) != null ? C.rMultiple(p, pnlPrice(sym)) : null;   // owner: open R next to the entry
+      pl(p.entry, `${p.side} entry${rNow != null ? ` · ${rNow >= 0 ? '+' : ''}${rNow.toFixed(2)}R` : ''}`, PAL.entry, 0, 2);
       if (p.stop != null) pl(p.stop, 'stop', '#ff4d4d', 0, 2);   // stops stay red in every theme
       if (p.tp1 != null) pl(p.tp1, 'TP1', PAL.tp, 0, 1);
       if (p.tp2 != null) pl(p.tp2, 'TP2', PAL.tp, 1, 1);
     }
+    // Paper trades he ticked "Show on chart" (dotted, labelled "paper" so they can't be mistaken for real positions).
+    for (const t of S.paper.filter(x => x.onChart && x.sym === sym && (x.status === 'open' || x.status === 'pending'))) {
+      const w = t.status === 'pending' ? 'paper limit' : 'paper ' + t.side;
+      const pr = L.openR !== false && t.status === 'open' && pnlPrice(sym) != null ? C.paperR(Object.assign({ stop0: t.stop }, t), pnlPrice(sym), Date.now()) : null;
+      const rp = pr != null ? ` · ${pr >= 0 ? '+' : ''}${pr.toFixed(2)}R` : '';
+      pl(t.entry, `📝 ${w} entry${rp}`, '#b388ff', 1, 2);
+      if (t.stop != null && T().layers.paperStops !== false) pl(t.stop, `📝 paper stop`, '#ff4d4d', 1, 1);
+      if (t.target != null) pl(t.target, `📝 paper target`, PAL.tp, 1, 1);
+    }
+    // Daily trend system paper position (ticked in the Paper tab).
+    if (T().trendOnChart && window.PDTrend && TREND_SYMS.includes(sym)) { const k = trendForward().coins.find(x => x.sym === sym);
+      if (k && k.open) { pl(k.open.entry, `📈 trend paper ${k.open.dir > 0 ? 'long' : 'short'} entry${k.openR != null && L.openR !== false ? ` · ${k.openR >= 0 ? '+' : ''}${k.openR.toFixed(2)}R` : ''}`, '#b388ff', 1, 2);
+        if (T().layers.paperStops !== false) pl(k.open.stop, '📈 trend paper stop', '#ff4d4d', 1, 1); } }
     // Working limit orders and plans not placed yet (owner's request, Nov 1): dashed = working on the platform, dotted = planned only.
     if (L.pos) for (const o of S.planned.filter(x => x.sym === sym)) {
       const working = o.status === 'placed', st = working ? 2 : 4, what = o.orderType === 'market' ? 'market' : 'limit';
@@ -357,13 +404,136 @@
       ${cs.outliers.length ? ` <b class=dn>Off: ${esc(cs.outliers.join(', '))}</b>.` : ''}${stale.length ? ` Stale: ${esc(stale.join(', '))}.` : ''}</p>
       <p class=small>P&amp;L price: <b>${px(q.price)}</b> · ${esc(q.basis)}${k.n ? ` · correction ${k.bps >= 0 ? '+' : ''}${k.bps.toFixed(1)} bp (spread ${k.spreadBps.toFixed(1)} bp)` : ''}</p>
       <div class=row style="margin:6px 0 0"><input id=calIn type=number step=any placeholder="Price your platform shows now" style="flex:1;min-width:150px"><button class="btn sm" id=calOk>Match Prop price</button></div>
-      <p class="small mu">Prop's own price isn't public. Type the ${esc(sym)} price your prop platform shows the moment you see it; the app learns the gap (median of your last 5, kept 7 days). bp = 0.01%.</p>`;
+      <p class="small mu">Prop's own price isn't public. Type the ${esc(sym)} price your prop platform shows the moment you see it; the app learns the gap (median of your last 5, kept 7 days). bp = 0.01%.</p>
+      ${feedLogHtml()}`;
     $('#calOk').onclick = () => {
       const v = num($('#calIn').value), qq = pnlQuote(sym);
       if (!(v > 0) || qq.raw == null) { alert(qq.raw == null ? 'Need the live mark and USDT price first.' : 'Type the price your prop platform shows.'); return; }
       if (Math.abs(v / qq.raw - 1) > 0.01) { alert('That is more than 1% from the estimate. Check the coin and try again.'); return; }
       S.calib.push({ t: Date.now(), sym, prop: v, est: qq.raw }); S.calib = S.calib.slice(-50); save(); renderAll(true);
     };
+  }
+  // ---------- What did I miss? (owner's idea, Nov 2): mark a move, see what was visible before it, save it as learning data ----------
+  let missPick = null;   // null = off; [] / [t0] while he is tapping candles
+  const missHint = t => { for (const id of ['#missHint', '#missHintFs']) { const h = $(id); if (h) { h.hidden = !t; h.innerHTML = t || ''; } } };
+  $('#fsMiss').onclick = () => $('#missBtn').onclick();
+  $('#missBtn').onclick = () => {
+    if (missPick) { missPick = null; missHint(''); return; }
+    const sw = ![15, 60, 240].includes(T().tf);
+    if (sw) { T().tf = 15; save(); lastDataKey = ''; initChart(); ensureFeeds(); renderAll(true); }
+    missPick = []; missHint(`<b>Tap the candle where the move started.</b> (${sw ? 'Chart switched to 15m; ' : ''}works on 15m, 1h and 4h.) Tap 🔍 again to cancel.`);
+  };
+  function missClick(p) {
+    if (!missPick || !p || p.time == null) return;
+    missPick.push(+p.time);
+    if (missPick.length === 1) { missHint('<b>Now tap the candle where the move ended.</b>'); return; }
+    const [a, b] = missPick; missPick = null; missHint('Checking what was visible before the move… (a few seconds)');
+    setTimeout(() => { try { runMiss(a, b); } catch (e) { console.warn(e); missHint('Could not review that move: ' + esc(e.message)); } }, 30);
+  }
+  function missCandles(sym) {
+    const now = Date.now() / 1000, cs = {};
+    for (const iv of [15, 60, 240, 1440]) cs[iv] = F.candles(sym, iv).filter(x => x.time + iv * 60 <= now);   // closed candles only
+    return cs;
+  }
+  function runMiss(a, b) {
+    const sym = T().sym, r = PDReview.review(sym, missCandles(sym), a, b, { tf: T().tf });
+    missHint('');
+    const ls = PDReview.lines(r).map(esc);
+    if (r.error) { showModal(`<h3>What did I miss?</h3><p>${ls[0]}</p><div class=row><button class=btn data-close>Close</button></div>`); return; }
+    const m = r.move, when = new Date(m.t0 * 1000).toLocaleString('en-US', { timeZone: T().tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    showModal(`<h3>What did I miss? <span class=tag>untested ideas, not signals</span></h3>
+      <p class=small>Move started ${esc(when)}. ✔ = it was there before the move (only candles closed by then). ✘ = it wasn't. The history rate says how often that sign showed up <b>without</b> a move this big following.</p>
+      <div class=small style="line-height:1.6">${ls.join('<br>')}</div>
+      ${missCtxHtml(sym, m)}
+      <textarea id=missNote rows=3 style="width:100%;margin-top:8px" placeholder="Ask or note (optional): e.g. what was the setup here that I missed?"></textarea>
+      <div class=row style="margin-top:8px"><button class="btn" id=missSave>Save to my lessons</button><button class="btn" data-close>Close</button><button class="btn sm" id=missCopy title="Optional: copy this for a second opinion in your Claude app">Copy for Claude</button></div>
+      <p class="small mu" id=missStat>Save keeps the review, your note and the market context with it, and it feeds the "What did I miss?" table. Everything here comes from the app's own data.</p>`);
+    $('#missSave').onclick = () => {
+      const { ups, ...before } = r.before;
+      S.moveReviews = (S.moveReviews || []).concat([{ id: C.fnv(sym + m.tf + m.t0 + m.t1), at: Date.now(), sym, tf: m.tf, move: m, before, base: r.base, during: r.during, found: (r.found || []).map(u => ({ kind: u.kind, tf: u.tf, ready: u.ready, minsBefore: u.minsBefore, missing: u.missing })),
+        ctx: ctxSnapshot(sym), ctxLagHours: MKT && MKT.made ? +((Date.parse(MKT.made) / 1000 - m.t0) / 3600).toFixed(1) : null, note: $('#missNote').value.slice(0, 500) }])
+        .filter((x, i, arr) => arr.findIndex(y => y.id === x.id) === i).slice(-300);
+      save(); renderMissBox(); $('#missStat').innerHTML = '<b class=up>Saved.</b>';
+    };
+    $('#missCopy').onclick = async () => {
+      const txt = `Prop Desk "What did I miss?" review (rules-based, from closed candles only; untested ideas):\n${PDReview.lines(r).join('\n')}\nMy question / note: ${$('#missNote').value || 'What was the setup here that I missed?'}\n\nLooking at my chart screenshot too: answer my question, say what was visible before this move that I could have planned for, and what only showed up after it started. Be honest if nothing reliable was visible.`;
+      $('#missStat').innerHTML = (await copyText(txt)) ? '<b class=up>Copied.</b> Paste it in your Claude app with the screenshot.' : 'Copy failed.';
+    };
+  }
+  // Market context saved with the review. It is the latest snapshot (refreshed every 3 h), so it's labelled with how far it is from the move's start.
+  function missCtxHtml(sym, m) {
+    loadMarket(); const c = ctxSnapshot(sym); if (!c) return '<p class="small mu">Market context: not loaded yet (it is saved with the review when available).</p>';
+    const lag = MKT && MKT.made ? (Date.parse(MKT.made) / 1000 - m.t0) / 3600 : null, bits = [];
+    if (c.weather) bits.push('macro ' + c.weather); if (c.fundingPctile != null) bits.push(`funding ${ord(Math.round(c.fundingPctile * 100))} percentile (1 y)`); if (c.oi24h != null) bits.push(`open interest ${sgn(c.oi24h * 100, 1, '%')} 24 h`);
+    if (c.liqRatio != null) bits.push(`liquidations ${c.liqRatio.toFixed(1)}× normal`); if (c.dvolPctile != null) bits.push(`BTC implied vol ${ord(Math.round(c.dvolPctile * 100))} percentile`); if (c.fearGreed != null) bits.push(`Fear & Greed ${c.fearGreed}`);
+    return `<p class=small><b>Market context</b> (${lag == null ? 'time unknown' : Math.abs(lag) < 3 ? 'from about the move\'s start' : `snapshot ${Math.abs(lag).toFixed(0)} h ${lag > 0 ? 'after' : 'before'} the start, so approximate`}): ${esc(bits.join(' · ') || '—')}${c.labels && c.labels.length ? ' · <span class=warn>' + esc(c.labels.join('; ')) + '</span>' : ''}</p>`;
+  }
+  function renderMissBox() {
+    const box = $('#missBox'); if (!box) return;
+    const saved = S.moveReviews || [];
+    if (!saved.length) { box.innerHTML = '<p class=small>When a move happens, tap <b>🔍 What did I miss?</b>, then tap the candle where it started and the one where it ended. The coach lists what was visible before it, and how often those signs showed up with no move. Save it, and this table learns from every move you mark.</p>'; return; }
+    const L = PDReview.lessons(saved), rows = Object.values(L).filter(x => x.of).sort((a, b) => b.before / b.of - a.before / a.of);
+    box.innerHTML = `<table><tr><th>Sign</th><th class=num>Before your moves</th><th class=num>Moves after it, in history</th></tr>${rows.map(x => `<tr><td class=small>${esc(x.label)}</td><td class=num>${x.before}/${x.of}</td><td class=num>${x.baseN ? (100 * x.baseHits / x.baseN).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table>
+      <p class="small mu">${saved.length} move${saved.length > 1 ? 's' : ''} saved. A sign is only worth learning from if it shows up before your moves much more often than it does at random times. These are untested ideas: after 30+ saved moves, the strongest one can be written down and tested properly. Your picks are your biggest moves, so expect the table to flatter every sign.</p>
+      <div class=row><button class="btn sm" id=missClear>Clear saved moves</button></div>`;
+    $('#missClear').onclick = () => { if (confirm('Delete all saved move reviews?')) { S.moveReviews = []; save(); renderMissBox(); } };
+  }
+  renderMissBox();
+  // Feed reliability log: which feed is live and in line with the others, measured while the app is open (kept on this device only).
+  const FEEDLOG_KEY = 'kpd_feedlog';
+  let feedLog; try { feedLog = JSON.parse(localStorage.getItem(FEEDLOG_KEY)) || null; } catch (e) { feedLog = null; }
+  setInterval(() => {
+    if (F.demo || document.visibilityState === 'hidden') return;
+    try { feedLog = C.feedTally(feedLog, F.sources(T().sym), Date.now()); localStorage.setItem(FEEDLOG_KEY, JSON.stringify(feedLog)); } catch (e) { }
+  }, 15000);
+  function feedLogHtml() {
+    const rep = C.feedReport(feedLog, Date.now(), 14);
+    if (!rep.length) return '<p class="small mu">Feed reliability: measuring. Counts appear after the app has been open a while.</p>';
+    const f1 = x => x == null ? '—' : x.toFixed(x >= 99.95 || x === 0 ? 0 : 1) + '%';
+    return `<h4 style="margin:10px 0 4px">Feed reliability (last 14 days, while the app was open)</h4>
+      <table><tr><th>Feed</th><th class=num>Live</th><th class=num>Off price</th><th class=num>Drop-outs</th></tr>${rep.map(r => `<tr><td>${esc(r.name)}</td><td class="num ${r.livePct < 95 ? 'dn' : ''}">${f1(r.livePct)}</td><td class="num ${r.offPct > 1 ? 'dn' : ''}">${f1(r.offPct)}</td><td class=num>${r.drops}</td></tr>`).join('')}</table>
+      <p class="small mu">Live = had a price under 60 s old. Off price = more than 15 bp from the middle of 3+ live feeds. Drop-out = went from live to stale while the app was open. ${rep[0].hours.toFixed(1)} h measured. Kraken stays the main feed unless these numbers show it is the weak one.</p>`;
+  }
+  // Market open plan (owner, Nov 2): read the pre-market, prepare both sides for the 9:30 New York open, then show how it played out.
+  // Same definitions as the H4/H23 test (js/core.js openPlan). Untested idea, not a signal; each day's read and outcome is saved as learning data.
+  function renderOpenPlan(sym) {
+    const box = $('#openBox'); if (!box) return;
+    F.want(sym, [15, 1440]).catch(() => { });
+    const now = Date.now() / 1000, nyDate = C.tzParts(now, C.OPEN.tz).date, news = (T().openNews || {})[nyDate] === true;
+    const c15 = F.candles(sym, 15).filter(x => x.time + 900 <= now), d1 = F.candles(sym, 1440), P = C.openPlan(c15, d1, now, { orbMin: T().orbMin === 30 ? 30 : 15, news });
+    if (P.status === 'weekend') { box.innerHTML = '<p class=small>Weekend: no New York open today. Crypto still trades, usually thinner. The plan returns Monday before 9:30 New York.</p>'; return; }
+    if (P.status === 'nodata' || P.dAtr == null) { box.innerHTML = '<p class=mu>Loading 15m and daily candles…</p>'; return; }
+    const sgn = x => (x >= 0 ? '+' : '') + x.toFixed(2), st = { pre: 'Before the open', range: 'Opening range forming', live: 'After the open', done: 'Closed for the day (16:00 New York)' }[P.status];
+    const tr = t => t === 'up' ? '<b class=bull>up</b>' : t === 'down' ? '<b class=bear>down</b>' : 'mixed';
+    const widthTxt = P.width == null ? 'not enough days yet' : `${P.width.toFixed(1)}× normal (median of the last ${P.widthDays} days)${P.width > 1.5 ? ' → <b>expect a bigger first 2 hours</b>: leave stop room, size down' : P.width < 0.67 ? ' → expect a quieter first 2 hours' : ''}`;
+    const sideHtml = dir => {
+      const s = P[dir], up = dir === 'up', word = up ? 'above' : 'below';
+      if (!s.trigger) return `<div class=sc><div class=sc-h><b class="${up ? 'bull' : 'bear'}">${up ? 'IF UP' : 'IF DOWN'}</b></div><div class=small>Wait for the opening range (9:30–${P.orbMin === 30 ? '10:00' : '9:45'} New York). Then: a 15m close ${word} its ${up ? 'high' : 'low'} → enter on the next candle, stop at the other side of the range, target 2R. Overnight ${up ? 'high' : 'low'} ${s.watch != null ? px(s.watch) : '—'} is the first line to clear${s.next != null ? `, then ${px(s.next)}` : ''}.${s.withTrend ? ' With the 4h trend.' : ''}</div></div>`;
+      const sizes = liveAccts().map(a => { const A = C.accountState(a, S.positions, prices(), Date.now(), { orders: S.planned });
+        const z = C.sizeFor({ sym, entry: s.trigger, stop: s.stop, risk: A.nextRisk, equity: A.equity, usedMargin: A.usedMargin, symNotional: A.openBySym[sym] || 0, leverage: C.levMap(a) });
+        const dc = C.directionCheck(up ? 'long' : 'short', sym, (analyses[sym] || analyze(sym)).struct, S.positions, a.id);
+        return `${esc(a.label || 'Account')}: ${z && z.qty > 0 ? `size ${z.qty} (${usd(z.lossAtStop)} at the stop)` : '<span class=warn>no room</span>'}${dc.known && !dc.ok ? ` · <span class=warn>both-ways rule says no: ${esc(dc.reasons.join('; '))}</span>` : ''}`; }).join('<br>');
+      return `<div class=sc><div class=sc-h><b class="${up ? 'bull' : 'bear'}">${up ? 'IF UP' : 'IF DOWN'}</b> <span>${s.withTrend ? 'with the 4h trend' : 'against or no 4h trend: smaller or skip'}</span></div>
+        <div class=small>Trigger: a 15m close ${word} ${px(s.trigger)} before 12:00 New York → enter on the next candle · stop ${px(s.stop)} · 2R target ${px(s.target)}${s.next != null ? ` · next level ${px(s.next)}` : ''} · out by 16:00</div>
+        <div class=small>${sizes || '<span class=mu>Add an account on the Desk to see sizes.</span>'}</div></div>`; };
+    const flagTxt = { 'range wide': 'opening range wider than half a normal day: the stop is far, so the size gets small', 'big overnight move': 'already moved more than a normal day overnight: the move may be done', 'wide overnight': 'wide overnight range: bigger swings likely after the open', 'quiet overnight': 'quiet overnight', news: 'big news today (you ticked it): stand aside around the release', 'costs big': `range so tight that fees and slippage are about ${Math.round((P.costShare || 0) * 100)}% of the risk: a normal stop-out costs well over 1R` };
+    const t = P.trade, after = (P.status === 'live' || P.status === 'done') ? `<p class=small><b>How it played out:</b> ${t ? (t.why === 'open' ? `broke ${tr(t.dir)} at ${fmtTime(t.t * 1000)}, entry ${px(t.entry)}, still running` : t.R == null ? esc(t.why || '') : `broke ${tr(t.dir)} at ${fmtTime(t.t * 1000)}, ${t.why === 'target' ? 'hit 2R' : t.why === 'stop' ? 'stopped out' : 'closed at 16:00'}: <b class="${t.R >= 0 ? 'up' : 'dn'}">${sgn(t.R)}R</b> after costs`) : 'no breakout close yet (entries stop at 12:00)'}${P.move2h != null ? ` · first 2 hours moved ${sgn(P.move2h)} daily ranges` : ''}</p>` : '';
+    box.innerHTML = `<p class=small><b>${esc(C.base(sym))}</b> · ${esc(P.date)} · ${st}</p>
+      <p class=small><b>Pre-market read:</b> ${P.drift != null ? `${sgn(P.drift)} daily ranges since midnight New York` : '—'} · 4h trend ${tr(P.trend)} · overnight ${P.onL != null ? px(P.onL) + '–' + px(P.onH) : '—'}, ${widthTxt}</p>
+      <p class=small><b>Direction lean: none.</b> Tested (H23): the pre-market move predicted the open's direction one year and the opposite the next, so the plan prepares both sides. ${P.read !== 'none' ? `Today the pre-market and 4h trend both point ${tr(P.read)}: treat that as context only.` : ''}</p>
+      ${sideHtml('up')}${sideHtml('down')}
+      ${P.flags.length ? `<p class=small><b class=warn>${P.noTrade ? 'No-trade day' : 'Cautions'}:</b> ${P.flags.map(f => esc(flagTxt[f] || f)).join(' · ')}</p>` : '<p class="small mu">No caution flags today.</p>'}
+      <label class=small><input type=checkbox id=openNews ${news ? 'checked' : ''}> Big news today (CPI, jobs, Fed): stand aside</label>
+      ${after}
+      <p class=small><b>Evidence:</b> <span class="tag warn">untested idea · not a signal</span> The 9:30 breakout with a ${P.orbMin}-minute range came out about breakeven after costs on Nov 2025–Nov 2026 (${P.orbMin === 30 ? '+0.008R' : '−0.015R'} a trade, H4), though breakouts at 9:30 did about +0.3R better than at random times. The overnight range did predict how big the first 2 hours get (H23). Your plan, stop and size decide.</p>`;
+    $('#openNews').onchange = e => { T().openNews = Object.fromEntries(Object.entries(T().openNews || {}).filter(([k]) => k >= nyDate)); T().openNews[nyDate] = e.target.checked; save(); renderOpenPlan(sym); };
+    // learning data: one record per coin per New York day (read before the open, outcome after)
+    const key = sym + '|' + P.date, log = S.openLog = S.openLog || [], r3 = x => x == null ? null : +x.toFixed(3);
+    let rec = log.find(x => x.key === key); const before = JSON.stringify(rec || null); if (!rec) { rec = { key, sym, date: P.date }; log.push(rec); if (log.length > 500) log.splice(0, log.length - 500); }
+    if (P.status === 'pre' || P.status === 'range' || rec.drift == null) Object.assign(rec, { drift: r3(P.drift), trend: P.trend, width: r3(P.width), read: P.read, flags: P.flags.slice(), seen: P.status });
+    if (P.orb && P.orb.complete) rec.orb = { high: P.orb.high, low: P.orb.low };
+    if (P.status === 'live' || P.status === 'done') Object.assign(rec, { trade: t && t.R != null ? { dir: t.dir, R: r3(t.R), why: t.why } : t ? { dir: t.dir, why: t.why } : null, move2h: r3(P.move2h) });
+    if (JSON.stringify(rec) !== before) save();
   }
   const biasTxt = b => `<span class="${b || 'range'}">${b === 'bull' ? 'Bullish' : b === 'bear' ? 'Bearish' : 'Range / unclear'}</span>`;
   function renderChartPanels(A) {
@@ -380,6 +550,7 @@
     const lv = A.levels.slice().sort((a, b) => b.price - a.price);
     $('#levelBox').innerHTML = p == null ? '<p class=mu>Waiting for price…</p>' : `<table>${lv.map(l => `<tr><td>${esc(l.name)}</td><td class=num>${px(l.price)}</td><td class="num ${cls(l.price - p)}">${((l.price - p) / p * 100).toFixed(2)}%</td></tr>`).join('')}</table>
       ${A.orb ? `<p class=small>ORB (${T().orbAnchor === 'ny' ? '9:30 NY' : T().orbAnchor === 'kraken' ? '00:30 UTC' : '00:00 UTC'}, ${T().orbMin}m): ${px(A.orb.low)}–${px(A.orb.high)} · ${A.orb.complete ? (A.orb.breakout ? `broke <b class="${A.orb.breakout.dir === 'up' ? 'bull' : 'bear'}">${A.orb.breakout.dir}</b> at ${fmtTime(A.orb.breakout.time * 1000)}` : 'no breakout close yet') : 'still forming'}</p>` : ''}`;
+    try { renderOpenPlan(T().sym); } catch (e) { const b = $('#openBox'); if (b) b.innerHTML = '<p class="small warn">Open plan error: ' + esc(e.message || String(e)) + '</p>'; }
     const fv = [];
     for (const iv of [15, 60, 240]) for (const g of (A.fvg[iv] || [])) fv.push(Object.assign({ iv }, g));
     fv.sort((a, b) => Math.abs((a.top + a.bottom) / 2 - p) - Math.abs((b.top + b.bottom) / 2 - p));
@@ -429,8 +600,30 @@
     scanAll = { at: Date.now(), running: false, rows, errors, manual: !!manual };
     renderScanAll();
   }
+  // Trade ideas: short-term (the 15m-4h setup scanner) or long-term (the daily trend system, H15 S2). Owner, Nov 2: generate both, each
+  // graded against what the research has actually shown. Ideas only: the app never places orders; his rules and risk profile still apply.
+  function longIdeas() {
+    if (!window.PDTrend) return '<p class=mu>Loading…</p>';
+    const tf = trendForward(), now = Date.now(), P = prices(), n = tf.trades.length;
+    const cards = tf.coins.map(k => {
+      if (k.loading) return `<div class=sc><b>${esc(C.base(k.sym))}</b> <span class=mu>${k.have ? `needs ${PDTrend.WARM + 2} days of daily candles, has ${k.have}` : 'loading daily candles…'}</span></div>`;
+      const st = k.state, d = st.rule; if (!d) return `<div class=sc><b>${esc(C.base(k.sym))}</b> <b>Flat</b> <span class=small>· close ${px(st.close)} between the 20-day (${px(st.fast)}) and 50-day (${px(st.slow)}) rules: no long-term trade. No trade is a valid answer.</span></div>`;
+      const entry = k.price != null && Math.abs(k.price / st.close - 1) <= 0.15 ? k.price : st.close, stop = entry - d * 2 * st.atr;
+      const sizes = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned });
+        const z = C.sizeFor({ sym: k.sym, entry, stop, risk: A.nextRisk, equity: A.equity, usedMargin: A.usedMargin, symNotional: A.openBySym[k.sym] || 0, leverage: C.levMap(a) });
+        const dc = C.directionCheck(d > 0 ? 'long' : 'short', k.sym, (analyses[k.sym] || analyze(k.sym)).struct, S.positions, a.id);
+        return `${esc(a.label || 'Account')}: ${z && z.qty > 0 ? `size ${z.qty} (${usd(z.lossAtStop)} at the stop, ${esc(A.profile.name)} pace)` : '<span class=warn>no room for a new trade</span>'}${dc.known && !dc.ok ? ` · <span class=warn>your both-ways rule says no: ${esc(dc.reasons.join('; '))}</span>` : ''}`; }).join('<br>');
+      const paper = k.open ? `paper position ${k.open.dir === d ? 'already open this way' : 'open the OTHER way (exits at the next close)'}${k.openR != null ? ' · ' + (k.openR >= 0 ? '+' : '') + k.openR.toFixed(2) + 'R' : ''}` : k.preOpen ? `this trend trade started ${fmtTime(k.preOpen.t * 1000, true)}, before your paper start, so the paper record joins at the next fresh signal` : 'the paper record opens it at the next daily open';
+      return `<div class=sc><div class=sc-h><b class="${d > 0 ? 'bull' : 'bear'}">${d > 0 ? 'LONG' : 'SHORT'}</b> <b>${esc(C.base(k.sym))}</b> <span>Daily trend</span></div>
+        <div class=small>Entry about ${px(entry)} (next daily open) · stop ${px(stop)} (2× daily ATR, never widened) · exit when a daily close goes ${d > 0 ? 'below' : 'above'} the 20-day (now ${px(st.fast)}) · no fixed target: it rides the trend</div>
+        <div class=small>${sizes || '<span class=mu>Add an account on the Desk to see sizes.</span>'}</div><div class="small mu">${esc(paper)}</div></div>`; }).join('');
+    return cards + `<p class=small><b>Evidence:</b> <span class="tag up">passed 10-year backtest · label 3</span> +0.069R a trade after costs, 42% winners, mostly from longs, weaker since 2021. Paper record: ${n}/30 closed trades. Worst backtest stretch −28R, so it doesn't fit a 3% evaluation drawdown unless risk per trade is tiny; fine for funded or own money if you choose. Ideas only: your plan, stop and size decide.</p>`;
+  }
   function renderScanAll() {
     const box = $('#scanAllBox'); if (!box) return;
+    const hz = T().ideaHorizon === 'long' ? 'long' : 'short';
+    const tabs = `<div class=row style="margin-bottom:8px"><div class=seg><button data-hz=short class="${hz === 'short' ? 'on' : ''}">Short-term (15m–4h)</button><button data-hz=long class="${hz === 'long' ? 'on' : ''}">Long-term (daily)</button></div></div>`;
+    if (hz === 'long') { box.innerHTML = tabs + longIdeas(); return; }
     const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow, verdictRank); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
     const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
       <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
@@ -438,11 +631,12 @@
     const shown = sb.rows.filter(r => r.gone || r.rank <= 12);
     const body = shown.length ? shown.map(r => r.gone ? goneCard(r) : setupCard('scan', r.rank - 1, r.u, ` <button class="btn sm" data-saweigh="${r.rank - 1}">Weigh</button><div class=small data-saout="${r.rank - 1}"></div>`, r)).join('')
       : (sa.at ? '<p class=mu>No setups on any coin right now. No trade is a valid answer.</p>' : '');
-    box.innerHTML = head + body + (sa.errors.length ? `<p class="small warn">${esc(sa.errors.join(' · '))}</p>` : '') +
-      '<p class="small mu">Sorted: ready first, then alert grade, then best R. Same model as the 24/7 monitor and the replay test, which found no proven edge yet: use these as a watchlist and for paper trades.</p>';
+    box.innerHTML = tabs + head + body + (sa.errors.length ? `<p class="small warn">${esc(sa.errors.join(' · '))}</p>` : '') +
+      '<p class=small><b>Evidence:</b> <span class="tag warn">untested idea · no edge found</span> These FVG and sweep setups were tested 94 ways on 2016–2026 data and none beat random entries after costs. Use them as a watchlist and for paper trades; if you take one live, your plan, stop and size decide.</p><p class="small mu">Sorted: ready first, then alert grade, then best R. Same model as the 24/7 monitor.</p>';
   }
   $('#scanAllBox').addEventListener('click', e => {
     if (e.target.id === 'scanAllGo') { runScanAll(true); return; }
+    const hzb = e.target.closest('[data-hz]'); if (hzb) { T().ideaHorizon = hzb.dataset.hz; save(); renderScanAll(); return; }
     const pb = e.target.closest('[data-sapaper]'); if (pb) { const u = scanAll.rows[+pb.dataset.sapaper]; if (u) paperAdd(u); return; }
     const wb = e.target.closest('[data-saweigh]'); if (!wb) return; const u = scanAll.rows[+wb.dataset.saweigh]; if (!u) return;
     const now = Date.now(), P = prices();
@@ -485,7 +679,7 @@
     if (changed) { savePaper('closed by price'); if (T().notify) for (const t of S.paper.filter(t => t.status === 'closed' && t.closed > Date.now() - 60e3)) ntSend(`Paper ${t.sym} ${t.side}: ${t.why}`, `${t.R >= 0 ? '+' : ''}${t.R.toFixed(2)}R after fees. Paper only.`, 2); }
     if (tab === 'paper') renderPaper();
   }
-  setInterval(() => { try { paperTick(); } catch (e) { console.warn(e); } }, 15000);
+  setInterval(() => { try { paperTick(); } catch (e) { console.warn(e); } }, 5000);   // live price: stop/target checks every 5 s
   // ---------- Simulated prop account for paper trades (same accountState as the Desk) ----------
   const paperAcct = () => S.paperAccts.find(a => a.status === 'active') || null;
   function paperAcctState(a) { return C.accountState(a, C.paperPositions(S.paper, a.id), prices(), Date.now(), { orders: C.paperOrders(S.paper, a.id) }); }
@@ -531,6 +725,35 @@
   const ord = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th');
   const pctl = x => x == null ? '' : ` <span class=mu>(${ord(Math.round(x * 100))} percentile of the year)</span>`;
   function coinCtx(sym) { const c = MKT && MKT.coins && MKT.coins[C.base(sym).replace('XBT', 'BTC')]; return c || null; }
+  // Trade snapshots (owner, Nov 2: learn from as much as possible). Every trade (planned, screenshot, manual, paper) gets a market snapshot at
+  // open and at close: chart read from candles closed by that moment (C.tradeSnapshot) + market context when it was current (within 3 h).
+  // Filled in by a background check, so trades from any path are covered, imported ones included (marked "filled in later").
+  const snapCandles = sym => ({ 15: F.candles(sym, 15), 60: F.candles(sym, 60), 240: F.candles(sym, 240), 1440: F.candles(sym, 1440) });
+  function makeSnap(sym, ms, side, late) {
+    const cs = snapCandles(sym), h1 = cs[60];
+    if (!h1.length) return null;                                                  // no candles loaded yet: try again later
+    if (ms / 1000 < h1[0].time + 20 * 3600) return { missing: 'older than the loaded candle history', at: Math.round(ms / 1000) };
+    const sn = C.tradeSnapshot(cs, Math.round(ms / 1000), side, { tz: T().tz }); if (!sn) return null;
+    const fresh = MKT && MKT.made && Math.abs(Date.parse(MKT.made) - ms) <= 3 * 3600e3;
+    return Object.assign(sn, { ctx: fresh ? ctxSnapshot(sym) : null, filledLater: !!late });
+  }
+  function ensureSnaps() {
+    let changed = false; const now = Date.now(), wanted = new Set();
+    const fill = (o, sym, side, openMs, closeMs) => {
+      o.snap = o.snap || {};
+      if (!o.snap.open && openMs) { const v = makeSnap(sym, openMs, side, now - openMs > 10 * 60e3); if (v) { o.snap.open = v; changed = true; } else wanted.add(sym); }
+      if (!o.snap.close && closeMs) { const v = makeSnap(sym, closeMs, side, now - closeMs > 10 * 60e3); if (v) { o.snap.close = v; changed = true; } else wanted.add(sym); }
+    };
+    for (const p of S.positions) fill(p, p.sym, p.side, p.opened, p.closed ? p.closed.t : null);
+    for (const t of S.paper) if (t.status !== 'pending') fill(t, t.sym, t.side, t.opened, t.status === 'closed' ? t.closed : null);
+    for (const sym of wanted) F.want(sym, [15, 60, 240, 1440]).catch(() => { });
+    if (changed) save();
+  }
+  setTimeout(() => { try { ensureSnaps(); } catch (e) { console.warn('snap', e); } }, 6000);
+  setInterval(() => { try { ensureSnaps(); } catch (e) { console.warn('snap', e); } }, 30000);
+  const snapLine = sn => !sn ? '' : sn.missing ? 'not available (' + sn.missing + ')' : [
+    ['240', '4h'], ['60', '1h'], ['15', '15m']].map(([k, n]) => `${n} ${sn.trend[k] || '?'}`).join(' · ') + ` · ${sn.session} · vol ${sn.volRegime || '?'}` +
+    (sn.nearestLevel ? ` · ${sn.nearestLevel.distAtr} ATR from ${sn.nearestLevel.name}` : '') + (sn.filledLater ? ' (filled in later)' : '');
   function ctxSnapshot(sym) {   // saved with each paper/live trade so the Scorecard can later test whether context matters
     const c = coinCtx(sym); if (!MKT) return null;
     return { at: MKT.made, fundingPctile: c && c.funding ? c.funding.pctile1y : null, fundingAnn: c && c.funding ? +c.funding.annualPct.toFixed(2) : null, oi24h: c && c.oi ? c.oi.chg24h : null,
@@ -743,7 +966,8 @@
     if (pl.setupKey) S.usedSetups[pl.setupKey] = { t: Date.now(), how: 'live', acct: pl.acct };
     return { id: uid(), acct: pl.acct, sym: pl.sym, side: pl.side, qty: o.qty, entry: o.entry, stop: o.stop, origStop: o.stop, tp1: o.tp1 != null ? o.tp1 : pl.tp1, tp2: null,
       tf: pl.tf, setup: pl.setup, thesis: pl.thesis, opened: o.opened, openedUnknown: !!o.openedUnknown, partials: [], stopHist: [{ t: Date.now(), stop: o.stop, why: 'live from plan' }],
-      ref: pl.ref, setupKey: pl.setupKey, tag: pl.tag || 'plan', tagNote: pl.tagNote, verdictAtEntry: pl.verdictAtEntry, ctxAtEntry: pl.ctxAtEntry || ctxSnapshot(pl.sym), source: o.source || 'plan' };
+      ref: pl.ref, setupKey: pl.setupKey, tag: pl.tag || 'plan', tagNote: pl.tagNote, verdictAtEntry: pl.verdictAtEntry, ctxAtEntry: pl.ctxAtEntry || ctxSnapshot(pl.sym), source: o.source || 'plan',
+      orderId: o.orderId || pl.orderId || null };   // entry order ID (owner: note the ID so later TP/SL fills match it)
   }
   function plannedHtml() {
     if (!S.planned.length) return '';
@@ -773,7 +997,7 @@
     }
     if (changed) { posFormDirty = true; saveAndSync('limit'); renderAll(true); }
   }
-  setInterval(() => { try { plannedTick(); } catch (e) { console.warn(e); } }, 15000); setTimeout(() => { try { plannedTick(); } catch (e) { } }, 8000);
+  setInterval(() => { try { plannedTick(); } catch (e) { console.warn(e); } }, 5000);   // live price: limit fills every 5 s setTimeout(() => { try { plannedTick(); } catch (e) { } }, 8000);
   document.addEventListener('click', e => {
     const g = e.target.closest('[data-golive]'); if (g) { const pl = S.planned.find(x => x.id === g.dataset.golive); if (pl) goLive(pl); return; }
     const pd = e.target.closest('[data-placed]'); if (pd) { const pl = S.planned.find(x => x.id === pd.dataset.placed); if (pl) { pl.status = 'placed'; pl.placedAt = Date.now(); saveAndSync('order placed'); renderAll(true); } return; }
@@ -826,23 +1050,86 @@
       ${(L => L.length ? `<details ${fold('sc:lessons')}><summary class=small><b>Lessons from closed trades</b> (the Coach's findings + your tags)</summary><table><tr><th>What went wrong</th><th class=num>Trades</th><th class=num>Avg R</th></tr>${L.map(x => `<tr><td>${esc(x.label)}</td><td class=num>${x.n} of ${x.of}</td><td class="num ${x.avgR > 0 ? 'up' : x.avgR < 0 ? 'dn' : ''}">${x.avgR == null ? '—' : r(x.avgR)}</td></tr>`).join('')}</table><p class="small mu">Counted, never acted on by itself. When one keeps showing up (e.g. stops inside normal noise), that's the evidence to change a rule; a change gets a new model version and its own record.</p></details>` : '')(C.lessons(S.positions))}
       <details ${fold('sc:models')}><summary class=small><b>Model versions</b></summary><table>${C.MODELS.slice().reverse().map(m => `<tr><td><b>${m.id}</b></td><td class=small>${m.from ? new Date(m.from).toISOString().slice(0, 10) : '—'}</td><td class=small>${esc(m.note)}</td></tr>`).join('')}</table></details></div>`;
   }
+  // Paper open R from the LIVE price (owner, Nov 2: use live price where prudent); falls back to the last saved value.
+  const liveR = t => { if (t.status !== 'open') return t.openR; const p0 = pnlPrice(t.sym); return p0 != null ? C.paperR(Object.assign({ stop0: t.stop }, t), p0, Date.now()) : t.openR; };
+  // Daily trend system (H15 S2, passed its pre-registered test Nov 2 2026, label 3): paper-forward record from the day he started it.
+  // Pure replay of the shared rules (js/trend.js) over Kraken's closed daily candles, counting only trades ENTERED on or after the start,
+  // so it can't be edited after the fact. No alerts, no sizing: those need his star after 30+ paper trades.
+  const TREND_SYMS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'XRP/USD'];
+  function trendForward() {
+    if (!T().trendStart) { T().trendStart = Math.floor(Date.now() / 86400e3) * 86400; save(); }
+    const now = Date.now() / 1000, out = { start: T().trendStart, coins: [], trades: [], port: { coins: [], trades: [] } };
+    for (const sym of TREND_SYMS) {
+      const c = F.candles(sym, 1440).filter(x => x.time + 86400 <= now);
+      if (c.length < PDTrend.WARM + 2) { out.coins.push({ sym, loading: true, have: c.length }); out.port.coins.push({ sym, loading: true, have: c.length }); continue; }
+      const r = PDTrend.run(c, PDTrend.S2(), sym, { from: T().trendStart }), st = PDTrend.stateNow(c), p0 = pnlPrice(sym);
+      const all = r.open ? null : PDTrend.run(c, PDTrend.S2(), sym, {}).open, preOpen = all && all.t < T().trendStart ? all : null;   // the rules' trade started before his paper start
+      out.trades.push(...r.trades);
+      const sane = p0 != null && Math.abs(p0 / st.close - 1) <= 0.15;   // live price far from the last daily close = a feed mismatch: don't show an R
+      out.coins.push({ sym, state: st, preOpen, open: r.open, openR: r.open && sane ? PDTrend.openR(r.open, p0, now) : null, priceCheck: r.open && p0 != null && !sane, price: p0 });
+      // H19 trend portfolio (passed, label 3): the six daily trend rules at 1/6 size each, same paper-forward rules (only entries from the start count)
+      if (c.length >= PDTrend.PORT.warm + 2) { const pf = PDTrend.portfolio(c, sym, { from: T().trendStart }), rules = PDTrend.PORT.rules.map(e => PDTrend.ENTRIES[e](1).entry(c, c.length - 1));
+        out.port.trades.push(...pf.trades); out.port.coins.push({ sym, rules, open: pf.open.map(o => Object.assign({}, o, { R: sane ? PDTrend.openR(o, p0, now) : null })), priceCheck: pf.open.length && p0 != null && !sane }); }
+      else out.port.coins.push({ sym, loading: true, have: c.length });
+    }
+    return out;
+  }
+  function trendPortCardHtml(tf) {
+    const B = PDTrend.BACKTEST_PORT, P = tf.port, n = P.trades.length, sum = a => a.reduce((s, x) => s + x, 0), sg = (x, d) => (x >= 0 ? '+' : '') + x.toFixed(d);
+    const avg = n ? sum(P.trades.map(x => x.R)) / n : null, tot = sum(P.trades.map(x => x.R * x.w)), ma = tf.trades.length, maTot = sum(tf.trades.map(x => x.R));
+    const rows = P.coins.map(k => k.loading ? `<tr><td>${esc(k.sym)}</td><td colspan=2 class=mu>${k.have ? `needs ${PDTrend.PORT.warm + 2} days of daily candles, has ${k.have}${F.demo ? ' (demo makes up only 60 days)' : ''}` : 'loading daily candles…'}</td></tr>` : (() => {
+      const L = k.rules.filter(x => x > 0).length, Sh = k.rules.filter(x => x < 0).length, oR = k.open.every(o => o.R != null) ? sum(k.open.map(o => o.R * o.w)) : null;
+      const opens = k.open.map(o => `<span class="${o.dir > 0 ? 'up' : 'dn'}" title="${esc(PDTrend.RULE_NAMES[o.rule])}">${esc(o.rule)} ${o.dir > 0 ? 'L' : 'S'}</span>`).join(' ');
+      return `<tr><td><b>${esc(C.base(k.sym))}</b></td><td class=small><b class=up>${L} long</b> · <b class=dn>${Sh} short</b> · ${6 - L - Sh} flat</td>
+        <td class=small>${k.open.length ? `${opens}${oR != null ? ` · <b class="${oR >= 0 ? 'up' : 'dn'}">${sg(oR, 2)}R</b> (at 1/6 each)` : k.priceCheck ? ' · <span class=warn>price check: live price far from the daily candles</span>' : ''}` : '<span class=mu>no paper positions</span>'}</td></tr>`; })()).join('');
+    return `<div class=card><h3>Trend portfolio <span class="tag up">passed backtest · label 3</span> <span class=tag>paper only</span></h3>
+      <p class=small>Six daily trend rules run side by side on each coin, each at 1/6 of one trade's risk, no picking (H19): ${PDTrend.PORT.rules.map(e => `${e} ${esc(PDTrend.RULE_NAMES[e])}`).join(' · ')}. Same fills, 2× ATR stop (never widened) and costs as the trend system above; same start date, and only trades entered from then count.</p>
+      <table><tr><th>Coin</th><th>Rules now</th><th>Paper positions</th></tr>${rows}</table>
+      <p class=small><b>Paper record since ${fmtTime(tf.start * 1000, true)}:</b> ${n ? `${n} closed · avg <b class="${avg >= 0 ? 'up' : 'dn'}">${sg(avg, 3)}R</b> a rule-trade · ${Math.round(100 * P.trades.filter(x => x.R > 0).length / n)}% winners · portfolio total <b>${sg(tot, 2)}R</b>` : 'no closed trades yet'} · backtest: ${sg(B.avgR, 2)}R a rule-trade over 10 years (${sg(B.heldAvgR, 3)}R since Dec 2021), ${Math.round(B.winRate * 100)}% winners. ${n < 30 ? `<span class=warn>${30 - n} more closed trades before judging it.</span>` : ''}</p>
+      <p class=small><b>Side by side (paper):</b> trend system ${ma} closed, ${sg(maTot, 2)}R · portfolio ${n} closed, ${sg(tot, 2)}R. Backtest 2021–2026: portfolio return ÷ worst drawdown 1.08 vs 0.26 for the trend system alone. Judge both after 30+ closed trades each; you decide.</p>
+      <p class="small mu">Worst backtest drawdown ${B.maxDrawdownR.toFixed(1)}R: to stay inside a 3% evaluation that's only about 0.19% of the account per trade (~30 months to +9%), so it's mainly a funded/own-money idea. No alerts or sizing until 30+ paper trades and your ★. Research, not financial advice.</p></div>`;
+  }
+  function trendCardHtml() {
+    for (const sym of TREND_SYMS) F.want(sym, [1440]).catch(() => { });
+    const tf = trendForward(), B = PDTrend.BACKTEST, rs = tf.trades.map(x => x.R), n = rs.length, avg = n ? rs.reduce((a, x) => a + x, 0) / n : null;
+    const nextClose = new Date((Math.floor(Date.now() / 86400e3) + 1) * 86400e3), when = fmtTime(nextClose.getTime(), true);
+    const rows = tf.coins.map(k => k.loading ? `<tr><td>${esc(k.sym)}</td><td colspan=2 class=mu>${k.have ? `needs ${PDTrend.WARM + 2} days of daily candles, has ${k.have}${F.demo ? ' (demo makes up only 60 days)' : ''}` : 'loading daily candles…'}</td></tr>` : `<tr><td><b>${esc(C.base(k.sym))}</b></td>
+      <td class=small>${k.state.rule > 0 ? '<b class=up>Long</b>' : k.state.rule < 0 ? '<b class=dn>Short</b>' : '<b>Flat</b>'} · close ${px(k.state.close)} vs 20-day ${px(k.state.fast)} / 50-day ${px(k.state.slow)}</td>
+      <td class=small>${k.open ? `<b class="${k.open.dir > 0 ? 'up' : 'dn'}">${k.open.dir > 0 ? 'Long' : 'Short'}</b> since ${fmtTime(k.open.t * 1000, true)} @ ${px(k.open.entry)} · stop ${px(k.open.stop)}${k.openR != null ? ` · <b class="${k.openR >= 0 ? 'up' : 'dn'}">${k.openR >= 0 ? '+' : ''}${k.openR.toFixed(2)}R</b>` : k.priceCheck ? ' · <span class=warn>price check: live price far from the daily candles</span>' : ''}` : '<span class=mu>no paper position</span>'}</td></tr>`).join('');
+    return `<div class=card><h3>Daily trend system <span class="tag up">passed backtest · label 3</span> <span class=tag>paper only</span></h3>
+      <p class=small>Rules (tested on 10 years, H15 S2): long when the daily close is above the 50-day average and the 20-day is above the 50-day; exit when the close drops below the 20-day. Short is the mirror image. Stop 2× the daily ATR at entry, never widened. Checked at each daily close (next: ${esc(when)}), filled at the next open. When price sits between the 20- and 50-day averages it exits and re-enters at the same open, as tested; each counts as a trade with full costs.</p>
+      <table><tr><th>Coin</th><th>Rule now</th><th>Paper position</th></tr>${rows}</table>
+      <p class=small><b>Paper record since ${fmtTime(tf.start * 1000, true)}:</b> ${n ? `${n} closed · avg <b class="${avg >= 0 ? 'up' : 'dn'}">${avg >= 0 ? '+' : ''}${avg.toFixed(3)}R</b> · ${Math.round(100 * rs.filter(x => x > 0).length / n)}% winners · total ${rs.reduce((a, x) => a + x, 0).toFixed(2)}R` : 'no closed trades yet'} · backtest: ${B.avgR >= 0 ? '+' : ''}${B.avgR}R a trade, ${Math.round(B.winRate * 100)}% winners. ${n < 30 ? `<span class=warn>${30 - n} more closed trades before judging it.</span>` : ''}</p>
+      <label class=small style="display:inline-flex;gap:4px;align-items:center"><input type=checkbox id=trendChart ${T().trendOnChart ? 'checked' : ''}> Show trend paper positions on the chart</label>
+      <p class="small mu">Small edge (+0.07R a trade), mostly from longs, weaker since 2021, and drawdowns too deep for a 3% evaluation: a funded/own-money idea, not an eval tool. No alerts or sizing until 30+ paper trades and your ★. Research, not financial advice.</p></div>`;
+  }
   function renderPaper() {
     const box = $('#paperBox'); if (!box) return;
     const open = S.paper.filter(t => t.status === 'open' || t.status === 'pending'), closed = S.paper.filter(t => t.status === 'closed').sort((a, b) => b.closed - a.closed), st = C.paperStats(S.paper);
     const r = x => x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R', cls = x => x > 0 ? 'up' : x < 0 ? 'dn' : '';
     const srows = Object.entries(st).map(([k, x]) => `<tr><td>${esc(k)}</td><td class=num>${x.n}</td><td class=num>${x.win == null ? '—' : Math.round(x.win * 100) + '%'}</td><td class="num ${cls(x.avgR)}">${r(x.avgR)}</td><td class="num ${cls(x.totalR)}">${r(x.totalR)}</td></tr>`).join('');
-    box.innerHTML = scorecardHtml() + `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
+    box.innerHTML = scorecardHtml() + trendCardHtml() + trendPortCardHtml(trendForward()) + `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
       <p class=small>Add setups from the Chart tab ("Setups to watch") or the Coach ("Other setups"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
       ${paperAcctCard()}
       <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
-      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.status === 'pending' ? ` <span class="tag warn">limit waiting @ ${px(t.entry)}</span>` : t.order === 'limit' ? ' <span class=tag>limit filled</span>' : t.order === 'market' ? ' <span class=tag>market</span>' : ''}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${t.status === 'pending' ? 'placed ' + fmtTime(t.placedAt, true) : fmtTime(t.opened, true)}</div></td>
-        <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(t.openR)}">${t.status === 'pending' ? `<span class=mu>waiting</span><div class=small>${(p0 => p0 != null ? px(p0) + ' now' : '')(pnlPrice(t.sym))}</div>` : r(t.openR)}${t.status === 'pending' ? '' : t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
+      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<div class=row style="margin:0 0 6px"><button class="btn sm" data-pall="1">Show all on chart</button><button class="btn sm" data-pall="0">Hide all</button><label class=small style="display:inline-flex;gap:4px;align-items:center"><input type=checkbox id=pStops ${T().layers.paperStops !== false ? 'checked' : ''}> Show paper stops</label></div><table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.status === 'pending' ? ` <span class="tag warn">limit waiting @ ${px(t.entry)}</span>` : t.order === 'limit' ? ' <span class=tag>limit filled</span>' : t.order === 'market' ? ' <span class=tag>market</span>' : ''}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${t.status === 'pending' ? 'placed ' + fmtTime(t.placedAt, true) : fmtTime(t.opened, true)}</div><label class=small style="display:inline-flex;gap:4px;align-items:center;margin-top:2px"><input type=checkbox data-pchart="${esc(t.id)}" ${t.onChart ? 'checked' : ''}> Show on chart</label></td>
+        <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(liveR(t))}">${t.status === 'pending' ? `<span class=mu>waiting</span><div class=small>${(p0 => p0 != null ? px(p0) + ' now' : '')(pnlPrice(t.sym))}</div>` : r(liveR(t))}${t.status === 'pending' ? '' : t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
         <td>${(use => use && (use.state === 'planned' || use.state === 'live') ? `<span class="tag ${use.state === 'live' ? 'up' : 'warn'}">${use.state === 'live' ? '✅ Live' : '⏳ Planned'}${use.acct && acctName(use.acct) ? ' · ' + esc(acctName(use.acct)) : ''}</span> ` : `<button class="btn sm pri" data-pp="live" data-id="${esc(t.id)}">Take it live</button> `)(t.setupKey ? C.setupUse(t.setupKey, S.paper, S.positions, S.planned, S.usedSetups) : null)}<button class="btn sm" data-pp="edit" data-id="${esc(t.id)}">Edit</button> <button class="btn sm" data-pp="close" data-id="${esc(t.id)}">Close</button></td></tr>`).join('')}</table>` : '<p class=mu>None. Add one from the setups lists.</p>'}</div>
       <div class=card><h3>Record</h3>${srows ? `<table><tr><th>Group</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Total</th></tr>${srows}</table><p class="small mu">Small samples mean little: 20+ trades per group before reading anything into it.</p>` : '<p class=mu>No closed paper trades yet.</p>'}</div>
       <div class=card><h3>Closed (${closed.length})</h3>${closed.length ? `<table><tr><th>Trade</th><th>Exit</th><th class=num>R</th><th class=num>Best / worst</th></tr>${closed.slice(0, 40).map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}<div class=mu>${fmtTime(t.opened, true)} → ${fmtTime(t.closed, true)}</div></td><td class=small>${esc(t.why)} @ ${px(t.exit)}</td><td class="num ${cls(t.R)}">${r(t.R)}${t.qty ? `<div class=small>${usd(C.paperPositions([Object.assign({}, t, { acct: 'x' })], 'x')[0].closed.realized)}</div>` : ''}</td><td class="num small">+${(t.mfe || 0).toFixed(1)} / -${(t.mae || 0).toFixed(1)}</td></tr>`).join('')}</table>` : '<p class=mu>None yet.</p>'}
         <div class=row style="margin-top:8px"><button class="btn sm" data-pp="clear">Delete all paper trades</button></div></div>`;
   }
+  // Paper trades on the chart (owner, Nov 2): a tick box per open paper trade draws its entry, stop and target on the chart.
+  $('#paperBox').addEventListener('change', e => {
+    if (e.target.id === 'trendChart') { T().trendOnChart = e.target.checked; save(); renderAll(true); return; }
+    if (e.target.id === 'pStops') { T().layers.paperStops = e.target.checked; save(); renderAll(true); return; }
+    const cb = e.target.closest('[data-pchart]'); if (!cb) return;
+    const t = S.paper.find(x => x.id === cb.dataset.pchart); if (!t) return;
+    t.onChart = cb.checked; save(); renderAll(true);
+  });
   $('#paperBox').addEventListener('click', e => {
+    const all = e.target.closest('[data-pall]');
+    if (all) { for (const t of S.paper.filter(x => x.status === 'open' || x.status === 'pending')) t.onChart = all.dataset.pall === '1'; save(); renderAll(true); return; }
     const sb = e.target.closest('[data-score]');
     if (sb) { S.scoreAccepted = Object.assign({}, S.scoreAccepted); if (sb.dataset.to) S.scoreAccepted[sb.dataset.score] = sb.dataset.to; else delete S.scoreAccepted[sb.dataset.score]; save(); autoPush('scorecard'); renderPaper(); return; }
     if (e.target.id === 'ppNew') { const a = paperAcct(); if (a && !confirm('End this paper account and start a new one? Its result is kept in the list.')) return; newPaperAcct($('#ppPlan').value, +$('#ppSize').value, $('#ppProf').value); renderPaper(); return; }
@@ -1227,22 +1514,16 @@
     const stats = `<p class=small>Last 7 days: <b class=up>${oc('win')}</b> wins · <b class=dn>${oc('loss')}</b> losses · ${oc('even')} breakeven${oc('unknown') ? ` · <b class=warn>${oc('unknown')} result unknown</b>` : ''} (win = net after fees above $0)<br><b class=up>${cnt('plan')}</b> followed plan · <b class=warn>${cnt('mistake')}</b> mistakes · <b class=dn>${cnt('rulebreak')}</b> rule breaks · ${cnt('data')} data problems · day resets: ${resets.filter(d => d.kind === 'mistake').length} accident/technical, <b class=dn>${resets.filter(d => d.kind === 'rulebreak').length}</b> rule break</p>`;
     $('#posClosed').innerHTML = stats + (closed.length ? `<table><tr><th>Closed</th><th>Trade</th><th class=num>Net</th><th>Setup · tag</th></tr>${closed.map(p => {
       const tot = C.realizedOfPos(p), known = !p.closed.synced || p.closed.resultKnown;
-      return `<tr><td class=small>${fmtTime(p.closed.t, true)}</td><td>${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)}${p.closed.price ? ' → ' + px(p.closed.price) : ''}<div class=small>${esc(p.closed.note || '')}${p.widened ? ' <span class=warn>stop widened</span>' : ''}${p.tagNote ? ' <span class=dn>' + esc(p.tagNote) + '</span>' : ''}</div></td>
-        <td class="num ${cls(tot)}">${(o => o === 'unknown' ? `— <div><button class="btn sm" data-res="${p.id}">Enter result</button></div>` : `${usd(tot)}<div class=small><b class="${o === 'win' ? 'up' : o === 'loss' ? 'dn' : ''}">${o === 'win' ? 'Win' : o === 'loss' ? 'Loss' : 'Breakeven'}</b>${(r => r == null ? '' : ' · ' + (r >= 0 ? '+' : '') + r.toFixed(2) + 'R')(C.liveR(p))}</div>`)(C.tradeOutcome(p))}</td><td><select data-setup="${p.id}" aria-label="Setup">${C.SETUP_CHOICES.map(([k, l]) => `<option value="${k}" ${k === (p.ref && p.ref.key ? p.ref.key : C.setupKey(p.setup, p.tf)) ? 'selected' : ''}>${l}</option>`).join('')}</select><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>
+      return `<tr><td class=small>${fmtTime(p.closed.t, true)}</td><td>${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)}${p.closed.price ? ' → ' + px(p.closed.price) : ''}<div class=small>${esc(p.closed.note || '')}${p.closed.ledgerSeq ? ` · ledger row #${p.closed.ledgerSeq}${p.closed.ledgerAmt != null ? ' (' + usd(p.closed.ledgerAmt) + ' on the platform)' : ''}` : ''}${p.closed.exitAt ? ' · ' + ({ tp1: 'at take-profit', tp2: 'at TP2', stop: 'at stop', other: 'other price' })[p.closed.exitAt] : ''}${p.snap && p.snap.open ? `<div class=mu>At entry: ${esc(snapLine(p.snap.open))}</div>` : ''}${p.snap && p.snap.close ? `<div class=mu>At close: ${esc(snapLine(p.snap.close))}</div>` : ''}${p.widened ? ' <span class=warn>stop widened</span>' : ''}${p.tagNote ? ' <span class=dn>' + esc(p.tagNote) + '</span>' : ''}</div></td>
+        <td class="num ${cls(tot)}">${(o => o === 'unknown' ? `— <div><button class="btn sm" data-edit="${p.id}">Enter result</button></div>` : `${usd(tot)}<div class=small><b class="${o === 'win' ? 'up' : o === 'loss' ? 'dn' : ''}">${o === 'win' ? 'Win' : o === 'loss' ? 'Loss' : 'Breakeven'}</b>${(r => r == null ? '' : ' · ' + (r >= 0 ? '+' : '') + r.toFixed(2) + 'R')(C.liveR(p))}</div><button class="btn sm" data-edit="${p.id}">Edit</button>`)(C.tradeOutcome(p))}</td><td><select data-setup="${p.id}" aria-label="Setup">${C.SETUP_CHOICES.map(([k, l]) => `<option value="${k}" ${k === (p.ref && p.ref.key ? p.ref.key : C.setupKey(p.setup, p.tf)) ? 'selected' : ''}>${l}</option>`).join('')}</select><select data-tag="${p.id}" aria-label="Tag">${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k].split(' (')[0]}</option>`).join('')}</select></td></tr>
         <tr><td colspan=4 style="padding-top:0">${historyFold(p)}</td></tr>`;
     }).join('')}</table>` : '<p class=mu>Nothing closed yet.</p>');
     const dl = S.accounts.flatMap(a => (a.dayLog || []).map(d => Object.assign({ acct: a.label || C.planOf(a).name }, d))).sort((x, y) => y.t - x.t).slice(0, 10);
     if (dl.length) $('#posClosed').innerHTML += `<h3 style="margin-top:12px">Day resets</h3><table>${dl.map(d => `<tr><td class=small>${fmtTime(d.t, true)}</td><td>${esc(d.acct)}</td><td class="${d.kind === 'rulebreak' ? 'dn' : 'warn'}">${d.kind === 'rulebreak' ? 'Rule break' : 'Accident / technical'}</td><td class=small>${d.trades} trades, ${d.losses} losses${d.note ? ' · ' + esc(d.note) : ''}</td></tr>`).join('')}</table>`;
   }
   $('#posClosed').addEventListener('click', e => {
-    const b = e.target.closest('[data-res]'); if (!b) return; const p = S.positions.find(x => x.id === b.dataset.res); if (!p) return;
-    const v = prompt(`Net result of this trade after fees, in $ (from your platform's Closed list or History). Use a minus sign for a loss, e.g. -25.75:`, '');
-    if (v == null) return; const n = num(v); if (n == null || !isFinite(n)) { alert('Type a number, e.g. -25.75 or 40.10'); return; }
-    // Its result is already inside the imported balance (closed before the sync), so this only records it for wins/losses and R.
-    const part = (p.partials || []).reduce((a, x) => a + (x.realized || 0), 0);
-    p.partials = (p.partials || []).map(x => x.resultKnown === false ? Object.assign({}, x, { realized: 0, resultKnown: true }) : x);
-    p.closed = Object.assign({}, p.closed, { realized: n - part, resultKnown: true, note: (p.closed.note || '') + ' · result entered by you' });
-    save(); renderPositions(); renderAll(true);
+    const b = e.target.closest('[data-edit]'); if (!b) return; const p = S.positions.find(x => x.id === b.dataset.edit); if (!p || !p.closed) return;
+    editClosed(p);
   });
   $('#posClosed').addEventListener('change', e => { const ss = e.target.closest('[data-setup]');
     if (ss) { const p = S.positions.find(x => x.id === ss.dataset.setup); if (p) { p.ref = { key: ss.value, model: (p.ref && p.ref.model) || C.modelAt(p.opened), byHand: true }; save(); renderPositions(); } return; }
@@ -1269,9 +1550,14 @@
       return;
     }
     const isP = pa === 'partial';
+    // Owner, Nov 2: don't make him type the exit: ask where it closed (planned target, stop, or a different price).
+    // A partial on Kraken Prop is always a manual close (no partial TP orders): offer his partial level and the market price instead.
+    const clChoices = (isP ? [p.partialAt != null && { v: 'partial', label: 'At my partial level', px: p.partialAt }, price != null && { v: 'market', label: 'At market now', px: +price.toFixed(6) }]
+      : [p.tp1 != null && { v: 'tp1', label: 'At my take-profit', px: p.tp1 }, p.tp2 != null && { v: 'tp2', label: 'At TP2', px: p.tp2 }, p.stop != null && { v: 'stop', label: 'At my stop', px: p.stop }]).filter(Boolean);
     showModal(`<h3>${isP ? 'Partial close' : 'Close'} ${esc(p.sym)} ${p.side}</h3><div class=form>
-      ${isP ? `<label>Qty closed<input id=clQ type=number step=any placeholder="max ${C.openQty(p)}"></label>` : ''}
-      <label>Exit price<input id=clP type=number step=any value="${price != null ? +price.toFixed(6) : ''}"></label>
+      ${isP ? `<div class=wide><b>How much did you close?</b><div class=row style="margin:4px 0">${[25, 50, 75].map(f => `<button type=button class="btn sm" data-clq="${+(C.openQty(p) * f / 100).toFixed(8)}">${f}% (${+(C.openQty(p) * f / 100).toFixed(6)})</button>`).join('')}</div></div><label>Qty closed<input id=clQ type=number step=any placeholder="max ${C.openQty(p)}"></label>` : ''}
+      ${clChoices.length ? `<div class=wide><b>Where did it close?</b><div class=row id=clWhere style="margin:4px 0">${clChoices.map(c => `<label class="btn sm"><input type=radio name=clW value="${c.v}" data-px="${c.px}"> ${esc(c.label)} ${px(c.px)}</label>`).join('')}<label class="btn sm"><input type=radio name=clW value=other> Different price</label></div><p class="small mu" id=clWhy></p></div>` : ''}
+      <label id=clPL ${clChoices.length ? 'style="display:none"' : ''}>Exit price<input id=clP type=number step=any value="${clChoices.length ? '' : price != null ? +price.toFixed(6) : ''}"></label>
       <label>Realized $ from your platform (optional, overrides estimate)<input id=clR type=number step=any></label>
       <label>Closed at<input id=clT type=datetime-local value="${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}"></label>
       <label>How did it go?<select id=clTag>${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k]}</option>`).join('')}</select></label>
@@ -1279,12 +1565,21 @@
       <p class=small id=clEst></p><div class=row><button class="btn pri" id=clOk>Save</button><button class=btn data-close>Cancel</button></div>`);
     const est = () => { const q = isP ? num($('#clQ').value) : C.openQty(p), xp = num($('#clP').value); if (!q || !xp) return null; const v = C.realizedFor(p, q, xp, Date.parse($('#clT').value) || Date.now()); $('#clEst').textContent = `Estimated net after fees: ${usd(v)}`; return v; };
     document.querySelectorAll('#clP,#clT' + (isP ? ',#clQ' : '')).forEach(x => x.addEventListener('input', est)); est();
+    document.querySelectorAll('[data-clq]').forEach(b => b.addEventListener('click', () => { $('#clQ').value = b.dataset.clq; est(); }));
+    document.querySelectorAll('input[name=clW]').forEach(r => r.addEventListener('change', () => {
+      const other = r.value === 'other'; $('#clPL').style.display = '';
+      $('#clP').value = other ? (price != null ? +price.toFixed(6) : '') : r.dataset.px;
+      $('#clWhy').textContent = r.value === 'stop' ? 'A stop can fill a little worse than its price. If your platform shows a different fill, pick "Different price" or type the realized $ below.' : other ? 'Live price filled in: change it to your actual exit.' : '';
+      est();
+    }));
     $('#clOk').onclick = () => {
       const q = isP ? num($('#clQ').value) : C.openQty(p), xp = num($('#clP').value), t = Date.parse($('#clT').value) || Date.now();
+      const where = (document.querySelector('input[name=clW]:checked') || {}).value || null;
+      if (clChoices.length && !where) { alert(isP ? 'Pick the price: your partial level, market now, or a different price.' : 'Pick where it closed: your take-profit, your stop, or a different price.'); return; }
       if (!q || !xp || q > C.openQty(p) + 1e-12) { alert('Check quantity and exit price.'); return; }
       const rv = num($('#clR').value), v = rv != null ? rv : C.realizedFor(p, q, xp, t);
-      if (isP) { p.partials.push({ t, qty: q, price: xp, realized: v }); if (C.openQty(p) <= 1e-12) p.closed = { t, price: xp, realized: 0, note: $('#clN').value }; }
-      else p.closed = { t, price: xp, realized: v, note: $('#clN').value };
+      if (isP) { p.partials.push({ t, qty: q, price: xp, realized: v, exitAt: where }); if (C.openQty(p) <= 1e-12) p.closed = { t, price: xp, realized: 0, note: $('#clN').value, exitAt: where }; }
+      else p.closed = { t, price: xp, realized: v, note: $('#clN').value, exitAt: where };
       p.tag = $('#clTag').value;
       saveAndSync('close'); closeModal(); renderAll(true);
     };
@@ -1330,13 +1625,18 @@
     fetch(SAMPLE_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(smp), keepalive: true })
       .then(x => { if (x.ok) { seen.push(id); try { localStorage.setItem(SAMPLE_KEY, JSON.stringify(seen.slice(-200))); } catch (e) { } } }).catch(() => { });
   }
+  // Which account a screenshot belongs to: its name on screen, else the one picked, else the one synced last, else the only one.
+  function impAcctGuess(A) {
+    const elig = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded');
+    return (A.label && elig.find(x => x.label === A.label)) || acctById(($('#impAcct') || {}).value) || acctById(T().lastImpAcct) || (elig.length === 1 ? elig[0] : null);
+  }
   function showImport(text, shotTime) {
     const r = C.parseKrakenProp(text, Date.now()); lastImport = { r, shotTime, text };
     const A = r.account, st = $('#impStatus');
     if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length && !Object.keys(r.leverage || {}).length && !(r.orders || []).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
     st.textContent = '';
     const size = A.plan ? C.sizeFromLimits(A.plan, A.drawdownLimit, A.target) : null;
-    const opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${A.label && a.label === A.label ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
+    const g0 = impAcctGuess(A), opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${(A.label ? a.label === A.label : g0 && a.id === g0.id) ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
     const newOpt = A.plan && size ? `<option value="new" ${!S.accounts.some(a => a.label === A.label) ? 'selected' : ''}>+ New: ${esc(A.label || A.plan)} (${usd(size)})</option>` : '';
     const ageMin = (Date.now() - shotTime) / 60000;
     $('#impPreview').innerHTML = `<div class=kv>
@@ -1349,6 +1649,12 @@
         const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} @ ${px(q.entry)}${C.matchPlanned(S.planned.filter(x => x.acct === ac.id), q) ? ' <b>= your planned setup: becomes live</b>' : ''}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} @ ${px(k.pos.entry)}`));
         P.close.forEach(c => li.push(`<b class=dn>− Closed</b> ${esc(c.pos.side)} ${c.pos.qty} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result counted in balance'}`));
         return `<p class=small><b>Changes:</b> ${li.length ? '' : 'none to positions'}${P.keep.length ? ` · ${P.keep.length} unchanged` : ''}</p>${li.length ? '<div class=small>' + li.join('<br>') + '</div>' : ''}`; })()}
+      ${(() => { const ac = impAcctGuess(A); if (!ac) return ''; const K = correctionPlan(ac, r); if (!K.length) return '';
+        return `<p class=small><b>Corrections to closed trades</b> (your screenshot wins over the log; old values kept):<br>${K.map(c => `<b class=warn>✎ Fixes</b> ${esc(c.pos.side)} ${c.pos.qty} ${esc(C.base(c.pos.sym))} @ ${px(c.pos.entry)} closed ${fmtTime(c.pos.closed.t, true)}: exit ${c.from.price != null ? px(c.from.price) : '—'} → <b>${px(c.price)}</b>, result ${c.from.realized != null ? usd(c.from.realized) : '—'} → <b>${usd(c.realized != null ? c.realized : C.realizedFor(c.pos, c.pos.qty, c.price, c.t))}</b> · from ${esc(c.by)}`).join('<br>')}</p>`; })()}
+      ${(() => { const ac = impAcctGuess(A); if (!ac || !(r.orders || []).some(o => (o.type === 'stop' || o.type === 'take-profit') && o.status !== 'working')) return '';
+        const P = orderFillPlan(ac, r), li = P.actions.map(a => `<b class=${a.order.type === 'stop' ? 'dn' : 'up'}>${a.full ? '✓ Closes' : '~ Partly closes'}</b> ${esc(a.pos.side)} ${a.pos.qty} ${esc(C.base(a.pos.sym))} @ ${px(a.pos.entry)}: ${a.order.type === 'stop' ? 'stop' : 'take-profit'} ${a.qty} @ ${px(a.price)}${a.priceKnown ? '' : ' <span class=warn>(order price; a stop can fill worse: a Trades screenshot gives the real fill)</span>'} · matched by ${esc(a.by)}${a.order.orderId ? ' · ID ' + esc(a.order.orderId) : ''}${a.t ? '' : ' · <span class=warn>fill time not on screen: dated at the screenshot</span>'}`)
+          .concat(P.skipped.map(k => `<span class=mu>Skipped ${esc(k.order.type)} ${k.order.qty} @ ${px(k.order.price)}: ${esc(k.why)}</span>`));
+        return li.length ? `<p class=small><b>Take-profit / stop fills:</b><br>${li.join('<br>')}</p>` : ''; })()}
       ${(r.orders || []).length ? `<p class=small><b>Orders read</b> (not positions):<br>${r.orders.map(o => `${o.type === 'limit' ? 'Limit' : o.type === 'market' ? 'Market' : esc(o.type)} ${o.side === 'long' ? 'buy' : 'sell'} ${o.qty} ${esc(o.base)} @ ${px(o.price)} · <b class="${o.status === 'filled' ? 'up' : o.status === 'cancelled' ? 'mu' : 'warn'}">${o.status === 'working' ? 'working, ' + (o.filledPct || 0) + '% filled' : o.status === 'partial' ? o.filledPct + '% filled' : o.status || 'status not on screen'}</b>${o.tp != null ? ' · TP ' + px(o.tp) : ''}${o.sl != null ? ' · SL ' + px(o.sl) : ' · <b class=dn>no SL read</b>'}${o.openedMs ? ' · placed ' + fmtTime(o.openedMs, true) : ''}`).join('<br>')}</p>` : ''}
       ${r.leverage && Object.keys(r.leverage).length ? `<p class=small><b>Leverage read:</b> ${Object.entries(r.leverage).map(([k, v]) => esc(k) + ' ' + v + 'x').join(', ')} (saved to the account)</p>` : ''}
       ${r.ledger && r.ledger.length ? `<p class=small><b>Ledger read:</b> ${r.ledger.length} row(s)${r.ledgerOk ? ', every running balance adds up' : ''} · swap fees ${usd(r.ledgerSum.swap)} · trades and commissions ${usd(r.ledgerSum.trade)}</p>` : ''}
@@ -1361,6 +1667,63 @@
       <p class="small mu">Sync sets this account's equity, balance, daily loss limit, drawdown limit and target to your platform's, replaces its open positions with these (keeping your notes on ones that match), and marks missing ones as closed on your platform.</p>`;
     $('#impGo').onclick = () => applyImport();
   }
+  const appliedOrderIds = acct => S.positions.filter(p => p.acct === acct.id).flatMap(p => (p.partials || []).map(x => x.orderId).concat(p.closed ? [p.closed.orderId] : [])).filter(Boolean);
+  function orderFillPlan(acct, r) { return C.planOrderFills(S.positions.filter(p => p.acct === acct.id && !p.closed), r.orders || [], appliedOrderIds(acct)); }
+  function correctionPlan(acct, r) { return C.planCorrections(S.positions.filter(p => p.acct === acct.id && p.closed), r.closedRows || [], r.orders || [], appliedOrderIds(acct), Date.now()); }
+  // Owner, Nov 2: verified screenshots win over the log. The old values are kept in closed.was so nothing is lost.
+  function fixClosed(p, price, realized, why, extra) {
+    p.closed.was = (p.closed.was || []).concat({ t: Date.now(), price: p.closed.price, realized: p.closed.realized, exitAt: p.closed.exitAt || null, note: p.closed.note || '' }).slice(-10);
+    Object.assign(p.closed, { price, realized, resultKnown: true, note: (p.closed.note || '').replace(/ · (corrected|edited).*$/, '') + ' · ' + why }, extra || {});
+  }
+  // Edit a closed trade (owner, Nov 2): where it closed (target / TP2 / stop / other price) or the platform's net $; old values kept.
+  function editClosed(p) {
+    const part = (p.partials || []).reduce((a, x) => a + (x.realized || 0), 0), q = Math.max(0, p.qty - (p.partials || []).reduce((a, x) => a + x.qty, 0));
+    const ch = [p.tp1 != null && { v: 'tp1', label: 'At my take-profit', px: p.tp1 }, p.tp2 != null && { v: 'tp2', label: 'At TP2', px: p.tp2 }, p.stop != null && { v: 'stop', label: 'At my stop', px: p.stop }].filter(Boolean);
+    showModal(`<h3>Fix closed trade: ${esc(p.sym)} ${p.side} ${p.qty} @ ${px(p.entry)}</h3>
+      <p class=small>Saved now: exit ${p.closed.price != null ? px(p.closed.price) : '—'}, net ${p.closed.resultKnown === false ? 'unknown' : usd(C.realizedOfPos(p))}. Your platform is the truth: fix it here.</p>
+      ${ch.length ? `<div><b>Where did it close?</b><div class=row style="margin:4px 0">${ch.map(c => `<label class="btn sm"><input type=radio name=edW value="${c.v}" data-px="${c.px}"> ${esc(c.label)} ${px(c.px)}</label>`).join('')}<label class="btn sm"><input type=radio name=edW value=other> Different price</label></div></div>` : ''}
+      <div class=form><label id=edPL ${ch.length ? 'style="display:none"' : ''}>Exit price<input id=edP type=number step=any value="${p.closed.price != null ? p.closed.price : ''}"></label>
+      <label>Net $ from your platform (optional, overrides the estimate)<input id=edR type=number step=any placeholder="e.g. 41.53 or -25.75"></label>
+      <label>How did it go?<select id=edTag>${Object.keys(C.TRADE_TAGS).map(k => `<option value="${k}" ${k === (p.tag || 'plan') ? 'selected' : ''}>${C.TRADE_TAGS[k]}</option>`).join('')}</select></label></div>
+      <p class=small id=edEst></p><div class=row><button class="btn pri" id=edOk>Save fix</button><button class=btn data-close>Cancel</button></div>`);
+    const est = () => { const xp = num($('#edP').value), rv = num($('#edR').value); const v = rv != null ? rv : xp && q ? part + C.realizedFor(p, q, xp, p.closed.t) : null;
+      $('#edEst').textContent = v != null ? `New net for the trade: ${usd(v)} (${v > 0 ? 'win' : v < 0 ? 'loss' : 'breakeven'})` : ''; return v; };
+    document.querySelectorAll('input[name=edW]').forEach(r => r.addEventListener('change', () => { $('#edPL').style.display = ''; $('#edP').value = r.value === 'other' ? (p.closed.price != null ? p.closed.price : '') : r.dataset.px; est(); }));
+    document.querySelectorAll('#edP,#edR').forEach(x => x.addEventListener('input', est)); est();
+    $('#edOk').onclick = () => {
+      const where = (document.querySelector('input[name=edW]:checked') || {}).value || null, xp = num($('#edP').value), rv = num($('#edR').value);
+      if (xp == null && rv == null) { alert('Pick where it closed or type the net $ from your platform.'); return; }
+      const total = rv != null ? rv : part + C.realizedFor(p, q, xp, p.closed.t);
+      p.partials = (p.partials || []).map(x => x.resultKnown === false ? Object.assign({}, x, { realized: 0, resultKnown: true }) : x);
+      fixClosed(p, xp != null ? xp : p.closed.price, total - (p.partials || []).reduce((a, x) => a + (x.realized || 0), 0), 'edited by you' + (rv != null ? ' (net from your platform)' : ''), { exitAt: where || p.closed.exitAt || null });
+      p.tag = $('#edTag').value; save(); closeModal(); renderPositions(); renderAll(true);
+    };
+  }
+  function applyOrderFills(acct, r, shotTime) {
+    const plan = orderFillPlan(acct, r);
+    // Ledger: merge the rows read with the ones saved, in the order they happened (numbered), so closes can be linked to their row.
+    if ((r.ledger || []).length && r.ledgerOk !== false) acct.ledger = C.ledgerTimeline(r.ledger, acct.ledger).slice(-500);
+    const usedSeq = new Set(S.positions.filter(p => p.acct === acct.id).flatMap(p => (p.partials || []).map(x => x.ledgerSeq).concat(p.closed ? [p.closed.ledgerSeq] : [])).filter(x => x != null));
+    for (const a of plan.actions) {
+      const p = a.pos, t = a.t || shotTime - 1, gross = (p.side === 'long' ? 1 : -1) * (a.price - p.entry) * a.qty, realized = C.realizedFor(p, a.qty, a.price, t);
+      const lg = C.linkLedger({ t }, gross, acct.ledger, usedSeq); if (lg) usedSeq.add(lg.seq);
+      const rec = { t, qty: a.qty, price: a.price, realized, orderId: a.order.orderId || null, orderType: a.order.type, matchedBy: a.by, priceKnown: a.priceKnown, timeUnknown: !a.t,
+        ledgerSeq: lg ? lg.seq : null, ledgerAmt: lg ? lg.amt : null, source: 'kraken-order' };
+      if (a.order.type === 'take-profit' && a.order.orderId) p.tpOrderId = a.order.orderId; if (a.order.type === 'stop' && a.order.orderId) p.slOrderId = a.order.orderId;
+      const note = `${a.order.type === 'stop' ? 'Stop' : 'Take-profit'} filled on platform${rec.orderId ? ' (order ' + rec.orderId + ')' : ''}`;
+      if (a.full && !(p.partials || []).length) p.closed = Object.assign({ note }, rec);
+      else { p.partials = (p.partials || []).concat(rec); if (C.openQty(p) <= 1e-12) p.closed = { t, price: a.price, realized: 0, note, orderId: rec.orderId, source: 'kraken-order' }; }
+    }
+    // Trades already closed in the app: the platform's Closed list and filled TP/SL orders correct them.
+    for (const c of correctionPlan(acct, r)) {
+      const p = c.pos, realized = c.realized != null ? c.realized : C.realizedFor(p, p.qty, c.price, c.t);
+      fixClosed(p, c.price, realized, `corrected from your ${c.kind === 'closedList' ? "platform's Closed list" : (c.orderType === 'stop' ? 'stop' : 'take-profit') + ' order screenshot (' + c.by + ')'}`,
+        c.kind === 'order' ? { orderId: c.orderId, t: c.t, source: 'kraken-order', exitAt: c.orderType === 'stop' ? 'stop' : 'tp1' } : { source: 'kraken-closed-list' });
+      if (c.kind === 'order' && c.orderId) p[c.orderType === 'stop' ? 'slOrderId' : 'tpOrderId'] = c.orderId;
+      plan.corrected = (plan.corrected || 0) + 1;
+    }
+    return plan;
+  }
   function applyImport() {
     const { r, shotTime } = lastImport, A = r.account, now = Date.now();
     let acct;
@@ -1371,6 +1734,7 @@
       S.accounts.push(acct);
     } else acct = acctById(sel);
     if (!acct) { alert('Pick an account.'); return; }
+    T().lastImpAcct = acct.id;
     // Snapshot sync: the platform's numbers are the truth as of NOW (balance = equity - open P&L doesn't move with price).
     const t = now;
     const before = C.accountState(acct, S.positions, prices(), now, { orders: S.planned });
@@ -1384,6 +1748,9 @@
     // the app's open positions become exactly that list. A match (side + coin + entry) keeps his notes/stop/TP and
     // takes the platform's size; anything not on screen is closed (result from the Closed list when shown, otherwise
     // it's already in the imported balance). Everything is dated at the sync so nothing counts twice.
+    // Take-profit / stop fills (owner, Nov 2): a filled TP/SL order closes its position at the fill price, matched by order ID first.
+    // Done before the position-list sync so a position closed here isn't closed again there. Same plan the preview showed.
+    const fillN2 = applyOrderFills(acct, r, lastImport.shotTime || now);
     const open = S.positions.filter(p => p.acct === acct.id && !p.closed);
     const reconcile = r.positions.length > 0 || r.flat;
     let plan = { keep: [], add: [], close: [], partial: [] };
@@ -1408,6 +1775,11 @@
     // does that itself); cancelled -> the matching plan is removed. Stop/TP orders belong to positions and are skipped here.
     const ordN = { placed: 0, added: 0, filled: 0, cancelled: 0 };
     for (const o of (r.orders || [])) {
+      if ((o.type === 'stop' || o.type === 'take-profit') && o.orderId && o.status !== 'filled') {   // note a working TP/SL order's ID on its position
+        const lvl = p => o.type === 'stop' ? p.stop : p.tp1;
+        const c = S.positions.filter(p => p.acct === acct.id && !p.closed && p.sym === o.sym && p.side !== o.side && (p.orderId && p.orderId === o.parentId || (lvl(p) != null && C.samePx(lvl(p), o.price))));
+        if (c.length === 1) c[0][o.type === 'stop' ? 'slOrderId' : 'tpOrderId'] = o.orderId;
+      }
       if (o.type !== 'limit' && o.type !== 'market') continue;
       const mine = S.planned.filter(x => x.acct === acct.id);
       const pl = (o.orderId && mine.find(x => x.orderId === o.orderId)) || C.matchPlanned(mine, { sym: o.sym, side: o.side, qty: o.qty, entry: o.price });
@@ -1417,7 +1789,7 @@
         else { S.planned.push({ id: uid(), acct: acct.id, sym: o.sym, side: o.side, entry: o.price, stop: o.sl, tp1: o.tp, qty: o.qty, tf: 15, setup: 'Imported', thesis: '',
           ref: { key: 'unlinked', model: C.MODEL }, created: t, status: 'placed', placedAt: o.openedMs || t, orderType: o.type, orderId: o.orderId, source: 'kraken-import' }); ordN.added++; }
       } else if (o.status === 'filled' && pl && !reconcile) {
-        S.positions.push(liveFromPlan(pl, { entry: o.price, qty: o.qty, stop: o.sl != null ? o.sl : pl.stop, tp1: o.tp, opened: o.openedMs || t - 2, source: 'kraken-import' }));
+        S.positions.push(liveFromPlan(pl, { entry: o.price, qty: o.qty, stop: o.sl != null ? o.sl : pl.stop, tp1: o.tp, opened: o.openedMs || t - 2, source: 'kraken-import', orderId: o.orderId }));
         S.planned = S.planned.filter(x => x.id !== pl.id); ordN.filled++;
       } else if (o.status === 'cancelled' && pl) { S.planned = S.planned.filter(x => x.id !== pl.id); ordN.cancelled++; }
     }
@@ -1431,7 +1803,7 @@
         const h = C.fillHistory(p, acct.fills); if (h) { p.opened = Math.min(h.opened, t - 2); p.openedUnknown = false; storyN++; }
       }
     }
-    lastSyncSummary = { fills: fillN, story: storyN, keep: plan.keep.length, add: plan.add.length, partial: plan.partial.length, close: plan.close.length, diff: A.equity > 0 ? before.equity - A.equity : null };
+    lastSyncSummary = { orderFills: fillN2.actions.length, fills: fillN, story: storyN, keep: plan.keep.length, add: plan.add.length, partial: plan.partial.length, close: plan.close.length, diff: A.equity > 0 ? before.equity - A.equity : null };
     // Position detail sheets: stop/target, real open time. Match by side + coin + size (+ entry when shown).
     let setN = 0; const unmatched = [];
     for (const d of r.details) {
@@ -1439,6 +1811,7 @@
       if (d.entry != null && cands.some(p => C.samePx(p.entry, d.entry))) cands = cands.filter(p => C.samePx(p.entry, d.entry));
       const p = cands.find(x => x.stop == null) || cands[0];
       if (!p) { unmatched.push(`${d.side} ${d.qty} ${d.base}`); continue; }
+      if (d.orderId && !p.orderId) p.orderId = d.orderId;
       if (cands.length > 1) unmatched.push(`${d.qty} ${d.base}: ${cands.length} positions share this size, applied to one; check them`);
       if (d.sl != null && d.sl !== p.stop) {
         const wider = p.stop != null && (p.side === 'short' ? d.sl > p.stop : d.sl < p.stop);
@@ -1505,6 +1878,7 @@
             if (to <= 0) fire(p.id + '|stophit', 3, `${tag}: price through the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Re-import to sync.`, 4);
             else if (to < a1 * 0.3) fire(p.id + '|stopnear', 2, `${tag}: close to the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Hold or exit per plan; don't widen it.`, 3); }
           const tgt = p.tp1 != null ? p.tp1 : p.tp2; if (tgt != null && d * (px - tgt) >= 0) fire(p.id + '|tp', 1, `${tag}: target reached`, `Price ${px.toFixed(1)} at target ${tgt}.`, 3);
+          if (p.partialAt != null && d * (px - p.partialAt) >= 0) fire(p.id + '|partial|' + p.partialAt, 1, `${tag}: at your partial level`, `Price ${px.toFixed(1)} reached ${p.partialAt}. If your plan banks a partial here, close part by hand on your platform (Kraken Prop has no partial TP orders).`, 3);
           const h = lastHealth[p.id]; if (h && h.score != null && h.score <= 2) fire(p.id + '|health', 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal, 4);
         }
       }
@@ -1539,10 +1913,11 @@
       const h = lastHealth[p.id] || coachFor(p);
       const notes = window.PDResearch ? PDResearch.coachNotes(p, researchFor(p.sym)) : [];
       const cx = coachCtx(p), plan = cx.ageSec != null && cx.ageSec <= T().maxAge ? C.levelPlan(p, cx) : [];
-      const TY = { stop: 'Move stop to', tp: 'Take profit at', partial: 'Take a partial at' };
+      const TY = { stop: 'Move stop to', tp: 'Take profit at', partial: 'Close part by hand at' };   // Kraken Prop has no partial TP orders (owner, Nov 2)
       return `<div class=card><div class=acct-head><b>${esc(p.sym)} ${p.side.toUpperCase()} · ${C.tfName(p.tf)} ${esc(p.setup)}</b><span class="score s${h.score || 0}">${h.score || '–'}/5 ${h.label}</span></div>
         <p><b>Proposal:</b> ${esc(h.proposal)}</p>${T().dirRule !== false ? (() => { const dc = C.directionCheck(p.side, p.sym, (analyses[p.sym] || analyze(p.sym)).struct, S.positions.filter(x => x.id !== p.id), p.acct); return dc.ok || !dc.known ? '' : `<p class=small><b class=dn>Against your both-ways rule now:</b> ${esc(dc.reasons.join('; '))}</p>`; })() : ''}<div class=items>${h.items.map(i => `<div class="${i.k}"><b>${i.k}</b>${esc(i.t)}</div>`).join('')}</div>
-        ${plan.length ? `<h4 style="margin:10px 0 4px">Suggested levels</h4><table><tr><th>Action</th><th class=num>Price</th><th class=num>R</th><th>Why</th><th></th></tr>${plan.map((x, i) => `<tr><td class=small><b class="${x.type === 'stop' ? 'warn' : 'up'}">${TY[x.type]}</b>${x.rule ? '<div class=tag>your rule</div>' : ''}</td><td class=num>${px(x.price)}</td><td class=num>${x.r == null ? '—' : (x.r >= 0 ? '+' : '') + x.r.toFixed(2) + 'R'}</td><td class=small>${esc(x.why)}</td><td>${x.type !== 'partial' ? `<button class="btn sm" data-setlvl="${esc(p.id)}" data-type="${x.type}" data-px="${x.price}">I set it</button>` : ''}</td></tr>`).join('')}</table>
+        ${plan.length ? `<h4 style="margin:10px 0 4px">Suggested levels</h4><table><tr><th>Action</th><th class=num>Price</th><th class=num>R</th><th>Why</th><th></th></tr>${plan.map((x, i) => `<tr><td class=small><b class="${x.type === 'stop' ? 'warn' : 'up'}">${TY[x.type]}</b>${x.rule ? '<div class=tag>your rule</div>' : ''}</td><td class=num>${px(x.price)}</td><td class=num>${x.r == null ? '—' : (x.r >= 0 ? '+' : '') + x.r.toFixed(2) + 'R'}</td><td class=small>${esc(x.why)}</td><td>${x.type !== 'partial' ? `<button class="btn sm" data-setlvl="${esc(p.id)}" data-type="${x.type}" data-px="${x.price}">I set it</button>` : p.partialAt != null && C.samePx(p.partialAt, x.price) ? `<span class="tag up">alert set</span>` : `<button class="btn sm" data-partalert="${esc(p.id)}" data-px="${x.price}">Alert me there</button>`}</td></tr>`).join('')}</table>
+          ${plan.some(x => x.type === 'partial') ? `<p class=small>Kraken Prop can't hold a partial take-profit order: your TP order closes the whole position. To bank part early, close part by hand when price gets there. "Alert me there" sends a phone alert at that price.${p.partialAt != null ? ` Alert set at ${px(p.partialAt)} <button class="btn sm" data-partalert="${esc(p.id)}" data-px="">Remove</button>` : ''}</p>` : ''}
           <p class="small mu">Set it on your prop platform first, then tap "I set it" so the app matches. Stops shown only tighten, stay at least 1 ATR from price, and are options unless marked "your rule". Not a signal; your plan decides.</p>` : ''}
         ${notes.length ? `<div class=items>${notes.map(t => `<div class=warn><b>research</b>${esc(t)}</div>`).join('')}</div><p class="small mu">Research notes (experimental): what the engine sees against this trade. They don't change the score and never mean widen the stop.</p>` : ''}</div>`;
     }).join('');
@@ -1570,6 +1945,8 @@
   var coachUps = [], coachMem = {};
   $('#coachBox').addEventListener('click', e => {
     const cp = e.target.closest('[data-cpaper]'); if (cp) { const u = coachUps[+cp.dataset.cpaper]; if (u) paperAdd(u); return; }
+    const pa2 = e.target.closest('[data-partalert]');
+    if (pa2) { const p = S.positions.find(x => x.id === pa2.dataset.partalert); if (!p) return; p.partialAt = pa2.dataset.px === '' ? null : +pa2.dataset.px; saveAndSync('partial alert'); renderAll(true); return; }
     const sb = e.target.closest('[data-setlvl]');
     if (sb) {
       const p = S.positions.find(x => x.id === sb.dataset.setlvl), v = +sb.dataset.px; if (!p || !isFinite(v)) return;
@@ -1597,7 +1974,7 @@
     const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'dayResetAt', 'fills', 'anchor', 'dayStartOverride', 'created'];
     const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
     const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
-      stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [] }));
+      stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, krakenSL: !!p.krakenSL, partials: p.partials || [], partialAt: p.partialAt != null ? p.partialAt : null }));
     return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice(), benched: benchedKeys() }, calib: S.calib.slice(-10), accounts: accts, positions: pos, orders: S.planned.filter(x => x.status === 'placed').map(x => ({ acct: x.acct, sym: x.sym, side: x.side, qty: x.qty, entry: x.entry, stop: x.stop, tp1: x.tp1, status: 'placed', placedAt: x.placedAt })) };
   }
   // Auto-send: GitHub fine-grained token (this repo only, Contents read/write), kept in its own key so backups never include it.
@@ -1684,6 +2061,9 @@
         return `<button data-theme="${th.id}" class="${t.theme === th.id ? 'on' : ''}" style="color:${c}">${esc(th.name)}</button>`; }).join('')}</div>
       <label class=small style="display:block;margin-top:10px">Color (slide through every hue)<input type=range id=stHue min=0 max=359 value="${+t.hue || 0}"></label>
       <div class=row style="margin:8px 0 0"><label class=chk><input type=checkbox id=stScan ${t.scan ? 'checked' : ''}> Scanlines</label><label class=chk><input type=checkbox id=stGlow ${t.glow !== false ? 'checked' : ''}> Glow</label></div>
+      <label class=small style="display:block;margin-top:10px">Text brightness <b id=stBoostV>${+t.textBoost || 0}%</b><input type=range id=stBoost min=0 max=100 step=5 value="${+t.textBoost || 0}" style="width:100%" ${t.textWhite ? 'disabled' : ''}></label>
+      <div class="small mu">Brightens text toward white and darkens the cards behind it. Green/red for gains and losses and red/yellow warnings never change.</div>
+      <label class=chk style="margin-top:6px"><input type=checkbox id=stWhite ${t.textWhite ? 'checked' : ''}> All text white</label>
       <label class=small style="display:block;margin-top:10px">Chart colors<select id=stChart><option value=tv ${t.chartStyle !== 'theme' ? 'selected' : ''}>TradingView (green/red candles)</option><option value=theme ${t.chartStyle === 'theme' ? 'selected' : ''}>Match theme (Fallout look)</option></select></label>
       <p class="small mu">Gains and bull read green, losses and bear read red, stops and danger stay red, cautions yellow, in every theme.</p></div>
       <div class=card><h3>Phone alerts</h3>
@@ -1721,6 +2101,8 @@
     document.querySelectorAll('[data-theme]').forEach(b => b.onclick = () => { T().theme = b.dataset.theme; save(); applyTheme(); renderSettings(); });
     $('#stHue').oninput = e => { T().hue = +e.target.value; T().theme = 'custom'; save(); applyTheme(); document.querySelectorAll('[data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === 'custom')); };
     $('#stChart').onchange = e => { T().chartStyle = e.target.value; save(); applyTheme(); };
+    $('#stBoost').oninput = e => { T().textBoost = +e.target.value; $('#stBoostV').textContent = e.target.value + '%'; save(); applyTheme(); };
+    $('#stWhite').onchange = e => { T().textWhite = e.target.checked; $('#stBoost').disabled = e.target.checked; save(); applyTheme(); };
     $('#stScan').onchange = e => { T().scan = e.target.checked; save(); applyTheme(); };
     $('#stGlow').onchange = e => { T().glow = e.target.checked; save(); applyTheme(); };
     if ($('#ntMake')) $('#ntMake').onclick = () => { const b = new Uint8Array(12); crypto.getRandomValues(b); const t = 'pd-' + [...b].map(x => 'abcdefghijkmnpqrstuvwxyz23456789'[x % 32]).join('');
@@ -1736,7 +2118,7 @@
 
   // ---------- Loop ----------
   async function ensureFeeds() {
-    await F.want(T().sym, F.INTERVALS); F.wantMark(T().sym); F.wantRefs(T().sym); F.want('USDT/USD', []);
+    await F.want(T().sym, [...new Set(F.INTERVALS.concat([T().tf]))]); F.wantMark(T().sym); F.wantRefs(T().sym); F.want('USDT/USD', []);
     for (const s of new Set(S.positions.filter(p => !p.closed).map(p => p.sym))) { F.wantMark(s); F.wantRefs(s); await F.want(s, [5, 15, 60, 240, 1440]); }
   }
   let lastFull = 0;

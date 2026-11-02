@@ -101,6 +101,34 @@
     return { median: mid, fresh: rows, outliers, verified: fresh.length >= 2 && outliers.length < fresh.length / 2,
       spreadBps: (ps[ps.length - 1] / ps[0] - 1) * 1e4 };
   }
+  /* Feed reliability log (owner's choice, Nov 2 2026: measure which feed is most reliable instead of guessing).
+     Sampled every 15 s while the app is open. Per UTC day and feed: n = samples, live = samples with a fresh price (<= maxAge s),
+     off = samples where the price was > tolBps from the median of the live feeds (needs 3+ live feeds), drops = live -> not live changes.
+     A gap of more than 60 s since the last sample (app closed, phone asleep) is not counted as a drop. Keeps 30 days. */
+  function feedTally(log, quotes, nowMs, maxAge, tolBps) {
+    maxAge = maxAge || 60; tolBps = tolBps || 15;
+    const L = log && log.days ? log : { days: {}, last: {}, t: 0 };
+    const day = new Date(nowMs).toISOString().slice(0, 10), D = L.days[day] || (L.days[day] = {});
+    const cs = consensus(quotes, maxAge, tolBps), offSet = cs.fresh.length >= 3 ? new Set(cs.outliers) : new Set(), cont = L.t && nowMs - L.t <= 60000;
+    for (const q of quotes) {
+      const r = D[q.name] || (D[q.name] = { n: 0, live: 0, off: 0, drops: 0 }), live = q.price > 0 && q.ageSec != null && q.ageSec <= maxAge;
+      r.n++; if (live) r.live++; if (live && offSet.has(q.name)) r.off++;
+      if (cont && L.last[q.name] === true && !live) r.drops++;
+      L.last[q.name] = live;
+    }
+    L.t = nowMs;
+    for (const k of Object.keys(L.days).sort().slice(0, -30)) delete L.days[k];
+    return L;
+  }
+  /* Summary over the last `days` UTC days: per feed live %, off % (of live samples), drops, hours sampled. Best live % first. */
+  function feedReport(log, nowMs, days) {
+    days = days || 14;
+    const keep = new Set(Array.from({ length: days }, (_, k) => new Date(nowMs - k * 86400000).toISOString().slice(0, 10))), sum = {};
+    for (const [d, feeds] of Object.entries((log && log.days) || {})) { if (!keep.has(d)) continue;
+      for (const [f, r] of Object.entries(feeds)) { const a = sum[f] || (sum[f] = { n: 0, live: 0, off: 0, drops: 0 }); a.n += r.n; a.live += r.live; a.off += r.off; a.drops += r.drops; } }
+    return Object.entries(sum).map(([name, a]) => ({ name, livePct: a.n ? a.live / a.n * 100 : null, offPct: a.live ? a.off / a.live * 100 : null, drops: a.drops, hours: a.n * 15 / 3600 }))
+      .sort((x, y) => (y.livePct || 0) - (x.livePct || 0));
+  }
   /* Calibration to Prop's real price. Each entry: {t, sym, prop, est} where est = the app's estimate at
      that moment. Residual = median of (prop/est - 1) over the last 5 entries from the past 7 days, in bps. */
   function calibration(entries, sym, nowMs) {
@@ -174,10 +202,18 @@
         let openedMs = null;
         if (ot) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ot[1].toLowerCase()) / 3; let h = +ot[4] % 12; if (/p/i.test(ot[6])) h += 12;
           if (mo >= 0) openedMs = new Date(+ot[3], mo, +ot[2], h, +ot[5]).getTime(); }
-        const idm = /Order\s*ID\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{3,}){1,4})/i.exec(body);
+        const idm = /(?:^|\n)\s*Order\s*ID\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{3,}){1,4})/i.exec(body);
+        const pidm = /(?:Parent|Linked|Original|Main)\s*order(?:\s*ID)?\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{3,}){1,4})/i.exec(body);
+        // Fill time of a filled order ("Filled/Close/Last fill/Execution time Nov 2, 2026 at 9:41 AM"), phone's local time.
+        const ft = /(?:Fill(?:ed)?|Close[d]?|Last\s*fill|Execution|Trigger(?:ed)?)\s*time\s*([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2}),?\s*(\d{4})\s*(?:at)?\s*(\d{1,2}):(\d{2})\s*([AP])\.?M/i.exec(body);
+        let filledMs = null;
+        if (ft) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ft[1].toLowerCase()) / 3; let h = +ft[4] % 12; if (/p/i.test(ft[6])) h += 12;
+          if (mo >= 0) filledMs = new Date(+ft[3], mo, +ft[2], h, +ft[5]).getTime(); }
+        const avgFill = g(/(?:Average|Avg\.?)\s*(?:fill(?:ed)?\s*|execution\s*)?price\s*([\d,]+\.?\d*)/i);
         const type = /^limit/i.test(om[1]) ? 'limit' : /^market/i.test(om[1]) ? 'market' : /^stop/i.test(om[1]) ? 'stop' : 'take-profit';
         out.orders.push({ type, side: /buy/i.test(om[2]) ? 'long' : 'short', qty: num(om[3]), base: om[4].toUpperCase(), sym: om[4].toUpperCase() + '/USD', price: num(om[5]),
-          status, filledPct: pct, tp: g(/Take\s*profit\s*price\s*([\d,]+\.?\d*)/i), sl: g(/Stop\s*loss\s*price\s*([\d,]+\.?\d*)/i), openedMs, orderId: idm ? idm[1].toUpperCase() : null });
+          status, filledPct: pct, tp: g(/Take\s*profit\s*price\s*([\d,]+\.?\d*)/i), sl: g(/Stop\s*loss\s*price\s*([\d,]+\.?\d*)/i), openedMs, orderId: idm ? idm[1].toUpperCase() : null,
+          parentId: pidm ? pidm[1].toUpperCase() : null, avgFill, filledMs });
         Tg = Tg.replace(om[0], '\n');
       }
       // The Details tab and the TP/SL tab of one order are two screenshots: join them (same type, side, size and price).
@@ -242,8 +278,9 @@
       let openedMs = null;
       if (ot) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ot[1].toLowerCase()) / 3; let h = +ot[4] % 12; if (/p/i.test(ot[6])) h += 12;
         if (mo >= 0) openedMs = new Date(+ot[3], mo, +ot[2], h, +ot[5]).getTime(); }
+      const did = /Order\s*ID\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{3,}){1,4})/i.exec(body);
       if (tp != null || sl != null || entry != null) out.details.push({ side: dm[1].toLowerCase(), qty: qty2 != null ? qty2 : num(dm[2]), base: dm[3], sym: dm[3] + '/USD',
-        tp, sl, entry, price, openFee: fee, openedMs });
+        tp, sl, entry, price, openFee: fee, openedMs, orderId: did ? did[1].toUpperCase() : null });
     }
     const seenD = new Set();
     out.details = out.details.filter(d => { const k = [d.side, d.qty, d.tp, d.sl, d.entry].join('|'); if (seenD.has(k)) return false; seenD.add(k); return true; });
@@ -780,6 +817,104 @@
     }
     r.anchor = anchor; r.dur = durMin;
     return r;
+  }
+  /* ---- Market open (H4/H23 definitions in docs/research/HYPOTHESES.md; the card and the test share this code) ----
+     New York time. Overnight = 18:00 previous evening to 09:30. Opening range = first orbMin minutes from 09:30.
+     Trade: first 15m close beyond the range before 12:00, next-bar open, stop other side, 2R target, else 16:00 close. */
+  const OPEN = { tz: 'America/New_York', openMin: 570, lastEntryMin: 720, closeMin: 960, onFromMin: 1080, fee: 0.0004, slip: 0.0002, swap4h: 0.000055, readDrift: 0.25 };
+  const nextDate = d => { const t = Date.parse(d + 'T12:00:00Z') + 86400000; return new Date(t).toISOString().slice(0, 10); };
+  /* Group 15m bars by New York trading day: {date, wd, i930, iMid, onH, onL, iFirst}. */
+  function openDays(c, tz) {
+    tz = tz || OPEN.tz; const days = new Map(), get = d => { let x = days.get(d); if (!x) days.set(d, x = { date: d, onH: -Infinity, onL: Infinity, i930: -1, iMid: -1 }); return x; };
+    for (let i = 0; i < c.length; i++) {
+      const p = tzParts(c[i].time, tz);
+      const d = get(p.min >= OPEN.onFromMin ? nextDate(p.date) : p.date);
+      if (p.min >= OPEN.onFromMin || p.min < OPEN.openMin) { d.onH = Math.max(d.onH, c[i].high); d.onL = Math.min(d.onL, c[i].low); }
+      if (p.date === d.date) { if (d.wd == null) d.wd = p.wd; if (p.min === 0) d.iMid = i; if (p.min === OPEN.openMin) d.i930 = i; }
+    }
+    return [...days.values()].sort((a, b) => a.date < b.date ? -1 : 1);
+  }
+  /* 4h trend from 15m bars finished before index i: up / down / mixed. */
+  function trend4h(c, i) {
+    const b = []; for (let k = Math.max(0, i - 26 * 16); k < i; k++) { const t = Math.floor(c[k].time / 14400) * 14400, L = b[b.length - 1];
+      if (L && L.t === t) { L.close = c[k].close; L.n++; } else b.push({ t, close: c[k].close, n: 1 }); }
+    const tNow = i < c.length ? c[i].time : c[c.length - 1].time + 900; if (b.length && b[b.length - 1].t + 14400 > tNow) b.pop();   // drop the unfinished 4h bar
+    if (b.length < 25) return null;
+    const sm = j => { let s = 0; for (let k = j - 19; k <= j; k++) s += b[k].close; return s / 20; }, j = b.length - 1, m = sm(j), m5 = sm(j - 5);
+    return b[j].close > m && m > m5 ? 'up' : b[j].close < m && m < m5 ? 'down' : 'mixed';
+  }
+  function dAtrBefore(d1, tSec) { const f = (d1 || []).filter(x => x.time + 86400 <= tSec); return f.length >= 15 ? atr(f.slice(-15), 14) : null; }
+  /* The H4 trade for one day. Returns null (no trigger), or {dir, entry, stop, risk, R, why, t, exitT} (why 'open' if still running). */
+  function openTrade(c, i930, orbBars, tz) {
+    tz = tz || OPEN.tz; const re = i930 + orbBars - 1; if (re >= c.length) return null;
+    let hi = -Infinity, lo = Infinity; for (let k = i930; k <= re; k++) { hi = Math.max(hi, c[k].high); lo = Math.min(lo, c[k].low); }
+    const date = tzParts(c[i930].time, tz).date;
+    for (let k = re + 1; k < c.length - 1; k++) {
+      const p = tzParts(c[k].time, tz); if (p.date !== date || p.min >= OPEN.lastEntryMin) return null;
+      const dir = c[k].close > hi ? 1 : c[k].close < lo ? -1 : 0; if (!dir) continue;
+      const entry = c[k + 1].open, stop = dir > 0 ? lo : hi, risk = Math.abs(entry - stop); if (!(risk > 0) || dir * (entry - stop) <= 0) return { dir, skipped: 'gap past stop' };
+      const tgt = entry + dir * 2 * risk, tr = { dir, entry, stop, risk, target: tgt, t: c[k + 1].time, hi, lo };
+      const done = (px, j, why) => { const hrs = (c[j].time + 900 - tr.t) / 3600, cost = (OPEN.fee + OPEN.slip) * (entry + px) + OPEN.swap4h * Math.max(1, Math.ceil(hrs / 4)) * entry;
+        return Object.assign(tr, { exit: px, exitT: c[j].time + 900, why, R: (dir * (px - entry) - cost) / risk }); };
+      for (let j = k + 1; j < c.length; j++) {
+        const q = tzParts(c[j].time, tz), b = c[j];
+        if (q.date !== date) return done(c[j - 1].close, j - 1, 'close');
+        if (dir > 0 ? b.low <= stop : b.high >= stop) return done(dir > 0 ? Math.min(b.open, stop) : Math.max(b.open, stop), j, 'stop');
+        if (dir > 0 ? b.high >= tgt : b.low <= tgt) return done(dir > 0 ? Math.max(b.open, tgt) : Math.min(b.open, tgt), j, 'target');
+        if (q.min + 15 >= OPEN.closeMin) return done(b.close, j, 'close');
+      }
+      return Object.assign(tr, { why: 'open', R: null });
+    }
+    return null;
+  }
+  /* Pre-open read for day index k of openDays: drift, trend, overnight width, read. */
+  function openRead(c, d1, days, k) {
+    const d = days[k]; if (!d || d.i930 < 1 || d.iMid < 0) return null;
+    const a = dAtrBefore(d1, c[d.i930].time); if (!a) return null;
+    const price = c[d.i930].open, drift = (price - c[d.iMid].open) / a, trend = trend4h(c, d.i930);
+    const prev = days.slice(Math.max(0, k - 30), k).filter(x => isFinite(x.onH) && x.wd !== 'Sat' && x.wd !== 'Sun').slice(-20).map(x => x.onH - x.onL).sort((x, y) => x - y);
+    const width = prev.length >= 10 ? (d.onH - d.onL) / prev[Math.floor(prev.length / 2)] : null;
+    const read = drift >= OPEN.readDrift && trend === 'up' ? 'up' : drift <= -OPEN.readDrift && trend === 'down' ? 'down' : 'none';
+    return { price, dAtr: a, drift, trend, width, read, onH: d.onH, onL: d.onL, midOpen: c[d.iMid].open };
+  }
+  /* The pre-open card: today's plan for both sides, flags, and (after the open) how it played out. Untested idea, not a signal. */
+  function openPlan(c, d1, nowSec, opt) {
+    opt = opt || {}; const tz = opt.tz || OPEN.tz, orbMin = opt.orbMin === 30 ? 30 : 15, nb = orbMin / 15, now = tzParts(nowSec, tz);
+    if (now.wd === 'Sat' || now.wd === 'Sun') return { status: 'weekend', date: now.date };
+    if (!c || c.length < 200) return { status: 'nodata', date: now.date };
+    const cc = c.slice(-3500), days = openDays(cc, tz), k = days.findIndex(x => x.date === now.date);
+    if (k < 0) return { status: 'nodata', date: now.date };
+    const d = days[k], last = cc[cc.length - 1], pd = (d1 || []).filter(x => x.time + 86400 <= last.time).slice(-1)[0];
+    const plan = { date: now.date, orbMin, status: now.min < OPEN.openMin ? 'pre' : now.min < OPEN.openMin + orbMin ? 'range' : now.min < OPEN.closeMin ? 'live' : 'done',
+      onH: isFinite(d.onH) ? d.onH : null, onL: isFinite(d.onL) ? d.onL : null, pdh: pd ? pd.high : null, pdl: pd ? pd.low : null, price: last.close, flags: [] };
+    let rd = null;
+    if (d.i930 >= 0) rd = openRead(cc, d1, days, k);
+    else { const a = dAtrBefore(d1, nowSec), t = trend4h(cc, cc.length), dr = a && d.iMid >= 0 ? (last.close - cc[d.iMid].open) / a : null;   // before 09:30: read so far
+      rd = a ? { dAtr: a, drift: dr, trend: t, read: dr == null ? 'none' : dr >= OPEN.readDrift && t === 'up' ? 'up' : dr <= -OPEN.readDrift && t === 'down' ? 'down' : 'none', width: null } : null;
+      }
+    Object.assign(plan, rd ? { dAtr: rd.dAtr, drift: rd.drift, trend: rd.trend, width: rd.width, read: rd.read } : { read: 'none' });
+    // Overnight width: the test uses a 20-weekday median (10+ needed); the live feed keeps ~7 days of 15m bars, so the card falls back to 4+ days and says how many.
+    const prevW = days.slice(Math.max(0, k - 30), k).filter(x => isFinite(x.onH) && x.wd !== 'Sat' && x.wd !== 'Sun' && x.i930 >= 0).slice(-20).map(x => x.onH - x.onL).sort((x, y) => x - y);
+    plan.widthDays = prevW.length;
+    if (plan.width == null && prevW.length >= 4 && plan.onH != null) plan.width = (plan.onH - plan.onL) / prevW[Math.floor(prevW.length / 2)];
+    if (d.i930 >= 0 && d.i930 + nb - 1 < cc.length) { let hi = -Infinity, lo = Infinity; for (let j = d.i930; j < d.i930 + nb; j++) { hi = Math.max(hi, cc[j].high); lo = Math.min(lo, cc[j].low); }
+      plan.orb = { high: hi, low: lo, complete: d.i930 + nb - 1 < cc.length - 1 || plan.status === 'live' || plan.status === 'done' }; }
+    const lvAbove = [plan.onH, plan.pdh].filter(x => x != null), lvBelow = [plan.onL, plan.pdl].filter(x => x != null);
+    for (const dir of [1, -1]) { const side = dir > 0 ? 'up' : 'down', s = { trigger: null, entry: null, stop: null, target: null, next: null, withTrend: plan.trend === side };
+      if (plan.orb && plan.orb.complete) { s.trigger = dir > 0 ? plan.orb.high : plan.orb.low; s.stop = dir > 0 ? plan.orb.low : plan.orb.high; const r = Math.abs(s.trigger - s.stop); s.target = s.trigger + dir * 2 * r; }
+      const ref = s.trigger != null ? s.trigger : dir > 0 ? Math.max(...lvAbove.concat(plan.price)) : Math.min(...lvBelow.concat(plan.price));
+      const nx = (dir > 0 ? lvAbove.filter(x => x > ref) : lvBelow.filter(x => x < ref)).sort((x, y) => dir * (x - y))[0]; s.next = nx == null ? null : nx;
+      s.watch = dir > 0 ? (plan.onH != null ? plan.onH : null) : (plan.onL != null ? plan.onL : null); plan[side] = s; }
+    if (plan.dAtr && plan.orb && plan.orb.complete && plan.orb.high - plan.orb.low > 0.5 * plan.dAtr) plan.flags.push('range wide');
+    if (plan.dAtr && plan.drift != null && Math.abs(plan.drift) > 1) plan.flags.push('big overnight move');
+    if (plan.orb && plan.orb.complete && plan.orb.high > plan.orb.low) { plan.costShare = 2 * (OPEN.fee + OPEN.slip) * plan.orb.high / (plan.orb.high - plan.orb.low); if (plan.costShare > 0.25) plan.flags.push('costs big'); }
+    if (plan.width != null && plan.width > 1.5) plan.flags.push('wide overnight');
+    if (plan.width != null && plan.width < 0.67) plan.flags.push('quiet overnight');
+    if (opt.news) plan.flags.push('news');
+    if (d.i930 >= 0 && plan.status !== 'pre' && plan.status !== 'range') { const t = openTrade(cc, d.i930, nb, tz); plan.trade = t ? { dir: t.dir > 0 ? 'up' : 'down', entry: t.entry, stop: t.stop, target: t.target, R: t.R, why: t.why || t.skipped, t: t.t } : null;
+      const j2 = d.i930 + 8; if (j2 < cc.length) plan.move2h = (cc[j2 - 1].close - cc[d.i930].open) / (plan.dAtr || 1); }
+    plan.noTrade = plan.flags.includes('news') || plan.flags.includes('range wide') || plan.flags.includes('big overnight move');
+    return plan;
   }
   /* Key levels from daily candles (UTC days) plus sessions, ORB and VWAP from intraday. */
   function keyLevels(d1, intraday, opt) {
@@ -1345,6 +1480,138 @@
     return plan;
   }
 
+  /* Take-profit / stop fills from order screenshots (owner's request, Nov 2 2026): a filled TP or SL order closes (or partly closes)
+     the open position it belongs to, at its fill price. Matching, strongest first: the order's own ID saved on the position (tpOrderId /
+     slOrderId), the parent order's ID = the position's entry order ID, then the price: same coin, opposite side, size within the open
+     size, and the order's price equal to the position's target (take-profit) or stop (stop). A price match must be the only candidate,
+     otherwise it is skipped and named. An order already applied (its ID is on a close or partial) is never applied again.
+     Returns { actions: [{ pos, order, qty, price, priceKnown, t, full, by }], skipped: [{ order, why }] }. Pure: nothing is changed. */
+  function planOrderFills(appOpen, orders, applied) {
+    const done = new Set(applied || []), out = { actions: [], skipped: [] }, used = new Map();
+    for (const o of (orders || [])) {
+      const isExit = o.type === 'stop' || o.type === 'take-profit';
+      if (!isExit || !(o.status === 'filled' || o.status === 'partial')) continue;
+      if (o.orderId && done.has(o.orderId)) { out.skipped.push({ order: o, why: 'already applied' }); continue; }
+      const left = p => openQty(p) - (used.get(p.id) || 0), opp = p => p.sym === o.sym && p.side !== o.side && left(p) > 1e-12;
+      let pos = null, by = null;
+      if (o.orderId) { pos = appOpen.find(p => opp(p) && (p.tpOrderId === o.orderId || p.slOrderId === o.orderId)); if (pos) by = 'order ID'; }
+      if (!pos && o.parentId) { pos = appOpen.find(p => opp(p) && p.orderId === o.parentId); if (pos) by = 'parent order ID'; }
+      if (!pos) {
+        const lvl = p => o.type === 'take-profit' ? p.tp1 : p.stop;
+        const c = appOpen.filter(p => opp(p) && lvl(p) != null && samePx(lvl(p), o.price));   // any size: on Kraken Prop the TP/SL closes whatever is left after manual partials
+        if (c.length === 1) { pos = c[0]; by = 'price (no ID match)'; }
+        else { out.skipped.push({ order: o, why: c.length ? `${c.length} positions have this ${o.type === 'stop' ? 'stop' : 'target'} and size: tap the position and screenshot its details so the IDs match` : 'no open position with this coin, side, size and price' }); continue; }
+      }
+      const qty = o.status === 'partial' && o.filledPct != null ? +(o.qty * o.filledPct / 100).toFixed(10) : o.qty;
+      const q = o.status === 'partial' ? Math.min(qty, left(pos)) : left(pos), price = o.avgFill != null ? o.avgFill : o.price;
+      used.set(pos.id, (used.get(pos.id) || 0) + q);
+      out.actions.push({ pos, order: o, qty: q, price, priceKnown: o.avgFill != null || o.type === 'take-profit', t: o.filledMs || null, full: Math.abs(left(pos)) < 1e-9 || used.get(pos.id) >= openQty(pos) - 1e-9, by });
+    }
+    return out;
+  }
+  /* Verified screenshots win over what was saved (owner, Nov 2 2026). Corrects trades already CLOSED in the app:
+     1) a row of the platform's Closed list (side, coin, size, entry, its net result and exit) that matches a closed trade whose saved
+        result or exit differs: the platform's numbers replace the app's (Kraken's own net, fees included);
+     2) a filled take-profit / stop order that matched no open position: matched to a closed trade (own ID, parent ID, then a unique
+        price + full size match) and its exit and result are recomputed from the fill.
+     Only trades closed in the last `days` days (default 14), never one with partial closes (those are edited by hand), never the same
+     order twice. Returns [{ pos, kind: 'closedList'|'order', price, realized (null = recompute), t, orderId, by, from }]. Pure. */
+  function planCorrections(appClosed, closedRows, orders, applied, nowMs, days) {
+    const lim = (nowMs || Date.now()) - (days || 14) * 864e5, done = new Set(applied || []), out = [], used = new Set();
+    const ok = p => p.closed && p.closed.t >= lim && !(p.partials || []).length;
+    const tol = (a, b) => a != null && b != null && Math.abs(a - b) <= 0.01;
+    for (const row of (closedRows || [])) {
+      if (row.realized == null) continue;
+      const c = appClosed.filter(p => ok(p) && !used.has(p.id) && p.side === row.side && p.sym === row.sym && samePx(p.entry, row.entry) && Math.abs(p.qty - row.qty) < 1e-9);
+      if (c.length !== 1) continue;
+      const p = c[0], same = tol(p.closed.realized, row.realized) && (row.exit == null || (p.closed.price != null && samePx(p.closed.price, row.exit))) && p.closed.resultKnown !== false;
+      used.add(p.id); if (same) continue;
+      out.push({ pos: p, kind: 'closedList', price: row.exit != null ? row.exit : p.closed.price, realized: row.realized, t: p.closed.t, orderId: p.closed.orderId || null, by: 'platform Closed list', from: { price: p.closed.price, realized: p.closed.realized } });
+    }
+    for (const o of (orders || [])) {
+      if (!(o.type === 'stop' || o.type === 'take-profit') || o.status !== 'filled' || (o.orderId && done.has(o.orderId))) continue;
+      const opp = p => ok(p) && !used.has(p.id) && p.sym === o.sym && p.side !== o.side && (!p.closed.orderId || p.closed.orderId === o.orderId);
+      let pos = o.orderId && appClosed.find(p => opp(p) && (p.tpOrderId === o.orderId || p.slOrderId === o.orderId)), by = pos ? 'order ID' : null;
+      if (!pos && o.parentId) { pos = appClosed.find(p => opp(p) && p.orderId === o.parentId); if (pos) by = 'parent order ID'; }
+      if (!pos) { const lvl = p => o.type === 'take-profit' ? p.tp1 : p.stop;
+        const c = appClosed.filter(p => opp(p) && lvl(p) != null && samePx(lvl(p), o.price));
+        if (c.length === 1) { pos = c[0]; by = 'price (no ID match)'; } }
+      if (!pos) continue;
+      const price = o.avgFill != null ? o.avgFill : o.price;
+      if (pos.closed.price != null && samePx(pos.closed.price, price) && pos.closed.resultKnown !== false && pos.closed.orderId === o.orderId) { used.add(pos.id); continue; }
+      used.add(pos.id);
+      out.push({ pos, kind: 'order', price, realized: null, t: o.filledMs || pos.closed.t, orderId: o.orderId || null, orderType: o.type, by, from: { price: pos.closed.price, realized: pos.closed.realized } });
+    }
+    return out;
+  }
+
+  /* Ledger rows (newest first as Kraken lists them) in the order they happened: oldest first, numbered 1, 2, 3 ... Rows have dates but
+     no times, so the number is the only exact order within a day. Merging with rows saved earlier: a row is the same row when its
+     date, amount and running balance all match. */
+  function ledgerTimeline(rows, saved) {
+    const k = x => [x.date, x.amt, x.bal].join('|'), by = new Map();
+    for (const x of (saved || []).concat(rows || [])) if (!by.has(k(x))) by.set(k(x), Object.assign({}, x));
+    const all = [...by.values()], prev = new Map(), next = new Map();
+    // Each row's running balance minus its amount is the balance just before it, which is the previous row's running balance.
+    // Chaining on that puts rows from any screenshots (newer or older, overlapping or not) in the right order.
+    for (const x of all) {
+      const before = all.filter(y => y !== x && Math.abs(y.bal + x.amt - x.bal) <= 0.0006 && !next.has(y));
+      if (before.length === 1) { prev.set(x, before[0]); next.set(before[0], x); }
+    }
+    const ms = x => Date.parse(x.date + ' UTC') || 0, chains = [];
+    const seen = new Set();
+    for (const h of all.filter(x => !prev.has(x))) { const c = []; for (let x = h; x && !seen.has(x); x = next.get(x)) { seen.add(x); c.push(x); } chains.push(c); }
+    for (const x of all) if (!seen.has(x)) chains.push([x]);   // a loop (bad OCR digits): keep the rows, unlinked
+    chains.sort((p, q) => ms(p[0]) - ms(q[0]));          // separate stretches (a gap between screenshots) go by date
+    const out = [].concat(...chains);
+    out.forEach((x, i) => { x.seq = i + 1; x.ms = ms(x) || null; x.linked = prev.has(x) || next.has(x); });
+    return out;
+  }
+  /* Link a close to its ledger row: a "trade" row on the close's UTC date whose amount is within 2% (or $0.50) of the gross result
+     the app expects, and not linked yet. Evidence only: it shows the platform's own number next to the app's, it doesn't replace it. */
+  function linkLedger(close, gross, timeline, used) {
+    if (!close || close.t == null || gross == null) return null;
+    const day = new Date(close.t).toISOString().slice(0, 10), u = used || new Set();
+    const c = (timeline || []).filter(x => x.kind === 'trade' && !u.has(x.seq) && x.ms != null && new Date(x.ms).toISOString().slice(0, 10) === day
+      && Math.abs(x.amt - gross) <= Math.max(0.5, Math.abs(gross) * 0.02));
+    return c.length === 1 ? c[0] : null;
+  }
+
+  /* Market snapshot for a trade at one moment (owner, Nov 2 2026: the model should learn from as much as possible). Built ONLY from candles
+     closed by tSec (no look-ahead), so it can be filled in later for imported trades from their open/close time. cs = {15, 60, 240, 1440}
+     candle arrays (oldest first); side = 'long' | 'short'. Fields are null when the history doesn't reach that far back. */
+  function tradeSnapshot(cs, tSec, side, opt) {
+    opt = opt || {};
+    const by = (arr, iv) => { const a = arr || []; let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m].time + iv * 60 <= tSec) lo = m + 1; else hi = m; } return a.slice(Math.max(0, lo - 720), lo); };
+    const stub = a => a.length ? a.concat([Object.assign({}, a[a.length - 1], { time: a[a.length - 1].time + 1 })]) : a;
+    const s = { 15: by(cs[15], 15), 60: by(cs[60], 60), 240: by(cs[240], 240), 1440: by(cs[1440], 1440) };
+    const last = s[15].length ? s[15][s[15].length - 1] : s[60].length ? s[60][s[60].length - 1] : null;
+    if (!last) return null;
+    const px = last.close, want = side === 'long' ? 'bull' : 'bear', r2 = x => x == null || !isFinite(x) ? null : +x.toFixed(2), r4 = x => x == null || !isFinite(x) ? null : +x.toFixed(4);
+    const trend = {}, brk = {};
+    for (const iv of [15, 60, 240, 1440]) { if (s[iv].length < 20) { trend[iv] = null; continue; }
+      const st = structure(stub(s[iv])); trend[iv] = st.bias;
+      const e = st.last; brk[iv] = e ? { kind: e.kind, dir: e.dir, agoBars: Math.max(0, Math.round((tSec - e.time) / (iv * 60))) } : null; }
+    const a1 = s[60].length > 15 ? atr(s[60], 14) : null;
+    let volRatio = null; if (s[60].length >= 200) { const rg = x => (x.high - x.low) / x.close, h = s[60];
+      volRatio = (h.slice(-24).reduce((a, x) => a + rg(x), 0) / 24) / (h.reduce((a, x) => a + rg(x), 0) / h.length); }
+    const pct = (arr, n) => arr.length > n ? (px / arr[arr.length - 1 - n].close - 1) * 100 : null;
+    const near = [];
+    for (const iv of [60, 240]) if (s[iv].length >= 30 && a1) for (const g of liveFvgs(stub(s[iv]), 8)) {
+      const dist = px > g.top ? (px - g.top) / a1 : px < g.bottom ? (g.bottom - px) / a1 : 0; near.push({ tf: String(iv), dir: g.dir, distAtr: r2(dist), inside: dist === 0 }); }
+    const nearest = d => near.filter(x => x.dir === d).sort((x, y) => x.distAtr - y.distAtr)[0] || null;
+    let level = null;
+    if (s[1440].length >= 2 && a1) { const L = keyLevels(stub(s[1440]), s[15].length ? stub(s[15]) : null, { tz: opt.tz || 'America/New_York' }).filter(l => l.kind !== 'vwap');
+      const n = L.map(l => ({ name: l.name, kind: l.kind, distAtr: r2(Math.abs(px - l.price) / a1), side: l.price >= px ? 'above' : 'below' })).sort((x, y) => x.distAtr - y.distAtr)[0];
+      level = n || null; }
+    const h = new Date(tSec * 1000).getUTCHours(), dow = new Date(tSec * 1000).getUTCDay();
+    const session = dow === 0 || dow === 6 ? 'weekend' : h < 7 ? 'asia' : h < 13 ? 'london' : h < 21 ? 'newyork' : 'late';
+    const rv = s[15].length > 21 ? rvol(s[15], s[15].length - 1, 20) : null;
+    const agree = [240, 60, 15].filter(iv => trend[iv] === want).length, against = [240, 60, 15].filter(iv => trend[iv] && trend[iv] !== 'range' && trend[iv] !== want).length;
+    return { at: tSec, price: px, trend, lastBreak: brk, trendAgree: agree, trendAgainst: against, atr1h: r2(a1), atrPct: a1 ? r4(a1 / px * 100) : null, volRegime: volRatio == null ? null : volRatio < 0.8 ? 'quiet' : volRatio > 1.25 ? 'expanded' : 'normal', volRatio: r2(volRatio),
+      move4hPct: r2(pct(s[60], 4)), move24hPct: r2(pct(s[60], 24)), rvol15: r2(rv), session, weekday: dow, nearFvgWith: nearest(want), nearFvgAgainst: nearest(want === 'bull' ? 'bear' : 'bull'), nearestLevel: level };
+  }
+
   /* Alert anti-spam, shared by the 24/7 monitor and the in-app alerts so their rules can't drift. An alert fires when its
      condition starts or gets worse; the same alert waits 2h unless it escalates; memory of an alert is kept 3 days.
      alertQueue sorts most urgent first (a breach is never held back behind an idea); alertSettle forgets anything not
@@ -1827,9 +2094,9 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
-    sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };
+    sessionRanges, openingRange, keyLevels, OPEN, openDays, trend4h, openTrade, openRead, openPlan, health, setupsToWatch, fmtUsd, fmtPx, tfName };
   if (typeof module !== 'undefined' && module.exports) module.exports = Core; else root.Core = Core;
 })(typeof window !== 'undefined' ? window : globalThis);

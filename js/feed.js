@@ -141,7 +141,7 @@
 
   // ---- Coinbase fallback (different venue: labeled) ----
   async function cbCandles(sym, iv) {
-    const gran = { 5: 300, 15: 900, 60: 3600, 240: 3600, 1440: 86400 }[iv];
+    const gran = { 1: 60, 5: 300, 15: 900, 60: 3600, 240: 3600, 1440: 86400 }[iv];
     const r = await fetch(`https://api.exchange.coinbase.com/products/${cbPair(sym)}/candles?granularity=${gran}`, { cache: 'no-store' });
     let rows = (await r.json()).map(x => ({ time: x[0], low: x[1], high: x[2], open: x[3], close: x[4], volume: x[5] })).reverse();
     if (iv === 240) {
@@ -188,6 +188,13 @@
           else out.push(Object.assign({}, c, { time: t })); }
         store[key(sym, iv)] = out.slice(-720);
       }
+      // 1m (demo only): split the last 144 five-minute bars into five 1-minute bars each, along a straight path
+      const one = [];
+      for (const c of store[key(sym, 5)].slice(-144)) for (let k = 0; k < 5; k++) {
+        const a = c.open + (c.close - c.open) * k / 5, b = c.open + (c.close - c.open) * (k + 1) / 5;
+        one.push({ time: c.time + 60 * k, open: a, high: Math.max(a, b) * (1 + rnd() * 0.0005), low: Math.min(a, b) * (1 - rnd() * 0.0005), close: b, volume: c.volume / 5 });
+      }
+      store[key(sym, 1)] = one.filter(x => x.time <= now);   // no bars in the future
       setTick(sym, p);
     };
     Object.keys(startPx).forEach(gen);
@@ -198,7 +205,7 @@
         if (markSubs.has(sym)) mark[sym] = { price: p * 1.0002, t: Date.now() };
         if (refSubs.has(sym)) { setRef('Coinbase', sym, p * 0.9999); setRef('Hyperliquid', sym, p * 1.0001); }
         const t = Math.floor(Date.now() / 1000);
-        for (const iv of INTERVALS) {
+        for (const iv of [1].concat(INTERVALS)) {
           const a = store[key(sym, iv)], s = iv * 60, bt = Math.floor(t / s) * s, l = a[a.length - 1];
           if (l.time === bt) { l.high = Math.max(l.high, p); l.low = Math.min(l.low, p); l.close = p; }
           else a.push({ time: bt, open: l.close, high: Math.max(l.close, p), low: Math.min(l.close, p), close: p, volume: 1 });
