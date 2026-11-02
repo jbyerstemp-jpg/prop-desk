@@ -386,7 +386,8 @@
     $('#fvgBox').innerHTML = fv.length ? `<table><tr><th>TF</th><th>Side</th><th class=num>Zone</th><th>State</th></tr>${fv.slice(0, 8).map(g => `<tr><td>${C.tfName(g.iv)}</td><td class="${g.dir}">${g.dir}</td><td class=num>${px(g.bottom)}–${px(g.top)}</td><td class=small>${g.status}</td></tr>`).join('')}</table>
       <p class="small mu">FVG = 3-candle gap ≥0.15 ATR, closed candles only. Filled ones are dropped.</p>` : '<p class=mu>None open near price (or still loading).</p>';
     const ups = C.sortLive(C.scanSetups(A.sym, A, Date.now()), liveOf, fitsNow);
-    $('#setupBox').innerHTML = sizeAcctPicker() + (ups.length ? ups.map((u, i) => setupCard('chart', i, u, ` <button class="btn sm" data-weigh="${i}">Weigh it</button><div class=small data-weighout="${i}"></div>`)).join('')
+    const cb = C.rankBoard(ups, chartMem[A.sym] || {}, Date.now()); chartMem[A.sym] = cb.mem;
+    $('#setupBox').innerHTML = sizeAcctPicker() + (cb.rows.length ? cb.rows.map(r => r.gone ? goneCard(r) : setupCard('chart', r.rank - 1, r.u, ` <button class="btn sm" data-weigh="${r.rank - 1}">Weigh it</button><div class=small data-weighout="${r.rank - 1}"></div>`, r)).join('')
       + '<p class="small mu">Scanned both ways, all the time; sized and checked for the account picked above. "Weigh it" checks it against your account rules and sizes it. Needs a retest and your own trigger. No backtest yet: treat as a watchlist.</p>'
       : `<p class=mu>Nothing clean: no open FVG either way within 2 ATR with 2R+ to the next swing, and no fresh liquidity sweep. No trade is a valid answer.</p>`);
     lastUps = ups;
@@ -403,7 +404,7 @@
       <p class="small mu">Impulse = ≥3× ATR, mostly one-way (≥50% efficiency), ≤60 bars, broke the last swing. * = end not confirmed yet (may extend). Leg disappears if price trades back through its start. Volume (Kraken only): × = vs the median of the 20 bars before; continuation signs = heavy leg + light pullback; reversal warning = pullback as heavy as the leg, or a 2×+ bar closing against it near the turn. Untested: fib and volume reads are not backtested.</p>`
       : '<p class=mu>No clean impulse leg on 15m / 1h / 4h right now.</p>';
   }
-  let lastUps = [];
+  let lastUps = [], chartMem = {}, scanMem = {};
   // ---------- Scan all coins: the full model on every coin (FVG + sweeps, both ways, alert grade, traits, profile) ----------
   let scanAll = { at: 0, running: false, rows: [], errors: [] };
   async function runScanAll(manual) {
@@ -433,7 +434,9 @@
     const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
     const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
       <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
-    const body = top.length ? top.map((u, i) => setupCard('scan', i, u, ` <button class="btn sm" data-saweigh="${i}">Weigh</button><div class=small data-saout="${i}"></div>`)).join('')
+    const sb = C.rankBoard(sa.rows, scanMem, Date.now()); scanMem = sb.mem;
+    const shown = sb.rows.filter(r => r.gone || r.rank <= 12);
+    const body = shown.length ? shown.map(r => r.gone ? goneCard(r) : setupCard('scan', r.rank - 1, r.u, ` <button class="btn sm" data-saweigh="${r.rank - 1}">Weigh</button><div class=small data-saout="${r.rank - 1}"></div>`, r)).join('')
       : (sa.at ? '<p class=mu>No setups on any coin right now. No trade is a valid answer.</p>' : '');
     box.innerHTML = head + body + (sa.errors.length ? `<p class="small warn">${esc(sa.errors.join(' · '))}</p>` : '') +
       '<p class="small mu">Sorted: ready first, then alert grade, then best R. Same model as the 24/7 monitor and the replay test, which found no proven edge yet: use these as a watchlist and for paper trades.</p>';
