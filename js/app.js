@@ -547,14 +547,23 @@
   function sizeAcctPicker() { const L = liveAccts(); if (L.length < 2) return '';
     return `<label class=small style="display:block;margin:0 0 6px">Sizing for <select data-sizeacct>${L.map(a => `<option value="${a.id}" ${sizeAcct() && sizeAcct().id === a.id ? 'selected' : ''}>${esc(acctName(a.id))} · ${esc(a.phase)}</option>`).join('')}</select></label>`; }
   document.addEventListener('change', e => { const s = e.target.closest('[data-sizeacct]'); if (!s) return; T().sizeAcct = s.value; save(); renderAll(true); });
-  function setupCard(list, i, u, extra) {
+  function setupCard(list, i, u, extra, rk) {
     const g = C.alertGrade(u), lc = liveOf(u), op = { type: lc.order, entry: lc.entry }, ent = lc.entry, rr = lc.rr, fit = fitOf(u, ent), q = fit && fit.qty ? fit.qty : null;
-    return `<div class=sc><div class=sc-h><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span>${rr != null ? ` <span class="${rr >= 2 ? 'up' : rr >= 1 ? '' : 'dn'}" title="Reward:risk from this entry, stop and target, after fees">· ${rr.toFixed(1)}R</span>` : ''}</div>
+    return `<div class=sc><div class=sc-h>${rk ? `<b class=rank>#${rk.rank}</b>${rk.move ? `<span class="${rk.move > 0 ? 'up' : 'dn'}" title="Moved ${rk.move > 0 ? 'up' : 'down'} ${Math.abs(rk.move)} in the last 10 min">${rk.move > 0 ? '↑' : '↓'}${Math.abs(rk.move)}</span>` : ''} ` : ''}<b class="${u.dir === 'long' ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span>${rr != null ? ` <span class="${rr >= 2 ? 'up' : rr >= 1 ? '' : 'dn'}" title="Reward:risk from this entry, stop and target, after fees">· ${rr.toFixed(1)}R</span>` : ''}</div>
       <div class=sc-t>${lc.status === 'valid' ? '<span class="tag up">✓ valid now</span>' : lc.status === 'invalid' ? '<span class="tag dn">✗ not valid now</span>' : `<span class="tag warn">partly valid ${lc.passed}/${lc.total}</span>`}<span class="tag ${g.ok ? 'up' : 'mu'}" title="From the replay on past candles">replay: ${g.ok ? 'alert grade' : 'below grade'}</span>${setupBadge(u.kind, u.tf)}</div>
       ${fit ? `<div class="small ${fit.ok ? 'up' : 'warn'}" style="margin-top:4px">${fit.ok ? `Fits ${esc(acctName(fit.acct.id))}: risks ${usd(fit.risk)} of ${usd(fit.room)} room` : `${esc(acctName(fit.acct.id))} says not now: ${esc(fit.why.join(', ') || 'size 0')}`}</div>` : '<div class="small mu" style="margin-top:4px">Add your prop account on the Desk to size setups.</div>'}
       ${priceBoxes([[op.type === 'market' ? 'Market ~' : op.type === 'none' ? 'Past stop' : 'Limit', op.type === 'none' ? '' : cpVal(ent)], ['Stop', cpVal(u.stop)], ['Target', cpVal(u.target)], ['Size', q != null ? String(q) : '', q != null ? String(+q.toPrecision(4)) : null]])}
       <div class=sc-a>${lc.status === 'invalid' && !useOf(u) ? '<span class="small dn">Not valid now: price is past the stop or under 1R after fees. Skip it.</span>' : setupActions(list, i, u)}${extra || ''} <button class="btn sm" data-copy="${esc(`${u.sym} ${u.dir} · ${op.type === 'market' ? 'market ~' : 'limit'} ${cpVal(ent)} · stop ${cpVal(u.stop)}${u.target != null ? ' · target ' + cpVal(u.target) : ''}${q != null ? ' · size ' + q : ''}`)}">Copy all</button></div>
       <details class=sc-w ${fold('why:' + u.key)}><summary>Why</summary><div>${esc(u.text)}</div><div><b>Live check now:</b> ${lc.items.map(r => `<span class="${r.ok ? 'up' : 'warn'}">${r.ok ? '✓' : '✗'} ${esc(r.t)}</span>`).join(' · ')}</div>${!g.ok && g.why.length ? `<div class=mu>Below alert grade: ${esc(g.why.join('; '))}</div>` : ''}</details></div>`;
+  }
+  // A setup the scanner no longer finds: kept at the bottom, greyed, with why (as far as the price now tells) and when last seen.
+  function goneCard(r) {
+    const u = r.u, lc = liveOf(u), px0 = pnlPrice(u.sym), d = u.dir === 'short' ? -1 : 1;
+    const why = px0 != null && d * (px0 - u.stop) <= 0 ? 'price went through its stop' : px0 != null && u.target != null && d * (px0 - u.target) >= 0 ? 'price already reached its target' : 'its zone was filled or the setup changed';
+    const use = useOf(u);
+    return `<div class="sc gone"><div class=sc-h><b class=rank>—</b> <b class="${d > 0 ? 'bull' : 'bear'}">${u.dir.toUpperCase()}</b> <b>${esc(C.base(u.sym))}</b> <span>${u.kind === 'sweep' ? 'Sweep' : 'FVG'} ${esc(C.tfName(u.tf))}</span></div>
+      <div class=sc-t><span class="tag dn">✗ no longer valid</span><span class=tag>last seen ${fmtTime(r.lastSeen, true)}</span>${use ? `<span class=tag>${esc(use.text)}</span>` : ''}</div>
+      <div class="small mu" style="margin-top:4px">Dropped off: ${why}. Entry was ${px(u.entry)}, stop ${px(u.stop)}${u.target != null ? ', target ' + px(u.target) : ''}. Clears after 4 h.</div></div>`;
   }
   async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch (e) { try { const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } catch (e2) { return false; } } }
   document.addEventListener('click', async e => {
@@ -1428,7 +1437,8 @@
     }).join('');
     const sym = T().sym, A = analyses[sym] || analyze(sym);
     const ups = C.scanSetups(sym, A, now);
-    coachUps = C.sortLive(ups, liveOf, fitsNow).slice(0, 5);
+    coachUps = C.sortLive(ups, liveOf, fitsNow);
+    const board = C.rankBoard(coachUps, coachMem[sym] || {}, now); coachMem[sym] = board.mem;
     const reviews = liveAccts().map(a => {
       const R = C.accountReview(a, S.positions, P, now, { orders: S.planned }), st = R.state;
       const syms = [...new Set(S.positions.filter(p => p.acct === a.id && !p.closed && p.stop == null && p.krakenSL).map(p => p.sym + '|' + p.side))];
@@ -1441,10 +1451,10 @@
     }).join('');
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
-      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>top 5 · valid now first</span></h3>${sizeAcctPicker()}${coachUps.length ? coachUps.map((u, i) => setupCard('coach', i, u)).join('') + '<p class="small mu">Sorted by the live check: valid in the market now first, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
+      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>ranked · most valid first</span></h3>${sizeAcctPicker()}${board.rows.length ? board.rows.map(r => r.gone ? goneCard(r) : setupCard('coach', r.rank - 1, r.u, '', r)).join('') + '<p class="small mu">Ranked by the live check, re-ranked every few seconds: valid in the market now first, then what your account can take, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. ↑/↓ shows a move in the last 10 min. Setups the scanner no longer finds stay at the bottom for 4 h. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
   }
-  var coachUps = [];
+  var coachUps = [], coachMem = {};
   $('#coachBox').addEventListener('click', e => {
     const cp = e.target.closest('[data-cpaper]'); if (cp) { const u = coachUps[+cp.dataset.cpaper]; if (u) paperAdd(u); return; }
     const sb = e.target.closest('[data-setlvl]');

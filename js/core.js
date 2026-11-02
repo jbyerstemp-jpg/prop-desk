@@ -1560,6 +1560,20 @@
     const passed = items.filter(x => x.ok).length, invalid = op.type === 'none' || rr == null || rr < 1;
     return { items, passed, total: items.length, rr, order: op.type, entry: ent, status: invalid ? 'invalid' : passed === items.length ? 'valid' : 'partial' };
   }
+  /* Ranked setups board (owner's request, Nov 2 2026): every current setup numbered by the live ranking (already sorted), with how
+     far it moved since the last update; setups the scanner no longer finds (zone filled, stop hit, swept level lost) drop to the
+     bottom as "no longer valid" with when they were last seen, and clear after keepMs (4 h). mem is carried between updates. */
+  function rankBoard(sorted, mem, nowMs, keepMs) {
+    keepMs = keepMs || 4 * 3600e3; const next = {}, rows = [];
+    sorted.forEach((u, i) => { const prev = mem && mem[u.key], rank = i + 1, live = prev && !prev.gone && prev.rank;
+      const changed = live && prev.rank !== rank, move = changed ? prev.rank - rank : live ? prev.move : null, moveAt = changed ? nowMs : live ? prev.moveAt : null;
+      const showMove = move && moveAt != null && nowMs - moveAt < 10 * 60e3 ? move : null;   // an arrow stays up 10 min after a move
+      rows.push({ u, rank, move: showMove, gone: false, firstSeen: prev ? prev.firstSeen : nowMs });
+      next[u.key] = { u, rank, move, moveAt, last: nowMs, firstSeen: prev ? prev.firstSeen : nowMs }; });
+    const gone = Object.entries(mem || {}).filter(([k, m]) => !next[k] && nowMs - m.last < keepMs).sort((a, b) => b[1].last - a[1].last);
+    for (const [k, m] of gone) { rows.push({ u: m.u, rank: null, move: null, gone: true, lastSeen: m.last, firstSeen: m.firstSeen }); next[k] = Object.assign({}, m, { gone: true }); }
+    return { rows, mem: next };
+  }
   /* Phone alerts for a setup (model M2, owner's choice Nov 1 2026): the replay's alert grade AND valid in the market now. */
   function alertWorthy(e, price, atr1h) { return !!(e.ready && alertGrade(e).ok && liveCheck(e, price, atr1h).status === 'valid'); }
   function sortLive(list, check, fits) {   // valid first, then what his account can take now, then most checks passing, best R:R now, replay grade
@@ -1736,7 +1750,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, health, setupsToWatch, fmtUsd, fmtPx, tfName };

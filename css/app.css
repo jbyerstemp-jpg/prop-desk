@@ -110,3 +110,4 @@ details>summary::before{content:"▸ ";color:var(--acc)}details[open]>summary::b
 .sc-a{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.sc-a>div{flex-basis:100%}
 .sc-w{margin-top:6px;font-size:12px}.sc-w>summary{color:var(--mu);min-height:28px}.sc-w>div{margin-top:4px}
 .hist{margin:6px 0;font-size:12px}.hist td{padding:2px 6px 2px 0;vertical-align:top}.hist td:first-child{white-space:nowrap}
+.rank{display:inline-block;min-width:26px;color:var(--acc)}.sc.gone{opacity:.55}
