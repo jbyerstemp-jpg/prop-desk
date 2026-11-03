@@ -50,6 +50,7 @@ input[type=range]{padding:0;accent-color:var(--acc);width:100%}
 .chartwrap.fs{position:fixed;inset:0;height:100vh;height:100dvh;z-index:50;border-radius:0;border:0}
 .chartwrap.fs .fsx{display:block;position:absolute;top:max(8px,env(safe-area-inset-top));right:70px;z-index:3}
 .chartwrap.fs .fsm{right:150px}
+.chartwrap.fs .fsr{right:240px}
 .chartwrap.fs .fsw{left:8px;right:auto;top:auto;bottom:calc(max(8px,env(safe-area-inset-bottom)) + 28px);opacity:.7;font-size:11px;pointer-events:none}
 .chartwrap.fs .fsh:not([hidden]){display:block;position:absolute;left:8px;right:8px;top:calc(max(8px,env(safe-area-inset-top)) + 40px);z-index:3;background:rgba(0,0,0,.8);padding:6px 8px;border-radius:6px}
 table{width:100%;border-collapse:collapse;font-size:13px}

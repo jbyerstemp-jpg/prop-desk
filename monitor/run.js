@@ -94,6 +94,7 @@ function evaluate(watch, market, prev, now, opt) {
     if (!A.riskKnown && A.open) fire(`${a.id}|nostop`, 2, `${name}: a position has no stop`, 'Risk is unlimited until it has one. Set it on your platform, then re-import.', 4);
     else if (A.stopsBreach) fire(`${a.id}|stopsbreach`, 2, `${name}: stops sit past the breach line`, `If every stop fills, equity lands near ${C.fmtUsd(A.equityIfStopped)}; floor ${C.fmtUsd(A.floor)}.`, 4);
     if (A.reachedTarget) fire(`${a.id}|target`, 1, `🎯 ${name}: equity at the profit target`, 'Check your prop platform (some firms auto-close at the target).', 4);
+    for (const x of [C.resetAlert(A, name, now), C.lossAlert(A, name)]) if (x) fire(`${a.id}|${x.key}`, x.lvl, x.title, x.body, x.prio);
     for (const p of positions.filter(p => p.acct === a.id)) {
       const px = prices[p.sym];
       if (px == null) { fire(`${p.sym}|noprice`, 2, `${p.sym}: monitor can't see the price`, `Kraken data didn't load this run, so stop and target checks for your ${p.sym} position are paused. Check your platform yourself.`, 4); continue; }
@@ -106,6 +107,8 @@ function evaluate(watch, market, prev, now, opt) {
       const tgt = p.tp1 != null ? p.tp1 : p.tp2;
       if (tgt != null && d * (px - tgt) >= 0) fire(`${p.id}|tp`, 1, `${tag}: target reached`, `Price ${C.fmtPx(px)} at/through target ${C.fmtPx(tgt)}. Re-import to sync.`, 3);
       if (p.partialAt != null && d * (px - p.partialAt) >= 0) fire(`${p.id}|partial|${p.partialAt}`, 1, `${tag}: at your partial level`, `Price ${C.fmtPx(px)} reached ${C.fmtPx(p.partialAt)}. If your plan banks a partial here, close part by hand (Kraken Prop has no partial TP orders), then re-import.`, 3);
+      { const sm = C.stopMove(p, px, (data[p.sym] && data[p.sym].atr[60]) || null);
+        if (sm) fire(`${p.id}|stopmove|${sm.kind}`, 1, `${tag}: up ${sm.r.toFixed(1)}R, tighten the stop?`, `Moving the stop to ${C.fmtPx(sm.to)} (${sm.why}) only tightens it and sits 1+ hourly ATR from price. Your plan decides; never widen.`, 3); }
       const dd = data[p.sym];
       if (dd && !dd.light) { const h = C.health(p, { price: px, ageSec: 0, struct: dd.struct, fvg: dd.fvg, levels: dd.levels, atr: dd.atr, acct: A, rules: watch.rules || {}, entryStruct: dd.struct[p.tf] || dd.struct[15], now });
         if (h.score != null && h.score <= 2) fire(`${p.id}|health`, 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal + '. ' + h.items.filter(i => i.k !== 'inferred').slice(0, 2).map(i => i.t).join(' '), 4); }
@@ -117,13 +120,17 @@ function evaluate(watch, market, prev, now, opt) {
       state.lastSummary[a.id] = A.reset;
     }
   }
+  { const os = syms[0], mo = os && market[os]; // NY open heads-up (once a weekday, last 30 min before 09:30)
+    if (mo && mo.c && mo.c[15] && mo.c[1440]) { const x = C.openAlert(mo.c[15], mo.c[1440], now / 1000, os); if (x) fire(x.key, x.lvl, x.title, x.body, x.prio); } }
   // Setups, both directions, all the time, no account involved (owner's rule, Nov 1 2026). Market rules only;
   // the account is weighed in the app when he ticks the idea.
+  const cands = [];   // alert-grade, not benched: what the auto paper trades (H24) pick from, before the trait and second-venue alert filters
   for (const s of syms) {
     if (!data[s] || data[s].light) continue;
     for (const e of C.scanSetups(s, data[s], now)) {
       if (!C.alertWorthy(e, prices[s], data[s].atr && data[s].atr[60])) continue;   // M2: replay alert grade (V4) AND valid in the market now
       if (((watch.rules && watch.rules.benched) || []).includes(C.setupKey(e.kind, e.tf))) continue;   // benched by him on the Scorecard
+      cands.push(e);
       const chosen = (watch.rules && watch.rules.traits) || [], tc = market[s].traits;
       if (chosen.length && !(tc && chosen.every(id => tc[id] === e.dir))) continue;   // his chosen trait filters must all agree
       const x = C.confirmElsewhere(e, market[s].xfvg);
@@ -189,7 +196,7 @@ function evaluate(watch, market, prev, now, opt) {
   const all = state.lastSummary._all; delete state.lastSummary._all;
   if (all) for (const a of (watch.accounts || [])) if (state.lastSummary[a.id] == null) state.lastSummary[a.id] = all;
   // Most urgent first, so the per-run cap never holds back a breach behind an entry idea.
-  return { fired: C.alertQueue(fired), state };
+  return { fired: C.alertQueue(fired), state, cands };
 }
 
 /* After sending: anything not delivered (over the cap, or ntfy failed) is forgotten, so the next run sends it as new. */
@@ -203,19 +210,21 @@ function settle(state, prev, undelivered) {
 }
 
 // ntfy JSON publish keeps emoji in the title; returns true only if ntfy accepted it.
-async function send(topic, f) {
-  try {
-    const r = await fetch('https://ntfy.sh/', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+async function send(topic, f, token) {
+  try {   // token (optional, secret NTFY_TOKEN): publish as a free ntfy account, so the shared Cloudflare address's quota doesn't apply
+    const r = await fetch('https://ntfy.sh/', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
       body: JSON.stringify({ topic, title: f.title, message: f.body, priority: f.prio || 3, tags: [f.prio >= 5 ? 'rotating_light' : 'chart_with_upwards_trend'] }) });
+    send.last = r.ok ? 'ok' : 'ntfy answered ' + r.status;
     return r.ok;
-  } catch (e) { return false; }
+  } catch (e) { send.last = 'could not reach ntfy'; return false; }
 }
+send.last = null;
 
 /* Coins that get the full candle check. rotate=true (5-minute Worker): one coin per run, in turn, to stay inside the
    free CPU limit. Open positions still get the price checks (stop, target, breach, room) every run. */
 function heavyFor(watch, now, rotate) {
   const all = [...new Set((watch.symbols || ['BTC/USD']).concat((watch.positions || []).filter(p => !p.closed).map(p => p.sym)))];
-  return rotate ? [all[Math.floor(now / 300e3) % all.length]] : all;
+  return rotate ? [all[Math.floor(now / (typeof rotate === 'number' ? rotate : 300e3)) % all.length]] : all;   // rotate = the cron period in ms (default 5 min)
 }
 // Tolerate a paste that landed below old content: use the last complete JSON object in the file.
 function parseWatch(text) {
@@ -231,6 +240,44 @@ async function futTicker(sym, cache) {
 }
 
 /* One monitor run. o = { topic, log, rotate, env: { PATTERN_LAB_TOKEN, PATTERN_LAB_REPO } }. Returns the new memory; the caller saves it. */
+/* Auto paper trades in the 24/7 monitor (H24, pre-registered; amendment 1, Nov 3 2026). Pure: step the open ones on the 15m candles,
+   then open the picked ones. file = { trades }, hand = the app's own paper trades (so a setup he already took isn't opened again).
+   o: { prices, atr, c15, benched, hand, now }. Returns { trades, changed, opened, closed }. Paper only; nothing here places an order. */
+function autoPaperStep(file, cands, o) {
+  const now = o.now, trades = (file.trades || []).slice(), opened = [], closed = []; let changed = false;
+  for (let i = 0; i < trades.length; i++) {
+    const t = trades[i]; if (t.status !== 'open' && t.status !== 'pending') continue;
+    const bars = o.c15 && o.c15[t.sym]; if (!bars || !bars.length) continue;
+    const u = C.paperStep(t, bars, 900, (o.prices || {})[t.sym], now); trades[i] = u;
+    if (u.status !== t.status) { changed = true; if (u.status === 'closed') closed.push(u); }
+  }
+  const all = trades.concat(o.hand || []), live = x => x.status === 'open' || x.status === 'pending', day0 = Math.floor(now / 86400e3) * 86400e3;
+  const picks = C.autoPaperPick(cands, { px: o.prices, atr: o.atr, benched: o.benched || [], used: u => all.some(x => x.setupKey === u.key),
+    openSyms: all.filter(live).map(x => x.sym), openAuto: trades.filter(x => live(x)).length, openedToday: trades.filter(x => x.opened >= day0).length });
+  for (const u of picks) {
+    const t = C.autoPaperTrade(u, o.prices[u.sym], o.atr[u.sym], now, { auto: true, src: 'monitor', alertGrade: true, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend });
+    if (t) { trades.push(t); opened.push(t); changed = true; }
+  }
+  return { trades, changed, opened, closed };
+}
+const AUTO_FILE = 'data/auto-paper.json';
+const ghUrl = (env, f) => `https://api.github.com/repos/${env.GH_REPO}/contents/${f}`;
+const ghHead = env => ({ Authorization: 'Bearer ' + env.GH_WRITE_TOKEN, Accept: 'application/vnd.github+json', 'User-Agent': 'prop-desk-monitor', 'X-GitHub-Api-Version': '2022-11-28' });
+async function autoLoad(env) {   // needs the write-capable key GH_WRITE_TOKEN; without it the Worker never writes anything
+  try { const r = await fetch(ghUrl(env, AUTO_FILE) + '?ref=main', { headers: ghHead(env) });
+    if (r.status === 404) return { file: { v: 1, trades: [] }, sha: undefined };
+    if (!r.ok) return { err: 'GitHub refused ' + AUTO_FILE + ' (' + r.status + ')' };
+    const j = await r.json(), f = JSON.parse(decodeURIComponent(escape(atob(String(j.content).replace(/\n/g, ''))))); if (!Array.isArray(f.trades)) f.trades = [];
+    return { file: f, sha: j.sha };
+  } catch (e) { return { err: 'could not read ' + AUTO_FILE }; }
+}
+async function autoSave(env, file, sha, why) {
+  try { const body = { message: 'monitor: auto paper trades (' + why + ')', content: btoa(unescape(encodeURIComponent(JSON.stringify(file, null, 1)))), branch: 'main' }; if (sha) body.sha = sha;
+    const r = await fetch(ghUrl(env, AUTO_FILE), { method: 'PUT', headers: ghHead(env), body: JSON.stringify(body) });
+    return r.ok ? null : r.status === 403 || r.status === 401 ? 'GitHub refused the write (' + r.status + '): GH_WRITE_TOKEN needs Contents read and write on this repo' : 'GitHub write answered ' + r.status;
+  } catch (e) { return 'could not write ' + AUTO_FILE; }
+}
+
 async function runOnce(watch, prev, now, o) {
   o = o || {}; prev = prev || {};
   const log = o.log || (() => { }), env = o.env || {};
@@ -259,9 +306,13 @@ async function runOnce(watch, prev, now, o) {
   if (env.GH_TOKEN && env.GH_REPO) { try { const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/contents/monitor/paper.json`, { headers: { Authorization: 'Bearer ' + env.GH_TOKEN, Accept: 'application/vnd.github.raw+json', 'User-Agent': 'prop-desk-monitor' } }); if (r.ok) market._paper = await r.json(); } catch (e) { log('paper: ' + e.message); } }
   else if (o.readLocal) market._paper = o.readLocal('paper.json');
   if (market._paper && Array.isArray(market._paper.trades)) for (const t of market._paper.trades) if (t.status === 'open' && !want.includes(t.sym)) want.push(t.sym);
+  let auto = null;   // monitor/H24: only with the write-capable secret GH_WRITE_TOKEN
+  if (env.GH_WRITE_TOKEN && env.GH_REPO && !o.noAuto) { auto = await autoLoad(env);
+    if (auto.file) for (const t of auto.file.trades) if ((t.status === 'open' || t.status === 'pending') && !want.includes(t.sym)) want.push(t.sym); }
+  const autoSyms = new Set(auto && auto.file ? auto.file.trades.filter(t => t.status === 'open' || t.status === 'pending').map(t => t.sym) : []);
   for (const s of want) {
     const c = {}, full = heavy.includes(s);
-    for (const iv of (full ? IV : [60])) {
+    for (const iv of (full ? IV : [60]).concat(!full && autoSyms.has(s) ? [15] : [])) {
       try { c[iv] = await candles(s, iv, full ? null : Math.floor(now / 1000) - 30 * 3600); const L = c[iv][c[iv].length - 1]; if (L) { const end = L.time + iv * 60; if (newest == null || end > newest) newest = end; } }
       catch (e) { log(s + ' ' + iv + ' ' + e.message); }
     }
@@ -297,19 +348,31 @@ async function runOnce(watch, prev, now, o) {
     } catch (e) { log(s + ' profile: ' + e.message); }
   }
   market._ageSec = newest != null ? now / 1000 - newest : null;   // > 0: even the newest candle has closed, data is late
-  const { fired, state } = evaluate(watch, market, prev, now, { heavy });
+  const { fired, state, cands } = evaluate(watch, market, prev, now, { heavy });
+  let autoMsg = 'off (no GH_WRITE_TOKEN secret)';
+  if (auto && auto.err) autoMsg = 'error: ' + auto.err;
+  else if (auto) {
+    const prices = {}, atr = {}, c15 = {};
+    for (const x of Object.keys(market)) { const m = market[x]; if (x[0] === '_' || !m) continue; if (m.price) prices[x] = m.price; if (m.c && m.c[15]) c15[x] = m.c[15]; if (m.c && m.c[60] && m.c[60].length > 15) atr[x] = C.atr(m.c[60].slice(0, -1), 14); }
+    const ar = autoPaperStep(auto.file, cands || [], { prices, atr, c15, benched: (watch.rules && watch.rules.benched) || [], hand: (market._paper && market._paper.trades) || [], now });
+    const open = ar.trades.filter(t => t.status === 'open' || t.status === 'pending').length;
+    autoMsg = `ok, ${open} open` + (ar.opened.length ? `, opened ${ar.opened.length}` : '') + (ar.closed.length ? `, closed ${ar.closed.length}` : '');
+    if (ar.changed) { const err = await autoSave(env, { v: 1, updated: now, trades: ar.trades }, auto.sha, ar.opened.length ? 'opened ' + ar.opened.map(t => t.sym + ' ' + t.side).join(', ') : 'update'); if (err) autoMsg = 'error: ' + err; }
+  }
   if (!o.topic) log('NTFY_TOPIC not set: alerts printed only, not sent');
   const undelivered = fired.slice(MAX_PER_RUN);
   let sent = 0;
   for (const f of fired.slice(0, MAX_PER_RUN)) {
     log('ALERT ' + f.title);
     if (!o.topic) continue;
-    if (await send(o.topic, f)) sent++; else { log('ntfy did not accept it; will retry next run'); undelivered.push(f); }
+    if (await send(o.topic, f, env.NTFY_TOKEN)) sent++; else { log('ntfy did not accept it; will retry next run'); undelivered.push(f); }
   }
   if (fired.length > MAX_PER_RUN) log(`held back ${fired.length - MAX_PER_RUN} alerts for the next run (anti-spam)`);
   settle(state, prev, undelivered);
   const changed = JSON.stringify([prev.active || {}, prev.sent || {}, prev.lastSummary || null]) !== JSON.stringify([state.active, state.sent, state.lastSummary || null]);
-  return { fired, sent, state, changed, checked: heavy };
+  // Why nothing reached the phone (shown in /health): no channel set, ntfy refused, or simply nothing to send.
+  const ntfy = !o.topic ? 'no channel set (secret NTFY_TOPIC)' : !fired.length ? 'idle' : sent ? 'ok' : (send.last || 'refused') + (/429/.test(send.last || '') && !env.NTFY_TOKEN ? ' (shared address over its daily limit: add the secret NTFY_TOKEN)' : '');
+  return { fired, sent, state, changed, checked: heavy, ntfy, auto: autoMsg };
 }
 
 // GitHub / local run: reads monitor/watch.json, saves monitor/state.json.
@@ -327,4 +390,4 @@ async function main() {
   console.log(r.fired.length ? `${r.fired.length} alert(s)` : 'quiet', r.changed ? '(memory updated)' : '');
 }
 if (typeof require !== 'undefined' && require.main === module) main().catch(e => { console.error(e); process.exit(1); });
-module.exports = { evaluate, settle, contextLine, trackLine, profileLine, strongLean, runOnce, parseWatch, heavyFor, send };
+module.exports = { evaluate, settle, contextLine, trackLine, profileLine, strongLean, runOnce, parseWatch, heavyFor, send, autoPaperStep };

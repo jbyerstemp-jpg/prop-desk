@@ -1,5 +1,5 @@
 # Prop Desk: brief for regular Claude chats
-Public brief for Prop Desk, a hobby project. (updated 2026-11-02, main 12d56ed). Don't edit by hand.
+Public brief for Prop Desk, a hobby project. (updated 2026-11-03, main d9efcc6). Don't edit by hand.
 
 ## How chats work (owner, Nov 2 2026)
 - This is a talk-only session: brainstorm, plan, review ideas or trades. You can't run code or change the repo here, so don't write code unless he asks for a snippet.
@@ -26,6 +26,7 @@ Do: <task, only if he asked for one>
 ## Hard rules (the app and any assistant)
 - No code places orders, moves money or stores exchange keys (Kraken Prop has no API).
 - Free public data only (Kraken spot WS v2 + REST, Kraken Futures mark, Coinbase fallback, Hyperliquid mids cross-check). No paid sources without the owner's OK.
+- Shared-pool uploads wait for the in-app consent choice. The server stores a salted hash of the anonymous install id, never the id, and never size, balance or account fields. Nightly verification and shrinkage must be pre-registered before they change a rating, an alert or a size.
 - Escape all user/third-party text with esc() before innerHTML.
 - Research: pre-register rules and pass bar BEFORE running (docs/research/HYPOTHESES.md), log every variant (RESEARCH-LOG.md), held-out + placebo, never upgrade evidence labels without evidence. Nothing reaches alerts/sizing without held-out confirmation, paper trades and the owner's star.
 - Research results are data for the model engine (monitor/engine-data.json), not setups, alerts or sizing by themselves. The coach still gives ideal setups from current market data (labeled untested unless validated), using engine data as context (owner, Nov 2, 2026).
@@ -43,6 +44,9 @@ Do: <task, only if he asked for one>
 As of Nov 2, 2026 (101 variant runs): no FVG/sweep entry rule beats random entries after costs. FIRST PASS: H15 S2 daily moving-average trend (20/50-day, 2-ATR stop) is profitable after costs on 10 years of daily data, beats random entries and holds at ±20% (label 3, replay-reproduced). The edge is small (+0.069R), mostly long side, weaker since 2021, and its drawdowns (−28R) don't fit a 3% evaluation; it needs 30+ paper trades and the owner's star before any use. Macro regime (H16) did not validate as a filter. SECOND PASS: H19 trend portfolio (six daily trend rules at 1/6 size, no picking) beat the MA trend alone on 2021–2026 (return/drawdown 1.08 vs 0.26, daily t 2.74, label 3); full-period worst drawdown −13.4R vs −35.6R. Drawdown control (H20) did not validate. Still slow for a 3% evaluation (~30 months to +9% at drawdown-safe risk).
 
 ## Next work
+- Shared pool step 2 is not built. Pre-register nightly public-candle verification and shrinkage in docs/research/HYPOTHESES.md before either one changes a rating, alert, size, or Trust/Bench. Step 1 only collects (docs/research/POOL.md).
+- Fresh session: pick one of ownerOpen (confirm the monitor is live is first), or 'Do #n' from tasks/ideas.md. Workflow: brainstorm in a regular chat (Prop Desk project, docs/CHAT.md), save with the FOR THE MASTER REPO block, build in a code session.
+- H24: let auto paper trades collect; when a setup type has 30+ closed auto trades, report by type and model version (auto vs hand-picked) against the pre-registered bar. Optional: have the Worker open them 24/7 once its secrets are set and its key has Contents read/write.
 - Wait for 30+ closed paper trades each on the MA trend system and the H19 trend portfolio (both on the Paper tab since Nov 2, 2026), then compare with the backtest and let the owner decide.
 - Optional (owner): pre-register a 'high-conviction' test: are trend trades where 5–6 of 6 rules agree and all timeframes line up better enough to justify a written, capped larger risk tier?
 - Strategy lab round 2 (owner's choice): candidates are a trend portfolio (several daily trend rules combined, one bet), the MAX new-highs strategy from the literature, and drawdown control on the trend system; pre-register before running.

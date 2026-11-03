@@ -10,7 +10,9 @@ A free, private chart, risk desk and trade coach for prop-firm evaluations and f
 - **Themes:** black background, Pip-Boy style colors with a hue slider. Gains always green, losses always red.
 
 ## Use it
-Open the hosted page and add it to your home screen. Your accounts and trades stay in your browser; use Settings → Export backup.
+Open the hosted page and add it to your home screen. Your accounts, sizes and balances stay in your browser; use Settings → Export backup.
+
+The first time you open the app, both sharing boxes are ticked. Nothing is sent until you tap Save my choice. Untick either box there, or turn them off later in Settings → Shared learning pool. Closed trades go to an anonymous pool (setup, result in R, and for paper trades the prices and hour-rounded times needed to check them on public candles — never size, dollars or account numbers). A screenshot's text layout is sent only when the reader misses something (every number replaced by 9, never the picture). Neither one changes your size or alerts.
 
 ## Rules and data
 - Firm presets: Kraken Prop (Advanced, Intermediate, Starter), checked Nov 1, 2026, plus "Other firm" where you type your firm's rules. Always confirm against your firm's own rules page.

@@ -1208,10 +1208,32 @@
   }
 
   /* Record of closed paper trades, grouped (all / by setup kind / alert grade / with or without volume push). */
+  /* Auto paper trades (H24, pre-registered Nov 3 2026): which scanned setups to open as paper trades. Same grade the phone alerts use
+     (alertWorthy), not benched, not already used; 1 open auto trade per coin, at most cap open (4) and perDay opened per UTC day (6).
+     o: { px: {sym: price}, atr: {sym: 1h ATR}, benched: [keys], used: row -> bool, openSyms: [syms with an open/pending auto trade], openAuto, openedToday, cap, perDay } */
+  function autoPaperPick(rows, o) {
+    const cap = o.cap || 4, perDay = o.perDay || 6, picks = [], syms = new Set(o.openSyms || []);
+    for (const u of rows || []) {
+      if (picks.length + (o.openAuto || 0) >= cap || picks.length + (o.openedToday || 0) >= perDay) break;
+      if (syms.has(u.sym) || !alertWorthy(u, (o.px || {})[u.sym], (o.atr || {})[u.sym])) continue;
+      if ((o.benched || []).includes(setupKey(u.kind, u.tf)) || (o.used && o.used(u))) continue;
+      picks.push(u); syms.add(u.sym);
+    }
+    return picks;
+  }
+  /* Builds the paper trade for one picked setup (market now, or a paper limit that waits), tagged auto. Shared by the app and the 24/7
+     monitor so both open them the same way. Returns null if price is already past the stop. */
+  function autoPaperTrade(u, px, atr1h, nowMs, meta) {
+    const op = orderPlan(u.entry, px, u.stop, u.dir, atr1h); if (!op || op.type === 'none') return null;
+    const isLimit = op.type === 'limit', t = isLimit ? paperLimit(u, nowMs, meta) : paperOpen(u, px, nowMs, meta); if (!t) return null;
+    if (!isLimit) t.order = 'market';
+    t.setupKey = u.key; t.model = MODEL; t.auto = true; t.log.push({ t: nowMs, what: 'opened automatically (H24)' });
+    return t;
+  }
   function paperStats(list) {
     const closed = list.filter(t => t.status === 'closed' && t.R != null), g = {};
     const add = (k, t) => (g[k] = g[k] || []).push(t);
-    for (const t of closed) { add('all', t); add(t.kind + (t.tf ? ' ' + tfName(t.tf) : ''), t); add(t.meta && t.meta.alertGrade ? 'alert grade' : 'below alert grade', t); }
+    for (const t of closed) { add('all', t); add(t.kind + (t.tf ? ' ' + tfName(t.tf) : ''), t); add(t.meta && t.meta.alertGrade ? 'alert grade' : 'below alert grade', t); add(t.auto ? 'auto-opened' : 'hand-picked', t); }
     const st = l => { const w = l.filter(t => t.R > 0); return { n: l.length, win: l.length ? w.length / l.length : null, avgR: l.reduce((a, t) => a + t.R, 0) / l.length, totalR: l.reduce((a, t) => a + t.R, 0) }; };
     return Object.fromEntries(Object.entries(g).map(([k, l]) => [k, st(l)]));
   }
@@ -1628,6 +1650,42 @@
     };
     return { fire, fired, state };
   }
+  /* Coach and heads-up alerts (owner, Nov 3 2026). Pure: the 24/7 monitor and the app both call these, so they can't drift apart.
+     Each returns null or { key, lvl, title, body, prio } for the shared alertGate. Nothing here widens a stop or raises risk. */
+  function resetAlert(A, name, nowMs) {
+    const mins = Math.round((A.nextReset - nowMs) / 60000);
+    if (!(mins > 0 && mins <= 30)) return null;
+    if (!(A.open > 0 || A.workingOrders > 0 || (A.dayStart - A.equity) > 0.5 * (A.dayStart - A.dailyFloor))) return null;
+    return { key: `${A.nextReset}|resetsoon`, lvl: 1, prio: 3, title: `${name}: daily reset in ${mins} min`,
+      body: `Loss limit resets at the 00:30 UTC reset. ${A.open} open, ${A.workingOrders || 0} working order(s); a stop-out would take ${isFinite(A.riskToStops) ? fmtUsd(A.riskToStops) : 'unlimited'}. Your entry rule: no new trades in the last 30 minutes before the reset.` };
+  }
+  function lossAlert(A, name) {
+    const lim = A.dayStart - A.dailyFloor, used = A.dayStart - A.equity;
+    if (!(lim > 0) || A.breached || A.room < A.profRisk) return null;   // breach and 'room below one trade' already alert
+    const f = used / lim; if (f < 0.7) return null;
+    return { key: 'dailyloss', lvl: f >= 0.85 ? 2 : 1, prio: f >= 0.85 ? 4 : 3, title: `${name}: ${Math.round(f * 100)}% of today's loss limit used`,
+      body: `${fmtUsd(used)} of ${fmtUsd(lim)} (equity includes open P&L). ${fmtUsd(A.dailyRoom)} of daily room left. Pace yourself: no new trade to win it back.` };
+  }
+  /* Stop moves that only tighten: +1R and the stop still behind entry -> breakeven after fees; +2R -> lock +1R. The new stop must sit at
+     least 1 hourly ATR from price, or nothing is suggested (a stop inside the noise gets swept). Never suggests widening. */
+  function stopMove(p, px, a1) {
+    if (p.stop == null || !isFinite(p.stop) || px == null || !a1) return null;
+    const d = dir(p), s0 = p.origStop != null ? p.origStop : p.stop, risk = Math.abs(p.entry - s0); if (!(risk > 0)) return null;
+    const r = d * (px - p.entry) / risk; let to = null, kind = null, why = '';
+    if (r >= 2 && d * (p.stop - (p.entry + d * risk)) < 0) { to = p.entry + d * risk; kind = 'lock1'; why = 'locks in about +1R'; }
+    else if (r >= 1 && d * (p.stop - p.entry) < 0) { to = p.entry + d * p.entry * 2 * FEES.commission; kind = 'be'; why = 'breakeven after fees'; }
+    if (to == null || d * (to - p.stop) <= 0 || d * (px - to) < a1) return null;
+    return { to, kind, r, why };
+  }
+  /* Heads-up before the 09:30 New York open (the Market open plan card): once a weekday, in the last 30 minutes before it. */
+  function openAlert(c, d1, nowSec, sym) {
+    const t = tzParts(nowSec, OPEN.tz), mins = OPEN.openMin - t.min; if (!(mins > 0 && mins <= 30)) return null;
+    const pl = openPlan(c, d1, nowSec); if (!pl || pl.status !== 'pre') return null;
+    const lv = [pl.onH != null ? `overnight high ${fmtPx(pl.onH)}` : null, pl.onL != null ? `low ${fmtPx(pl.onL)}` : null, pl.pdh != null ? `prior day high ${fmtPx(pl.pdh)}` : null, pl.pdl != null ? `low ${fmtPx(pl.pdl)}` : null].filter(Boolean).join(', ');
+    const lean = pl.read === 'up' ? 'leans up' : pl.read === 'down' ? 'leans down' : 'no lean';
+    return { key: `open|${pl.date}`, lvl: 1, prio: 3, title: `${sym}: New York open in ${mins} min`,
+      body: `Pre-market ${lean}${pl.drift != null ? ` (drift ${pl.drift >= 0 ? '+' : ''}${pl.drift.toFixed(2)} daily ATR)` : ''}. ${lv}.${pl.flags.length ? ' Flags: ' + pl.flags.join(', ') + '.' : ''}${pl.noTrade ? ' Plan says no trade today.' : ''} Untested idea, not a signal; the 9:30 breakout was about breakeven after costs.` };
+  }
   function alertQueue(fired) { return fired.slice().sort((x, y) => (y.prio || 3) - (x.prio || 3)); }
   function alertSettle(state, prev, undelivered) {
     const ps = (prev && prev.sent) || {};
@@ -1717,12 +1775,15 @@
     const risk = Math.abs(p.entry - stop) * q0; if (!(risk > 0)) return null;
     return realizedOfPos(p) / risk;
   }
-  /* All closed trades as one list: {id, src, key, model, R, tag, t, session}. */
+  /* All closed trades as one list: {id, src, key, model, R, tag, t, session}.
+     src stays 'paper' or 'live' so the Scorecard columns do not move. auto/remote and the paper prices are extra
+     context for the shared pool only; scorecard, patterns and status rules ignore them. */
   function tradeRecords(paper, positions) {
     const out = [], sess = ms => { const m = tzParts(Math.floor(ms / 1000), 'America/New_York').min; const s = SESSIONS.find(x => m >= x.from && m < x.to); return s ? s.name : 'Other hours'; };
     // A paper trade he then took live is counted once, as the live trade (wentLive), never twice.
     for (const t of paper || []) if (t.status === 'closed' && t.R != null && isFinite(t.R) && !t.wentLive)
-      out.push({ id: t.id, src: 'paper', key: setupKey(t.kind, t.tf), model: t.model || modelAt(t.opened), R: t.R, tag: 'plan', t: t.opened, closed: t.closed, session: sess(t.opened), sym: t.sym });
+      out.push({ id: t.id, src: 'paper', key: setupKey(t.kind, t.tf), model: t.model || modelAt(t.opened), R: t.R, tag: 'plan', t: t.opened, closed: t.closed, session: sess(t.opened), sym: t.sym,
+        auto: !!t.auto, remote: !!(t.remote || (t.meta && t.meta.src === 'monitor')), side: t.side, tf: t.tf, entry: t.entry, stop: t.stop, target: t.target });
     for (const p of positions || []) { const R = p.closed ? liveR(p) : null; if (R == null) continue;
       out.push({ id: p.id, src: 'live', key: p.ref && p.ref.key ? p.ref.key : setupKey(p.setup, p.tf), model: (p.ref && p.ref.model) || modelAt(p.opened), R, tag: p.tag || 'plan', t: p.opened, closed: p.closed.t, session: sess(p.opened), sym: p.sym }); }
     return out.sort((a, b) => a.closed - b.closed);
@@ -1777,9 +1838,30 @@
     out.afterLoss = statsR(after);
     return out;
   }
-  /* What a closed trade sends to the shared pool: setup, model, source, R (2 decimals), tag. No coin size, price, money, account or time beyond the day. */
-  function resultPayload(rec, edition) {
-    return { v: 1, id: fnv(rec.src + '|' + rec.id), edition: edition === 'private' ? 'private' : 'public', model: rec.model, key: rec.key, src: rec.src, tag: rec.tag, R: Math.round(rec.R * 100) / 100 };
+  /* First-run sharing boxes. Both editions start ticked (owner, Nov 3 2026). A saved false stays off.
+     Nothing is uploaded until shareLive: the user tapped Save (consent 'yes') and that box is still on. */
+  function shareOffered(saved) { return saved !== false; }
+  function shareLive(consent, saved) { return consent === 'yes' && saved === true; }
+  /* What a closed trade sends to the shared pool (v2). The id matches the old v1 fingerprint (src|id) so a trade already
+     sent is not sent again. src is paper_hand, paper_auto or live. Paper trades also carry the prices and hour-rounded
+     times a later check can replay on public candles. Live trades stay R-only. Never size, dollars, balance or account.
+     Returns null when a paper trade is missing the numbers that replay needs (the app skips it). */
+  function resultPayload(rec, edition, install) {
+    if (!rec || (rec.src !== 'paper' && rec.src !== 'live') || rec.R == null || !isFinite(rec.R)) return null;
+    const shareSrc = rec.src === 'live' ? 'live' : rec.auto ? 'paper_auto' : 'paper_hand';
+    const px8 = x => typeof x === 'number' && isFinite(x) && x > 0 && x < 1e8 ? Math.round(x * 1e8) / 1e8 : null;
+    const hour = ms => typeof ms === 'number' && isFinite(ms) && ms >= Date.UTC(2016, 0, 1) && ms < Date.UTC(2100, 0, 1) ? Math.floor(ms / 3600000) * 3600000 : null;
+    const b = { v: 2, id: fnv(rec.src + '|' + rec.id), edition: edition === 'private' ? 'private' : 'public', model: rec.model, key: rec.key, src: shareSrc, tag: rec.tag, R: Math.round(rec.R * 100) / 100 };
+    if (/^[0-9a-f]{32}$/.test(install || '')) b.install = install;
+    if (shareSrc === 'live') return b;
+    const sym = String(rec.sym || ''), side = rec.side === 'short' ? 'short' : rec.side === 'long' ? 'long' : '', entry = px8(rec.entry), stop = px8(rec.stop), openH = hour(rec.t), closeH = hour(rec.closed);
+    if (!/^[A-Z0-9]{2,12}\/[A-Z]{3,6}$/.test(sym) || !side || entry == null || stop == null || openH == null || closeH == null || closeH < openH) return null;
+    b.sym = sym; b.side = side; b.entry = entry; b.stop = stop; b.openH = openH; b.closeH = closeH;
+    const tf = String(rec.tf == null ? '' : rec.tf);
+    if (/^(1|5|15|60|240|1440)$/.test(tf)) b.tf = tf;
+    const target = px8(rec.target); if (target != null) b.target = target;
+    if (shareSrc === 'paper_auto') b.via = rec.remote ? 'monitor' : 'app';
+    return b;
   }
   /* Replay averages per setup key from monitor/backtest.json (+ slow.json for 4h/1D FVG), held-out period where it exists. */
   function replayByKey(bt) {
@@ -2094,7 +2176,7 @@
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
 
-  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, OPEN, openDays, trend4h, openTrade, openRead, openPlan, health, setupsToWatch, fmtUsd, fmtPx, tfName };

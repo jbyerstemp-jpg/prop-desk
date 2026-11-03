@@ -1,5 +1,5 @@
-/* Prop Desk app: Chart, Desk, Positions, Coach, Settings. All data stays in this browser (localStorage).
-   Read-only: nothing here places orders or talks to any account. */
+/* Prop Desk app: Chart, Desk, Positions, Coach, Settings. Accounts and balances stay in this browser.
+   Optional shared-pool uploads wait for the consent choice. Read-only: nothing here places orders or talks to an exchange. */
 (function () {
   'use strict';
   const C = window.Core, F = window.Feed;
@@ -96,7 +96,11 @@
   const liveAccts = () => S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded');
   function showModal(html) { $('#modalCard').innerHTML = html; $('#modal').hidden = false; }
   function closeModal() { $('#modal').hidden = true; $('#modalCard').innerHTML = ''; }
-  $('#modal').addEventListener('click', e => { if (e.target.id === 'modal' || e.target.dataset.close != null) closeModal(); });
+  $('#modal').addEventListener('click', e => {
+    const consent = $('#modalCard').querySelector('[data-consent]');
+    if (consent) return;   // the sharing choice stays up until a button is pressed
+    if (e.target.id === 'modal' || e.target.dataset.close != null) closeModal();
+  });
   const pct = (x, dp) => (x == null || !isFinite(x) ? '—' : (x * 100).toFixed(dp == null ? 2 : dp) + '%');
   const cls = x => (x > 0 ? 'up' : x < 0 ? 'dn' : '');
 
@@ -202,6 +206,8 @@
   const TFS = [1, 5, 15, 60, 240, 1440];   // 1m is for watching price move (chart only: no setups, alerts or replay use it)
   const LAYERS = { levels: 'Day/week levels', vwap: 'VWAP', sessions: 'Sessions', orb: 'Opening range', fvg: 'Fair value gaps', marks: 'BOS / CHoCH marks', fib: 'Impulse legs + fib retracements',
     pos: 'My trades and orders (entry/stop/target)', paperStops: 'Paper trade stops (ticked paper trades)', openR: 'Open R next to entries', ema9: 'EMA 9', ema21: 'EMA 21', ema50: 'EMA 50', ema200: 'EMA 200', volume: 'Volume' };
+  // One switch for every indicator (owner, Nov 3 2026): off hides them all without losing which ones he had on; on brings them back as they were.
+  const ALL_OFF = Object.fromEntries(Object.keys(LAYERS).map(k => [k, false])), LY = () => T().indOff ? ALL_OFF : T().layers;
   const LAYER_DEF = { openR: true, paperStops: true, fib: true, levels: true, vwap: true, sessions: true, orb: true, fvg: true, marks: true, pos: true, ema9: false, ema21: false, ema50: false, ema200: false, volume: false };
   const CTYPES = { candles: 'Candles', hollow: 'Hollow candles', heikin: 'Heikin Ashi', bars: 'Bars (OHLC)', line: 'Line', area: 'Area' };
   const EMA_COL = { ema9: '#f0b90b', ema21: '#2962ff', ema50: '#e040fb', ema200: '#ff9800' };
@@ -212,7 +218,8 @@
     $('#tfSeg').innerHTML = TFS.map(tf => `<button data-tf="${tf}" class="${tf === T().tf ? 'on' : ''}"${tf === 1 ? ' title="1-minute candles (Kraken, last 12 h). For watching price only: setups, alerts and tests do not use 1m."' : ''}>${C.tfName(tf)}</button>`).join('');
     for (const k in LAYER_DEF) if (T().layers[k] === undefined) T().layers[k] = LAYER_DEF[k];
     $('#layerSeg').innerHTML = `<select id=ctypeSel aria-label="Chart type">${Object.keys(CTYPES).map(k => `<option value="${k}" ${k === (T().ctype || 'candles') ? 'selected' : ''}>${CTYPES[k]}</option>`).join('')}</select>
-      <button class="btn sm" id=indBtn>Indicators (${Object.keys(LAYERS).filter(k => T().layers[k]).length})</button>`;
+      <button class="btn sm" id=indBtn>Indicators (${T().indOff ? 'off' : Object.keys(LAYERS).filter(k => T().layers[k]).length})</button>
+      <label class="chk small" style="display:inline-flex;gap:4px;align-items:center"><input type=checkbox id=indAll ${T().indOff ? '' : 'checked'}> All on</label>`;
     if (chart) return;
     const el = $('#chart');
     const tzFmt = t => new Intl.DateTimeFormat('en-US', { timeZone: T().tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(t * 1000));
@@ -234,9 +241,11 @@
   }
   $('#symSel').onchange = e => { T().sym = e.target.value; save(); lastDataKey = ''; ensureFeeds(); renderAll(true); };
   $('#tfSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; T().tf = +b.dataset.tf; save(); lastDataKey = ''; initChart(); ensureFeeds(); renderAll(true); };
-  $('#layerSeg').onchange = e => { if (e.target.id === 'ctypeSel') { T().ctype = e.target.value; save(); lastDataKey = ''; renderChart(true); } };
+  $('#layerSeg').onchange = e => { if (e.target.id === 'ctypeSel') { T().ctype = e.target.value; save(); lastDataKey = ''; renderChart(true); }
+    if (e.target.id === 'indAll') { T().indOff = !e.target.checked; save(); initChart(); lastDataKey = ''; renderChart(true); } };
   $('#layerSeg').onclick = e => { if (e.target.id !== 'indBtn') return;
-    showModal(`<h3>Indicators</h3><div class=form>${Object.keys(LAYERS).map(k => `<label class=chk><input type=checkbox data-lay="${k}" ${T().layers[k] ? 'checked' : ''}> ${esc(LAYERS[k])}</label>`).join('')}</div><div class=row style="margin-top:10px"><button class="btn pri" data-close>Done</button></div>`);
+    showModal(`<h3>Indicators</h3><div class=form><label class=chk><input type=checkbox id=indAllM ${T().indOff ? '' : 'checked'}> <b>All indicators on</b> (untick to hide every one; tick to bring back the ones you had)</label>${Object.keys(LAYERS).map(k => `<label class=chk><input type=checkbox data-lay="${k}" ${T().layers[k] ? 'checked' : ''}> ${esc(LAYERS[k])}</label>`).join('')}</div><div class=row style="margin-top:10px"><button class="btn pri" data-close>Done</button></div>`);
+    $('#indAllM').onchange = e => { T().indOff = !e.target.checked; save(); initChart(); lastDataKey = ''; renderChart(true); };
     document.querySelectorAll('[data-lay]').forEach(x => x.onchange = () => { T().layers[x.dataset.lay] = x.checked; save(); initChart(); lastDataKey = ''; renderChart(true); }); };
 
   // Full screen: real fullscreen where supported, CSS fill on iPhone.
@@ -265,6 +274,10 @@
     setTimeout(drawOverlay, 300);
   }
   $('#fsBtn').onclick = enterFs; $('#fsExit').onclick = exitFs;
+  // Reset view (owner, Nov 3 2026): back to the normal view after zooming or dragging too far: default bar spacing, latest candles at the right
+  // edge, price scale automatic again. Chart settings (indicators, type, timeframe) are untouched.
+  function resetView() { if (!chart) return; try { chart.timeScale().resetTimeScale(); chart.timeScale().scrollToRealTime(); chart.priceScale('right').applyOptions({ autoScale: true }); if (extra.vol) chart.priceScale('vol').applyOptions({ autoScale: true }); } catch (e) { } drawOverlay(); }
+  $('#resetView').onclick = resetView; $('#fsReset').onclick = resetView;
   document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && wrap.classList.contains('fs')) { wrap.classList.remove('fs'); keepAwake(false); } setTimeout(drawOverlay, 200); });
   document.addEventListener('keydown', e => { if (e.key === 'f' && tab === 'chart' && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) wrap.classList.contains('fs') ? exitFs() : enterFs(); });
 
@@ -284,7 +297,7 @@
     curType = ct;
   }
   function renderStudies(cs) {
-    const L = T().layers;
+    const L = LY();
     for (const k of ['ema9', 'ema21', 'ema50', 'ema200']) {
       if (L[k]) { if (!extra[k]) extra[k] = chart.addLineSeries({ color: EMA_COL[k], lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
         extra[k].setData(C.ema(cs, +k.slice(3))); }
@@ -308,13 +321,16 @@
     const toPt = c => (ct === 'line' || ct === 'area') ? { time: c.time, value: c.close } : { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
     if (dk !== lastDataKey) { series.setData(shown.map(toPt)); lastDataKey = dk; renderStudies(cs); }
     else if (shown.length) { series.update(toPt(shown[shown.length - 1])); if (full) renderStudies(cs); }
+    // A new coin or timeframe starts from the normal view (owner, Nov 3 2026): otherwise a stretched price scale from the last coin keeps
+    // showing its price range and the new coin's candles sit off the screen.
+    if (renderChart.viewKey !== sym + '|' + tf) { renderChart.viewKey = sym + '|' + tf; resetView(); }
     if (!full) return;
     const ca = F.candleAge(sym, tf);
     if (ca != null && ca > 120 && !F.demo && (!renderChart.lastReload || Date.now() - renderChart.lastReload > 60000)) { renderChart.lastReload = Date.now(); F.reloadSeries(sym, tf); }
     const A = curA = analyze(sym);
     // price lines
     priceLines.forEach(l => series.removePriceLine(l)); priceLines = [];
-    const L = T().layers;
+    const L = LY();
     const pl = (price, title, color, style, w) => priceLines.push(series.createPriceLine({ price, title, color, lineStyle: style == null ? 2 : style, lineWidth: w || 1, axisLabelVisible: true }));
     for (const l of A.levels) {
       if (((l.kind === 'day' || l.kind === 'week' || l.kind === 'open') && L.levels) || (l.kind === 'vwap' && L.vwap))
@@ -337,13 +353,13 @@
       const pr = L.openR !== false && t.status === 'open' && pnlPrice(sym) != null ? C.paperR(Object.assign({ stop0: t.stop }, t), pnlPrice(sym), Date.now()) : null;
       const rp = pr != null ? ` · ${pr >= 0 ? '+' : ''}${pr.toFixed(2)}R` : '';
       pl(t.entry, `📝 ${w} entry${rp}`, '#b388ff', 1, 2);
-      if (t.stop != null && T().layers.paperStops !== false) pl(t.stop, `📝 paper stop`, '#ff4d4d', 1, 1);
+      if (t.stop != null && LY().paperStops !== false) pl(t.stop, `📝 paper stop`, '#ff4d4d', 1, 1);
       if (t.target != null) pl(t.target, `📝 paper target`, PAL.tp, 1, 1);
     }
     // Daily trend system paper position (ticked in the Paper tab).
     if (T().trendOnChart && window.PDTrend && TREND_SYMS.includes(sym)) { const k = trendForward().coins.find(x => x.sym === sym);
       if (k && k.open) { pl(k.open.entry, `📈 trend paper ${k.open.dir > 0 ? 'long' : 'short'} entry${k.openR != null && L.openR !== false ? ` · ${k.openR >= 0 ? '+' : ''}${k.openR.toFixed(2)}R` : ''}`, '#b388ff', 1, 2);
-        if (T().layers.paperStops !== false) pl(k.open.stop, '📈 trend paper stop', '#ff4d4d', 1, 1); } }
+        if (LY().paperStops !== false) pl(k.open.stop, '📈 trend paper stop', '#ff4d4d', 1, 1); } }
     // Working limit orders and plans not placed yet (owner's request, Nov 1): dashed = working on the platform, dotted = planned only.
     if (L.pos) for (const o of S.planned.filter(x => x.sym === sym)) {
       const working = o.status === 'placed', st = working ? 2 : 4, what = o.orderType === 'market' ? 'market' : 'limit';
@@ -372,16 +388,16 @@
     const box = (t0, top, bot, fill, stroke) => { const y1 = y(top), y2 = y(bot); if (y1 == null || y2 == null) return; const x0 = Math.max(0, x(t0));
       g.fillStyle = fill; g.fillRect(x0, y1, right - x0, y2 - y1); if (stroke) { g.strokeStyle = stroke; g.strokeRect(x0, y1, right - x0, y2 - y1); } };
     const tf = String(T().tf);
-    if (T().layers.fvg && curA.fvg[tf]) for (const f of curA.fvg[tf]) box(f.time, f.top, f.bottom, f.dir === 'bull' ? PAL.upFill : PAL.dnFill);
-    if (T().layers.sessions) for (const k of ['asia', 'london', 'nyam', 'nypm']) {
+    if (LY().fvg && curA.fvg[tf]) for (const f of curA.fvg[tf]) box(f.time, f.top, f.bottom, f.dir === 'bull' ? PAL.upFill : PAL.dnFill);
+    if (LY().sessions) for (const k of ['asia', 'london', 'nyam', 'nypm']) {
       const s = curA.sessions[k]; if (!s) continue;
       const x0 = x(s.from), x1 = x(s.to), y1 = y(s.high), y2 = y(s.low); if (y1 == null || !x1) continue;
       g.strokeStyle = PAL.session; g.setLineDash([3, 3]); g.strokeRect(x0, y1, Math.max(2, x1 - x0), y2 - y1); g.setLineDash([]);
       g.fillStyle = PAL.mu; g.font = '10px ' + (PAL.mode === 'pip' ? 'monospace' : 'sans-serif'); g.fillText(s.name, x0 + 2, y1 - 3);
     }
-    if (T().layers.orb && curA.orb) { const o = curA.orb; box(o.from, o.high, o.low, PAL.upFill, PAL.orb); }
+    if (LY().orb && curA.orb) { const o = curA.orb; box(o.from, o.high, o.low, PAL.upFill, PAL.orb); }
     // Impulse legs on this timeframe: the leg, its fib lines from the leg's end to the right edge, OTE (0.618-0.786) shaded.
-    if (T().layers.fib && curA.impulse && curA.impulse[tf]) for (const L of curA.impulse[tf]) {
+    if (LY().fib && curA.impulse && curA.impulse[tf]) for (const L of curA.impulse[tf]) {
       const col = L.dir === 'up' ? PAL.up : PAL.dn, xs = x(L.start.time), xe = x(L.end.time), ys = y(L.start.price), ye = y(L.end.price);
       if (ys == null || ye == null) continue;
       g.strokeStyle = col; g.lineWidth = 2; g.setLineDash(L.end.provisional ? [5, 4] : []); g.beginPath(); g.moveTo(xs, ys); g.lineTo(xe, ye); g.stroke(); g.setLineDash([]); g.lineWidth = 1;
@@ -598,6 +614,7 @@
     }
     rows.sort((a, b) => (b.ready - a.ready) || (b.grade.ok - a.grade.ok) || (b.rr - a.rr));
     scanAll = { at: Date.now(), running: false, rows, errors, manual: !!manual };
+    try { await pullAuto(); autoPaperRun(rows); } catch (e) { console.warn(e); }
     renderScanAll();
   }
   // Trade ideas: short-term (the 15m-4h setup scanner) or long-term (the daily trend system, H15 S2). Owner, Nov 2: generate both, each
@@ -648,7 +665,7 @@
   setInterval(() => { if (document.visibilityState !== 'hidden') runScanAll(false); }, 300e3);
   // ---------- Paper trading: try setups with no money; same rules as the replay; record saved to monitor/paper.json ----------
   let paperPushTimer = null, paperMsg = '';
-  function savePaper(why) { save(); clearTimeout(paperPushTimer); paperPushTimer = setTimeout(async () => { const r = await pushFile('monitor/paper.json', { v: 2, updated: Date.now(), accounts: S.paperAccts, trades: S.paper }, 'paper trades: ' + why); paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)'); if (tab === 'paper') renderPaper(); }, 4000); }
+  function savePaper(why) { save(); clearTimeout(paperPushTimer); paperPushTimer = setTimeout(async () => { const r = await pushFile('monitor/paper.json', { v: 2, updated: Date.now(), accounts: S.paperAccts, trades: S.paper.filter(t => !t.remote) }, 'paper trades: ' + why); paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)'); if (tab === 'paper') renderPaper(); }, 4000); }
   function paperMeta(u) {
     const vd = verdictOf(u), m = { ctxAtEntry: ctxSnapshot(u.sym), verdict: vd.verdict, failedGate: vd.failedGate, label: vd.label, alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
     try { const h = F.candles(u.sym, 60).slice(0, -1), d = F.candles(u.sym, 1440).slice(0, -1), x = window.PDTraits && h.length > 240 ? PDTraits.ctxAt(h, d, h.length - 1) : null;
@@ -673,9 +690,40 @@
     }
     t.setupKey = u.key; t.model = C.MODEL; S.paper.push(t); markUsed(u.key, 'paper'); savePaper('open ' + u.sym + ' ' + u.dir); switchTab('paper');
   }
+  // Monitor-opened auto paper trades (H24 amendment 1): data/auto-paper.json is written ONLY by the 24/7 monitor (Worker secret GH_WRITE_TOKEN),
+  // which also closes them at their stops and targets. The app reads it with the monitor key and shows them like its own (tag `remote`);
+  // it never steps them or pushes them back, so the two never write the same trade.
+  async function pullAuto() {
+    const tok = ghToken(); if (!tok || !/^[\w.-]+\/[\w.-]+$/.test(ghRepo())) return;
+    try {
+      const r = await fetch(`https://api.github.com/repos/${ghRepo()}/contents/data/auto-paper.json?ref=main`, { headers: { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github.raw+json' }, cache: 'no-store' });
+      if (!r.ok) return; const f = await r.json(); if (!f || !Array.isArray(f.trades)) return;
+      const old = new Map(S.paper.filter(t => t.remote).map(t => [t.id, t]));
+      S.paper = S.paper.filter(t => !t.remote).concat(f.trades.map(t => { const o = old.get(t.id); return Object.assign({}, t, o ? { wentLive: o.wentLive, onChart: o.onChart } : {}, { remote: true }); }));
+      S.autoPulledAt = Date.now(); save(); if (tab === 'paper') renderPaper();
+    } catch (e) { }
+  }
+  // Auto paper trades (H24, pre-registered in docs/research/HYPOTHESES.md before collection): after each scan, every setup that passes the
+  // alert grade opens as a paper trade tagged `auto`. Paper only; no alerts, sizing or setup changes come from it. On by default (owner, Nov 3).
+  function autoPaperRun(rows) {
+    if (T().autoPaper === false || F.demo) return;
+    const now = Date.now(), day0 = Math.floor(now / 86400e3) * 86400e3, live = S.paper.filter(t => t.auto && (t.status === 'open' || t.status === 'pending')), px = {}, atr = {};
+    for (const sym of T().symbols) { px[sym] = pnlPrice(sym); const A = analyses[sym]; atr[sym] = A && A.atr ? A.atr[60] : null; }
+    const picks = C.autoPaperPick(rows, { px, atr, benched: benchedKeys(), used: u => !!useOf(u), openSyms: S.paper.filter(t => t.status === 'open' || t.status === 'pending').map(t => t.sym), openAuto: live.length, openedToday: S.paper.filter(t => t.auto && t.opened >= day0).length });
+    for (const u of picks) autoPaperOpen(u);
+  }
+  function autoPaperOpen(u) {
+    const p0 = pnlPrice(u.sym); if (p0 == null) return false;
+    const now = Date.now(), t = C.autoPaperTrade(u, p0, analyses[u.sym] && analyses[u.sym].atr ? analyses[u.sym].atr[60] : null, now, Object.assign(paperMeta(u), { auto: true })); if (!t) return false;
+    const pa = paperAcct();
+    if (pa) { const z = C.paperSize(pa, S.paper, u, t.order === 'limit' ? u.entry : p0, now, prices()); if (z.ok) { t.acct = pa.id; t.qty = z.size.qty; t.riskUsd = z.size.lossAtStop; } }   // account says not now: still collected as an R-only trade
+    S.paper.push(t); markUsed(u.key, 'paper'); savePaper('auto open ' + u.sym + ' ' + u.dir);
+    if (tab === 'paper') renderPaper();
+    return true;
+  }
   function paperTick() {
     let changed = false;
-    S.paper = S.paper.map(t => { if (t.status !== 'open' && t.status !== 'pending') return t; const u = C.paperStep(t, F.candles(t.sym, 15), 900, pnlPrice(t.sym), Date.now()); if (u.status !== t.status) changed = true; return u; });
+    S.paper = S.paper.map(t => { if ((t.status !== 'open' && t.status !== 'pending') || t.remote) return t; const u = C.paperStep(t, F.candles(t.sym, 15), 900, pnlPrice(t.sym), Date.now()); if (u.status !== t.status) changed = true; return u; });
     if (changed) { savePaper('closed by price'); if (T().notify) for (const t of S.paper.filter(t => t.status === 'closed' && t.closed > Date.now() - 60e3)) ntSend(`Paper ${t.sym} ${t.side}: ${t.why}`, `${t.R >= 0 ? '+' : ''}${t.R.toFixed(2)}R after fees. Paper only.`, 2); }
     if (tab === 'paper') renderPaper();
   }
@@ -1009,7 +1057,36 @@
   // everyone's pooled results. Status rules are fixed (C.scoreStatus); a status change is a suggestion until you accept it.
   // Accepted: "trusted" setups get a star and sort first; "benched" setups stop sending phone alerts. Size never changes.
   const POOL_URL = 'https://kraken-prop-desk.jbyerstemp.workers.dev/pool', RESULT_URL = 'https://kraken-prop-desk.jbyerstemp.workers.dev/result', RESULT_KEY = 'kpd_results';
+  const INSTALL_KEY = 'kpd_install', SHARE_HOLD = 'kpd_share_hold', SAMPLE_HOLD = 'kpd_sample_hold';
   let POOL = null, poolAt = 0;
+  // Anonymous per-browser id. Not in the backup (kpd_v1) and never shown in full. The server stores only a salted hash.
+  function installId(reset) {
+    try {
+      if (reset) localStorage.removeItem(INSTALL_KEY);
+      let id = localStorage.getItem(INSTALL_KEY);
+      if (!/^[0-9a-f]{32}$/.test(id || '')) {
+        const b = new Uint8Array(16); crypto.getRandomValues(b);
+        id = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem(INSTALL_KEY, id);
+      }
+      return id;
+    } catch (e) { return ''; }
+  }
+  const peekInstall = () => { try { const id = localStorage.getItem(INSTALL_KEY) || ''; return /^[0-9a-f]{32}$/.test(id) ? id : ''; } catch (e) { return ''; } };
+  const holdOf = key => { try { const h = JSON.parse(localStorage.getItem(key) || 'null'); if (h && h.until > Date.now()) return h; } catch (e) { } return null; };
+  const setHold = (key, ms, why) => { try { localStorage.setItem(key, JSON.stringify({ until: Date.now() + ms, why: String(why || '') })); } catch (e) { } };
+  const clearHold = key => { try { localStorage.removeItem(key); } catch (e) { } };
+  // Nothing is uploaded until the first-run choice is saved. Both editions start with the boxes ticked.
+  function shareWanted(key) { return C.shareOffered(T()[key]); }
+  function shareEnabled(key) { return C.shareLive(T().shareConsent, T()[key]); }
+  function setShareFlag(key, on) {
+    T()[key] = !!on;
+    const other = key === 'shareResults' ? 'shareLayout' : 'shareResults';
+    if (T()[other] !== true && T()[other] !== false) T()[other] = true;
+    T().shareConsent = (T().shareResults === true || T().shareLayout === true) ? 'yes' : 'no';
+    if (on && key === 'shareResults') { installId(); clearHold(SHARE_HOLD); }
+    if (on && key === 'shareLayout') clearHold(SAMPLE_HOLD);
+  }
   async function loadPool() {
     if (F.demo || Date.now() - poolAt < 10 * 60e3) return; poolAt = Date.now();
     try { const r = await fetch(POOL_URL); if (r.ok) { POOL = (await r.json()).models || null; if (tab === 'paper') renderPaper(); } } catch (e) { }
@@ -1017,12 +1094,27 @@
   const scoreMark = key => (S.scoreAccepted || {})[key];   // 'trusted' | 'benched' | undefined
   const benchedKeys = () => Object.entries(S.scoreAccepted || {}).filter(([, v]) => v === 'benched').map(([k]) => k);
   function setupBadge(kind, tf) { const m = scoreMark(C.setupKey(kind, tf)); return m === 'trusted' ? '<span class="tag up" title="Proven on your trades (you accepted it)">★ trusted</span> ' : m === 'benched' ? '<span class="tag dn" title="Benched by you: no phone alerts">benched</span> ' : ''; }
-  function sendResults() {
-    if (F.demo || T().shareResults === false) return;
+  function rememberSent(sent, id) {
+    sent.push(id); try { localStorage.setItem(RESULT_KEY, JSON.stringify(sent.slice(-3000))); } catch (e) { }
+  }
+  async function sendResults() {
+    if (F.demo || !shareEnabled('shareResults') || holdOf(SHARE_HOLD)) return;
+    const inst = installId(); if (!inst) return;
     let sent; try { sent = JSON.parse(localStorage.getItem(RESULT_KEY)) || []; } catch (e) { sent = []; }
-    const todo = C.tradeRecords(S.paper, S.positions).filter(r => r.key !== 'unlinked').map(r => C.resultPayload(r, FEEDBACK_PUBLIC ? 'public' : 'private')).filter(b => !sent.includes(b.id)).slice(0, 10);
-    for (const b of todo) fetch(RESULT_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b), keepalive: true })
-      .then(x => x.json()).then(j => { if (j && j.ok) { sent.push(b.id); try { localStorage.setItem(RESULT_KEY, JSON.stringify(sent.slice(-3000))); } catch (e) { } } }).catch(() => { });
+    const edition = FEEDBACK_PUBLIC ? 'public' : 'private';
+    const todo = C.tradeRecords(S.paper, S.positions).filter(r => r.key !== 'unlinked').map(r => C.resultPayload(r, edition, inst)).filter(b => b && !sent.includes(b.id)).slice(0, 10);
+    for (const b of todo) {
+      let x, j = {};
+      try { x = await fetch(RESULT_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b), keepalive: true }); }
+      catch (e) { return; }   // offline: try again next interval
+      try { j = await x.json(); } catch (e) { j = {}; }
+      if (x.status === 403) { setHold(SHARE_HOLD, 7 * 86400e3, j.why || 'origin'); return; }
+      if (x.status === 429) { setHold(SHARE_HOLD, 6 * 3600e3, 'daily cap'); return; }
+      if (x.status === 503 || (x.status === 400 && (j.why === 'bad shape' || j.why === 'json' || !j.why))) { setHold(SHARE_HOLD, 6 * 3600e3, j.why || 'not ready'); return; }
+      if (j && j.ok) { rememberSent(sent, b.id); continue; }
+      if (x.status === 400) { rememberSent(sent, b.id); continue; }   // this trade was refused; don't block the rest
+      return;
+    }
   }
   setTimeout(() => { try { sendResults(); } catch (e) { } }, 20000); setInterval(() => { try { sendResults(); } catch (e) { } }, 10 * 60e3);
   function scorecardHtml() {
@@ -1040,7 +1132,7 @@
     const tagRows = Object.entries(pat.byTag).map(([k, st]) => `<tr><td>${esc(C.TRADE_TAGS[k].split(' (')[0])}</td><td class=num>${cell(st)}</td></tr>`).join('');
     const sesRows = Object.entries(pat.bySession).map(([k, st]) => `<tr><td>${esc(k)}</td><td class=num>${cell(st)}</td></tr>`).join('');
     return `<div class=card><h3>Scorecard <span class=tag>model ${esc(sc.model)} · learns from every closed trade</span></h3>
-      <p class=small>Each setup type is judged by your closed paper trades and live trades tagged "followed plan" (in R, after fees), next to the replay on past candles and <b>everyone's</b> results (both apps, self-reported). Mistakes, rule breaks and data problems never count against a setup.</p>
+      <p class=small>Each setup type is judged by your closed paper trades and live trades tagged "followed plan" (in R, after fees), next to the replay on past candles and <b>everyone's</b> results (optional, anonymous, self-reported until a later check). Mistakes, rule breaks and data problems never count against a setup. The Everyone column does not change your size or alerts.</p>
       ${rows ? `<table><tr><th>Setup</th><th class=num>Replay</th><th class=num>Your paper</th><th class=num>Your live</th><th class=num>Everyone</th></tr>${rows}</table>` : '<p class=mu>No closed trades under this model yet. Paper trade the setups, or plan live trades with "Plan it", and they show up here.</p>'}
       ${sc.unlinked ? `<p class="small warn">${sc.unlinked} closed live trade(s) aren't linked to a setup: pick one in Positions → Closed (journal).</p>` : ''}
       <details ${fold('sc:how')}><summary class=small><b>How it decides</b> (rules fixed Nov 1, 2026, before any results)</summary><p class=small>Under ${C.SCORE_RULES.minN} trades: <b>gathering</b>, too few to tell. With ${C.SCORE_RULES.minN}+: <b>proven</b> if the whole 95% range of the average R is above 0; <b>disproven</b> if it's all below 0; <b>below replay</b> if it's all below the replay's average (execution or the edge fading); otherwise <b>unclear</b>. A change is only a suggestion: you accept it. ★ trusted setups are marked and listed first; benched ones stop sending phone alerts. Nothing here ever changes your size. When the model's rules change it gets a new version (now ${esc(sc.model)}), and its record starts fresh so old and new rules never mix.</p></details>
@@ -1110,9 +1202,10 @@
     const srows = Object.entries(st).map(([k, x]) => `<tr><td>${esc(k)}</td><td class=num>${x.n}</td><td class=num>${x.win == null ? '—' : Math.round(x.win * 100) + '%'}</td><td class="num ${cls(x.avgR)}">${r(x.avgR)}</td><td class="num ${cls(x.totalR)}">${r(x.totalR)}</td></tr>`).join('');
     box.innerHTML = scorecardHtml() + trendCardHtml() + trendPortCardHtml(trendForward()) + `<div class=card><h3>Paper trading <span class=tag>no money, builds the record</span></h3>
       <p class=small>Add setups from the Chart tab ("Setups to watch") or the Coach ("Other setups"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
+      <label class=small style="display:flex;gap:6px;align-items:center;margin:6px 0"><input type=checkbox id=autoPaper ${T().autoPaper === false ? '' : 'checked'}> <span><b>Auto paper trades:</b> while the app is open, setups that pass the alert grade open as paper trades by themselves (max 1 per coin, 4 open, 6 a day). Tagged <span class=tag>auto</span> and counted separately. Collects data only; it never changes alerts or sizing.</span></label>
       ${paperAcctCard()}
       <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
-      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<div class=row style="margin:0 0 6px"><button class="btn sm" data-pall="1">Show all on chart</button><button class="btn sm" data-pall="0">Hide all</button><label class=small style="display:inline-flex;gap:4px;align-items:center"><input type=checkbox id=pStops ${T().layers.paperStops !== false ? 'checked' : ''}> Show paper stops</label></div><table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.status === 'pending' ? ` <span class="tag warn">limit waiting @ ${px(t.entry)}</span>` : t.order === 'limit' ? ' <span class=tag>limit filled</span>' : t.order === 'market' ? ' <span class=tag>market</span>' : ''}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${t.status === 'pending' ? 'placed ' + fmtTime(t.placedAt, true) : fmtTime(t.opened, true)}</div><label class=small style="display:inline-flex;gap:4px;align-items:center;margin-top:2px"><input type=checkbox data-pchart="${esc(t.id)}" ${t.onChart ? 'checked' : ''}> Show on chart</label></td>
+      <div class=card><h3>Open (${open.length})</h3>${open.length ? `<div class=row style="margin:0 0 6px"><button class="btn sm" data-pall="1">Show all on chart</button><button class="btn sm" data-pall="0">Hide all</button><label class=small style="display:inline-flex;gap:4px;align-items:center"><input type=checkbox id=pStops ${T().layers.paperStops !== false ? 'checked' : ''}> Show paper stops</label></div><table><tr><th>Trade</th><th class=num>Entry</th><th class=num>Stop</th><th class=num>Target</th><th class=num>Now</th><th></th></tr>${open.map(t => `<tr><td class=small><b class="${t.side === 'long' ? 'bull' : 'bear'}">${esc(t.sym)} ${t.side}</b> ${esc(t.kind)} ${esc(t.tf ? C.tfName(t.tf) : '')}${t.auto ? ` <span class=tag>auto${t.remote ? ' · monitor' : ''}</span>` : ''}${t.status === 'pending' ? ` <span class="tag warn">limit waiting @ ${px(t.entry)}</span>` : t.order === 'limit' ? ' <span class=tag>limit filled</span>' : t.order === 'market' ? ' <span class=tag>market</span>' : ''}${t.meta && t.meta.alertGrade ? ' <span class="tag up">alert grade</span>' : ''}<div class=mu>${t.status === 'pending' ? 'placed ' + fmtTime(t.placedAt, true) : fmtTime(t.opened, true)}</div><label class=small style="display:inline-flex;gap:4px;align-items:center;margin-top:2px"><input type=checkbox data-pchart="${esc(t.id)}" ${t.onChart ? 'checked' : ''}> Show on chart</label></td>
         <td class=num>${px(t.entry)}</td><td class=num>${px(t.stop)}</td><td class=num>${t.target != null ? px(t.target) : '—'}</td><td class="num ${cls(liveR(t))}">${t.status === 'pending' ? `<span class=mu>waiting</span><div class=small>${(p0 => p0 != null ? px(p0) + ' now' : '')(pnlPrice(t.sym))}</div>` : r(liveR(t))}${t.status === 'pending' ? '' : t.qty ? `<div class=small>${usd(C.netIfClosed({ side: t.side, entry: t.entry, qty: t.qty, opened: t.opened, partials: [] }, pnlPrice(t.sym) || t.entry, Date.now()))} net</div>` : '<div class="small mu">R only</div>'}</td>
         <td>${(use => use && (use.state === 'planned' || use.state === 'live') ? `<span class="tag ${use.state === 'live' ? 'up' : 'warn'}">${use.state === 'live' ? '✅ Live' : '⏳ Planned'}${use.acct && acctName(use.acct) ? ' · ' + esc(acctName(use.acct)) : ''}</span> ` : `<button class="btn sm pri" data-pp="live" data-id="${esc(t.id)}">Take it live</button> `)(t.setupKey ? C.setupUse(t.setupKey, S.paper, S.positions, S.planned, S.usedSetups) : null)}<button class="btn sm" data-pp="edit" data-id="${esc(t.id)}">Edit</button> <button class="btn sm" data-pp="close" data-id="${esc(t.id)}">Close</button></td></tr>`).join('')}</table>` : '<p class=mu>None. Add one from the setups lists.</p>'}</div>
       <div class=card><h3>Record</h3>${srows ? `<table><tr><th>Group</th><th class=num>n</th><th class=num>Win</th><th class=num>Avg</th><th class=num>Total</th></tr>${srows}</table><p class="small mu">Small samples mean little: 20+ trades per group before reading anything into it.</p>` : '<p class=mu>No closed paper trades yet.</p>'}</div>
@@ -1122,6 +1215,7 @@
   // Paper trades on the chart (owner, Nov 2): a tick box per open paper trade draws its entry, stop and target on the chart.
   $('#paperBox').addEventListener('change', e => {
     if (e.target.id === 'trendChart') { T().trendOnChart = e.target.checked; save(); renderAll(true); return; }
+    if (e.target.id === 'autoPaper') { T().autoPaper = e.target.checked; save(); return; }
     if (e.target.id === 'pStops') { T().layers.paperStops = e.target.checked; save(); renderAll(true); return; }
     const cb = e.target.closest('[data-pchart]'); if (!cb) return;
     const t = S.paper.find(x => x.id === cb.dataset.pchart); if (!t) return;
@@ -1618,12 +1712,12 @@
   // Settings. Each layout is sent once per device. Fire and forget: a failure never affects the import.
   const SAMPLE_URL = 'https://kraken-prop-desk.jbyerstemp.workers.dev/sample', SAMPLE_KEY = 'kpd_samples';
   function autoSample(r, text) {
-    if (!r || F.demo || T().shareLayout === false) return;
+    if (!r || F.demo || !shareEnabled('shareLayout') || holdOf(SAMPLE_HOLD)) return;
     const smp = C.sampleFor(r, text, FEEDBACK_PUBLIC ? 'public' : 'private'); if (!smp) return;
     let seen; try { seen = JSON.parse(localStorage.getItem(SAMPLE_KEY)) || []; } catch (e) { seen = []; }
     const id = C.fnv(smp.layout); if (seen.includes(id)) return;
     fetch(SAMPLE_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(smp), keepalive: true })
-      .then(x => { if (x.ok) { seen.push(id); try { localStorage.setItem(SAMPLE_KEY, JSON.stringify(seen.slice(-200))); } catch (e) { } } }).catch(() => { });
+      .then(x => { if (x.ok) { seen.push(id); try { localStorage.setItem(SAMPLE_KEY, JSON.stringify(seen.slice(-200))); } catch (e) { } } else if (x.status === 403) setHold(SAMPLE_HOLD, 7 * 86400e3, 'origin'); }).catch(() => { });
   }
   // Which account a screenshot belongs to: its name on screen, else the one picked, else the one synced last, else the only one.
   function impAcctGuess(A) {
@@ -1863,6 +1957,7 @@
       let prev; try { prev = JSON.parse(localStorage.getItem(MEM_KEY)) || {}; } catch (e) { prev = {}; }
       const now = Date.now(), G = C.alertGate(prev, now), fire = G.fire;
       const P = prices();
+      { const os = T().sym, oc = F.candles(os, 15), od = F.candles(os, 1440), x = oc && oc.length > 200 ? C.openAlert(oc, od, now / 1000, os) : null; if (x) fire(x.key, x.lvl, x.title, x.body, x.prio); }
       for (const a of liveAccts()) {
         const A = C.accountState(a, S.positions, P, now, { orders: S.planned }), name = a.label || C.planOf(a).name;
         if (A.breached) fire(a.id + '|breach', 3, `${name}: at the breach line`, `Equity ~${usd(A.equity)} vs floor ${usd(A.floor)}. Check your platform now.`, 5);
@@ -1870,6 +1965,7 @@
         if (!A.riskKnown && A.open) fire(a.id + '|nostop', 2, `${name}: a position has no stop`, 'Risk is unlimited until it has one.', 4);
         else if (A.stopsBreach) fire(a.id + '|stopsbreach', 2, `${name}: stops sit past the breach line`, `If every stop fills, equity lands near ${usd(A.equityIfStopped)}; floor ${usd(A.floor)}.`, 4);
         if (A.reachedTarget) fire(a.id + '|target', 1, `${name}: equity at the profit target`, 'Check your platform (Kraken auto-closes at the target).', 4);
+        for (const x of [C.resetAlert(A, name, now), C.lossAlert(A, name)]) if (x) fire(a.id + '|' + x.key, x.lvl, x.title, x.body, x.prio);
         for (const p of S.positions.filter(p => p.acct === a.id && !p.closed)) {
           const px = P[p.sym];
           if (px == null) { fire(p.sym + '|noprice', 2, `${p.sym}: app can't see the price`, `Live data for ${p.sym} isn't loading, so stop and target checks are paused. Check your platform yourself.`, 4); continue; }
@@ -1879,6 +1975,8 @@
             else if (to < a1 * 0.3) fire(p.id + '|stopnear', 2, `${tag}: close to the stop`, `Price ${px.toFixed(1)}, stop ${p.stop}. Hold or exit per plan; don't widen it.`, 3); }
           const tgt = p.tp1 != null ? p.tp1 : p.tp2; if (tgt != null && d * (px - tgt) >= 0) fire(p.id + '|tp', 1, `${tag}: target reached`, `Price ${px.toFixed(1)} at target ${tgt}.`, 3);
           if (p.partialAt != null && d * (px - p.partialAt) >= 0) fire(p.id + '|partial|' + p.partialAt, 1, `${tag}: at your partial level`, `Price ${px.toFixed(1)} reached ${p.partialAt}. If your plan banks a partial here, close part by hand on your platform (Kraken Prop has no partial TP orders).`, 3);
+          { const sm = C.stopMove(p, px, analyses[p.sym] && analyses[p.sym].atr[60]);
+            if (sm) fire(p.id + '|stopmove|' + sm.kind, 1, `${tag}: up ${sm.r.toFixed(1)}R, tighten the stop?`, `Moving the stop to ${C.fmtPx(sm.to)} (${sm.why}) only tightens it and sits 1+ hourly ATR from price. Your plan decides; never widen.`, 3); }
           const h = lastHealth[p.id]; if (h && h.score != null && h.score <= 2) fire(p.id + '|health', 3 - h.score, `${tag}: health ${h.score}/5`, h.proposal, 4);
         }
       }
@@ -2078,10 +2176,16 @@
       </div>
       <div class=card><h3>24/7 monitor key</h3><p class=small>Paste a GitHub fine-grained key for <b>your monitor repo only</b>${ghRepo() ? ' (' + esc(ghRepo()) + ')' : ''}, permission <b>Contents: Read and write</b>. Then every import and trade change updates the monitor by itself. The key stays on this phone and is never in backups.</p>
       <label class=small style="display:block;margin-bottom:6px">Monitor repo (owner/name)<input id=ghRepo value="${esc(ghRepo())}" placeholder="you/your-monitor-repo" style="width:100%"></label><div class=row><input id=ghTok type=password placeholder="${ghToken() ? 'Key saved (paste to replace)' : 'github_pat_…'}" style="flex:1;min-width:180px"><button class="btn sm" id=ghSave>Save &amp; test</button>${ghToken() ? '<button class="btn sm bad" id=ghDel>Remove</button>' : ''}</div><p class=small id=ghStat>${S.lastPush ? 'Last update ' + fmtTime(S.lastPush, true) : ''}</p></div>
-      <div class=card><h3>Help improve the app</h3><label class=chk><input type=checkbox id=stShare ${t.shareLayout !== false ? 'checked' : ''}> When a screenshot isn't fully read, send its layout to the developer</label>
-      <p class="small mu">Only the text layout is sent, with every number replaced by 9 and account numbers and emails removed. Never the picture, your balances, sizes or prices. Each layout is sent once.</p>
-      <label class=chk><input type=checkbox id=stShareRes ${t.shareResults !== false ? 'checked' : ''}> Add my closed trades to everyone's Scorecard</label>
-      <p class="small mu">Sends only the setup type, model version, paper or live, and the result in R. No coin amounts, prices, dollars, account or times. Only "followed plan" trades are counted.</p></div>
+      <div class=card><h3>Shared learning pool</h3>
+      <p class=small>Optional. Your accounts, sizes, balances and notes stay on this device. Nothing here places a trade or changes your size, alerts, or trust and bench marks.</p>
+      <label class=chk><input type=checkbox id=stShareRes ${shareWanted('shareResults') ? 'checked' : ''}> Add my closed trades to the shared pool</label>
+      <p class="small mu">Each closed trade sends the setup type, model version, result in R, and the tag. The source is hand paper, automatic paper, or live. Paper trades also send the coin, timeframe, long or short, entry, stop, target, and the open and close times rounded to the hour, so they can be checked later on public candles. Live trades send no prices and no times. Never the size, dollars, balance, account, or notes. This browser has a random id; the server keeps only a salted hash of it. Only "followed plan" trades are counted.</p>
+      <label class=chk><input type=checkbox id=stShare ${shareWanted('shareLayout') ? 'checked' : ''}> When a screenshot isn't fully read, send its layout</label>
+      <p class="small mu">Layout text only: every number becomes 9, and account numbers and emails are removed. Never the picture, your balances, sizes or prices. Each layout is sent once.</p>
+      <p class=small>Anonymous id: <b class=mono>${peekInstall() ? esc(peekInstall().slice(0, 8)) + '…' : 'created when trade sharing is on'}</b> <button class="btn sm" id=stNewId type=button>Reset anonymous id</button></p>
+      ${(h => h ? `<p class="small warn">Trade sharing is paused (${esc(h.why)}) until ${esc(new Date(h.until).toISOString().slice(0, 16).replace('T', ' '))} UTC. <button class="btn sm" id=stRetry type=button>Try again</button></p>` : '')(holdOf(SHARE_HOLD))}
+      ${(h => h ? `<p class="small warn">Screenshot layouts were refused by the server (${esc(h.why)}). Copies of the app on other websites can't send layouts. <button class="btn sm" id=stRetryLay type=button>Try layouts again</button></p>` : '')(holdOf(SAMPLE_HOLD))}
+      </div>
       <div class=card><h3>Backup</h3><p class=small>Everything lives in this browser only. Export a backup now and then.</p>
       <div class=row><button class=btn id=stExp>Export backup</button><label class="btn">Import<input type=file id=stImp accept=application/json hidden></label><button class="btn bad" id=stClr>Erase all</button></div></div>
       <div class=card><h3>Data</h3><p class=small>Chart: Kraken spot candles (public WebSocket v2 + REST). P&amp;L: Kraken Futures perp mark (public WebSocket), falling back to spot when the mark is stale. Backup: Coinbase public candles (different venue, labeled). Free, no keys, nothing to install. Kraken Prop fills are simulated on Kraken's side and can differ from the public feed.</p>
@@ -2092,7 +2196,10 @@
     bind('#stSyms', el => { const v = el.value.split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z0-9]+\/[A-Z]+$/.test(x)); if (v.length) { T().symbols = v; if (!v.includes(T().sym)) T().sym = v[0]; ensureFeeds(); initChart(); } });
     bind('#stAge', el => { T().maxAge = Math.max(10, +el.value || 90); });
     bind('#stBasis', el => { T().priceBasis = ['usdt', 'mark', 'spot'].includes(el.value) ? el.value : 'usdt'; });
-    bind('#stBe', el => { T().beAt1R = el.checked; }); bind('#stShare', el => { T().shareLayout = el.checked; }); bind('#stShareRes', el => { T().shareResults = el.checked; }); bind('#stDir', el => { T().dirRule = el.checked; }); bind('#stBud', el => { T().budget = num(el.value) || 0; });
+    bind('#stBe', el => { T().beAt1R = el.checked; }); bind('#stShare', el => { setShareFlag('shareLayout', el.checked); }); bind('#stShareRes', el => { setShareFlag('shareResults', el.checked); }); bind('#stDir', el => { T().dirRule = el.checked; }); bind('#stBud', el => { T().budget = num(el.value) || 0; });
+    $('#stNewId').onclick = () => { if (!confirm('Reset the anonymous id? This browser will count as a new contributor. Trades already in the pool stay there.')) return; installId(true); renderSettings(); };
+    if ($('#stRetry')) $('#stRetry').onclick = () => { clearHold(SHARE_HOLD); sendResults(); renderSettings(); };
+    if ($('#stRetryLay')) $('#stRetryLay').onclick = () => { clearHold(SAMPLE_HOLD); renderSettings(); };
     $('#ghRepo').onchange = e => { const v = e.target.value.trim(); if (/^[\w.-]+\/[\w.-]+$/.test(v)) { T().monRepo = v; save(); } else alert('Use owner/repo, like you/prop-desk.'); };
     $('#ghSave').onclick = async () => { const v = $('#ghTok').value.trim(); if (!/^(github_pat_|ghp_)\w+/.test(v)) { alert('That doesn\'t look like a GitHub key.'); return; }
       try { localStorage.setItem(GH_KEY, v); } catch (e) { } $('#ghStat').textContent = 'Testing…'; const r = await pushWatch('key test');
@@ -2113,7 +2220,7 @@
     if ($('#ntOff')) $('#ntOff').onclick = e => { e.preventDefault(); if (confirm('Stop alerts and forget this channel? You can make a new one.')) { try { localStorage.removeItem(NT_KEY); localStorage.removeItem(MEM_KEY); } catch (x) { } renderSettings(); } };
     $('#stExp').onclick = () => { const b = new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `prop-desk-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
     $('#stImp').onchange = async e => { try { const j = JSON.parse(await e.target.files[0].text()); if (!Array.isArray(j.accounts) || !Array.isArray(j.positions)) throw 0; if (confirm('Replace current data with this backup?')) { S = Object.assign({}, DEF, j); S.settings = Object.assign({}, DEF.settings, j.settings || {}); save(); location.reload(); } } catch (x) { alert('Not a Prop Desk backup file.'); } };
-    $('#stClr').onclick = () => { if (confirm('Erase all accounts, positions and settings on this device?')) { localStorage.removeItem(KEY); location.reload(); } };
+    $('#stClr').onclick = () => { if (confirm('Erase all accounts, positions and settings on this device?')) { localStorage.removeItem(KEY); localStorage.removeItem(INSTALL_KEY); localStorage.removeItem(RESULT_KEY); localStorage.removeItem(SAMPLE_KEY); localStorage.removeItem(SHARE_HOLD); localStorage.removeItem(SAMPLE_HOLD); location.reload(); } };
   }
 
   // ---------- Loop ----------
@@ -2140,6 +2247,16 @@
   F.on(() => { if (!typing()) renderAll(false); });
   setInterval(() => { if (!typing()) renderAll(false); }, 3000);
 
+  function askShare() {
+    if (T().shareConsent === 'yes' || T().shareConsent === 'no') return;
+    const res = shareWanted('shareResults'), lay = shareWanted('shareLayout');
+    showModal(`<div data-consent><h3>Share anonymous results?</h3>
+      <p class=small>Nothing is sent until you save this choice. Untick anything you don't want to share. You can change it any time in Settings. It does not change your trade size, alerts, or trust and bench marks.</p>
+      <label class=chk style="align-items:flex-start"><input type=checkbox id=cRes ${res ? 'checked' : ''} style="margin-top:3px"> <span><b>Closed trades.</b> Setup type, model version, result in R, tag, and whether it was a hand paper trade, an automatic paper trade, or live. Paper trades also send the coin, timeframe, long or short, entry, stop, target, and open/close times rounded to the hour (so they can be checked on public candles). Live trades send no prices. Never size, dollars, balance, account, or notes. A random id for this browser is included; the server stores only a salted hash.</span></label>
+      <label class=chk style="align-items:flex-start"><input type=checkbox id=cLay ${lay ? 'checked' : ''} style="margin-top:3px"> <span><b>Screenshot layouts.</b> Only when a screenshot isn't fully read. The text layout, with every number replaced by 9 and emails and account numbers removed. Never the picture.</span></label>
+      <div class=row style="margin-top:10px"><button class="btn pri" id=cSave type=button>Save my choice</button></div></div>`);
+    $('#cSave').onclick = () => { setShareFlag('shareResults', $('#cRes').checked); setShareFlag('shareLayout', $('#cLay').checked); save(); closeModal(); };
+  }
   const demo = /[?&]demo\b/.test(location.search);
   PAL = themeColors(); Object.assign(PAL, { chartBg: '#000000', chartTx: PAL.tx, chartGrid: PAL.card, chartLine: PAL.line });
   F.start({ demo });
@@ -2147,5 +2264,6 @@
   applyTheme();
   ensureFeeds().then(() => { renderAll(true); setTimeout(applyTheme, 300); });
   renderAll(true);
+  askShare();
   window.__app = { S, analyze, C };
 })();
