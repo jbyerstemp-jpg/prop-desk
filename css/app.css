@@ -57,7 +57,7 @@ input[type=range]{padding:0;accent-color:var(--acc);width:100%}
 .seg button{background:none;border:0;color:var(--mu);padding:8px 10px;font:600 12px var(--font);border-right:1px solid var(--line);white-space:nowrap;text-shadow:var(--glow)}
 .seg button:last-child{border-right:0}.seg button.on{background:var(--line);color:var(--acc)}
 .chartwrap{position:relative;height:56vh;min-height:320px;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--bg)}
-#chart{position:absolute;inset:0;width:100%;height:100%;min-width:100%}
+#chart{position:relative;width:100%;height:100%;min-width:100%;display:block}
 #overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:3}
 .fsx,.fsinfo{display:none}
 .chartwrap.fs{position:fixed;inset:0;height:100vh;height:100dvh;z-index:50;border-radius:0;border:0}
@@ -267,10 +267,7 @@ html[data-mode=wastday] .up,html[data-mode=wastday] .dn,html[data-mode=wastday] 
   table.trades td[data-l="Trade"],table.trades td.acts{grid-column:1 / -1;text-align:left;white-space:normal}
   table.trades td.acts{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding-top:4px}
   table.trades .btn{min-height:44px;white-space:nowrap}
-  table.stack,table.stack tbody,table.stack tr{display:block;width:100%;min-width:0}
-  table.stack thead,table.stack tr:first-child{display:none}
-  table.stack tr{border-bottom:1px solid var(--line);padding:4px 0 6px}
-  table.stack td,table.stack th{display:block;width:auto;min-width:0;max-width:100%;border:0;padding:1px 0;text-align:left;white-space:normal;overflow-wrap:break-word}
+  /* .stack tables stay as rows — see overrides at end */
   table:not(.trades):not(.sc-desk):not(.stack){display:block;width:100%;min-width:0}
   table:not(.trades):not(.sc-desk):not(.stack) thead{display:none}
   table:not(.trades):not(.sc-desk):not(.stack) tbody,table:not(.trades):not(.sc-desk):not(.stack) tr{display:block;width:100%}
@@ -284,3 +281,28 @@ html[data-mode=pip] .tabs .tabrow button.on,html[data-mode=vault] .tabs .tabrow 
 html[data-mode=wastday] .tabs .tabrow button{color:#2a2622;border-color:color-mix(in srgb,var(--acc) 70%,#2a2622);background:color-mix(in srgb,var(--acc) 22%,#fff8ec)}
 html[data-mode=wastday] .tabs .tabrow button.on{background:var(--acc);color:#121313}
 html[data-mode=pip] .tabs .tabrow button:active,html[data-mode=vault] .tabs .tabrow button:active,html[data-mode=waste] .tabs .tabrow button:active,html[data-mode=wastday] .tabs .tabrow button:active{transform:scale(.96);box-shadow:inset 0 0 10px rgba(0,0,0,.45)}
+
+/* Force structure tables to stay single-line on phone */
+table.stack, table.stack thead, table.stack tbody, table.stack tr, table.stack th, table.stack td {
+  display: table !important;
+  display: revert !important;
+}
+table.stack { display: table !important; width: 100%; }
+table.stack tr { display: table-row !important; }
+table.stack th, table.stack td { display: table-cell !important; white-space: nowrap; padding: 4px 6px; }
+/* Kill the secondary subtabs row completely */
+#subtabs, .subtabs { display: none !important; }
+
+@media (max-width: 700px) {
+  .chartwrap {
+    height: 62vh !important;
+    min-height: 340px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  #chart {
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 100% !important;
+  }
+}

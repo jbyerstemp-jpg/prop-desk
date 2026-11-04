@@ -210,13 +210,15 @@
     if (!box) return;
     const r = box.getBoundingClientRect();
     let w = Math.round(r.width), h = Math.round(r.height);
-    if (w < 40 || h < 40) return;
-    // Force the chart element itself to the measured size so the canvas fills it.
+    if (w < 120) w = Math.min(window.innerWidth - 24, 1100);
+    if (h < 80) h = Math.max(340, Math.round(window.innerHeight * 0.55));
     const el = document.getElementById('chart');
-    if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
+    if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; el.style.minWidth = w + 'px'; }
     try {
       chartApi.resize(w, h);
       chartApi.applyOptions({ width: w, height: h });
+      chartApi.priceScale('right').applyOptions({ visible: true, borderVisible: true });
+      chartApi.timeScale().applyOptions({ visible: true, borderVisible: true, timeVisible: true });
     } catch (e) { }
     try { drawOverlay(); } catch (e) { }
   }
@@ -250,7 +252,7 @@
     const b = e.target.closest('button'); if (!b) return;
     tab = b.dataset.tab; posFormDirty = true;
     document.querySelectorAll('#tabs .tabrow button').forEach(x => x.classList.toggle('on', x === b));
-    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.id === 'tab-' + tab));
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.id === 'tab-' + tab)); if (tab === 'chart') setTimeout(sizeChart, 50);
     renderAll(true);
   });
   function sectionLabel(h) {
@@ -345,7 +347,11 @@
     if (chart) return;
     const el = $('#chart');
     const tzFmt = t => new Intl.DateTimeFormat('en-US', { timeZone: T().tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(t * 1000));
+    const box0 = document.getElementById('chartWrap');
+    const initW = box0 ? Math.max(box0.clientWidth || 0, window.innerWidth - 32) : window.innerWidth - 32;
+    const initH = box0 ? Math.max(box0.clientHeight || 0, 340) : 340;
     chart = LightweightCharts.createChart(el, {
+      width: initW, height: initH,
       layout: { background: { type: 'solid', color: PAL.bg }, textColor: PAL.tx, fontSize: 11 },
       grid: { vertLines: { color: PAL.card }, horzLines: { color: PAL.card } },
       rightPriceScale: { borderColor: PAL.line },
@@ -1378,7 +1384,7 @@
         + `<details class="card" ${fold('paper:rest')}><summary>Scorecard, trend systems, record and closed trades</summary>`;
     }
     paperHtml += scorecardHtml() + trendCardHtml() + trendPortCardHtml(trendForward()) + `<div class=card><h3>${simplePaper ? 'How paper trades work' : 'Paper trading'} <span class=tag>no money, builds the record</span></h3>
-      <p class=small>Add setups from the Chart tab ("Setups to watch") or the Coach ("Other setups"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
+      <p class=small>Add setups from the Market tab ("Setups to watch" or "Trade ideas"). Each one opens at the live price, then closes by itself at its stop or target, checked against the candles even while the app is closed (a candle touching both counts as the stop). Results are in R after fees and swap, the same rules as the replay test.</p>
       <label class=small style="display:flex;gap:6px;align-items:center;margin:6px 0"><input type=checkbox id=autoPaper ${T().autoPaper === false ? '' : 'checked'}> <span><b>Auto paper trades:</b> while the app is open, setups that pass the alert grade open as paper trades by themselves (max 1 per coin, 4 open, 6 a day). Tagged <span class=tag>auto</span> and counted separately. Collects data only; it never changes alerts or sizing.</span></label>
       ${simplePaper ? '' : paperAcctCard()}
       <p class="small mu">${esc(paperMsg || (ghToken() ? 'Saved to monitor/paper.json in your repo.' : 'Kept on this phone. Add the 24/7 monitor key in Settings to also save it to your repo.'))}</p></div>
@@ -2283,16 +2289,13 @@
       }).join('');
       $('#coachBox').innerHTML = `<div class=pair><div class=pair-main>${simpleReviews || '<div class=card><h3>Account review</h3><p class=mu>No open accounts.</p></div>'}</div><div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div></div>
         ${simpleCards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
-        ${marketCardHtml()}
-        <div class=card><h3>Setup scanner <span class=tag>${esc(sym)} · untested ideas</span></h3>${sizeAcctPicker()}${board.rows.length ? board.rows.map(r => r.gone ? goneCard(r) : setupCard('coach', r.rank - 1, r.u, '', r)).join('') : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}
-        <p class="small mu">Tap a stop or target to copy it. Paper trade and Take it live work the same as Advanced.</p></div>`;
+        ${marketCardHtml()}`;
       return;
     }
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
       ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
       ${marketCardHtml()}
-      <div class=card><h3>Other setups on ${esc(sym)} <span class=tag>ranked · most valid first</span></h3>${sizeAcctPicker()}${(rows => { const n = k => rows.filter(r => !r.gone && verdictOf(r.u).verdict === k).length, ev = rows.some(r => !r.gone && ['held_out_confirmed', 'paper_forward', 'live_record'].includes(verdictOf(r.u).label));
-        return rows.length ? `<p class=small><b>Verdicts:</b> ${n('ELIGIBLE')} eligible · ${n('PAPER ONLY')} paper only · ${n('NO TRADE')} no trade${ev ? '' : ' — nothing is held-out confirmed yet, so paper only is the best any setup can be'}.</p>` : ''; })(board.rows)}${board.rows.length ? board.rows.map(r => r.gone ? goneCard(r) : setupCard('coach', r.rank - 1, r.u, '', r)).join('') + '<p class="small mu">Ranked by the live check, re-ranked every few seconds: valid in the market now first, then what your account can take, then most checks passing, then best reward:risk from the price now; the replay grade breaks ties. ↑/↓ shows a move in the last 10 min. Setups the scanner no longer finds stay at the bottom for 4 h. Replay results say these have no proven edge yet; paper trading them builds your own record without risk.</p>' : '<p class=mu>Nothing clean right now. No trade is fine.</p>'}</div>
+
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
   }
   var coachUps = [], coachMem = {};
