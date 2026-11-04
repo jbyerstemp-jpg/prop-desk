@@ -97,7 +97,7 @@ function evaluate(watch, market, prev, now, opt) {
     for (const x of [C.resetAlert(A, name, now), C.lossAlert(A, name)]) if (x) fire(`${a.id}|${x.key}`, x.lvl, x.title, x.body, x.prio);
     for (const p of positions.filter(p => p.acct === a.id)) {
       const px = prices[p.sym];
-      if (px == null) { fire(`${p.sym}|noprice`, 2, `${p.sym}: monitor can't see the price`, `Kraken data didn't load this run, so stop and target checks for your ${p.sym} position are paused. Check your platform yourself.`, 4); continue; }
+      if (px == null) { fire(`${p.sym}|noprice`, 2, `${p.sym}: monitor can't see the price`, `the exchange data didn't load this run, so stop and target checks for your ${p.sym} position are paused. Check your platform yourself.`, 4); continue; }
       const d = p.side === 'short' ? -1 : 1, tag = `${p.sym} ${p.side} ${p.qty}@${C.fmtPx(p.entry)}`;
       if (p.stop != null) {
         const toStop = d * (px - p.stop), a1 = (data[p.sym] && data[p.sym].atr[60]) || px * 0.004;
@@ -106,7 +106,7 @@ function evaluate(watch, market, prev, now, opt) {
       }
       const tgt = p.tp1 != null ? p.tp1 : p.tp2;
       if (tgt != null && d * (px - tgt) >= 0) fire(`${p.id}|tp`, 1, `${tag}: target reached`, `Price ${C.fmtPx(px)} at/through target ${C.fmtPx(tgt)}. Re-import to sync.`, 3);
-      if (p.partialAt != null && d * (px - p.partialAt) >= 0) fire(`${p.id}|partial|${p.partialAt}`, 1, `${tag}: at your partial level`, `Price ${C.fmtPx(px)} reached ${C.fmtPx(p.partialAt)}. If your plan banks a partial here, close part by hand (Kraken Prop has no partial TP orders), then re-import.`, 3);
+      if (p.partialAt != null && d * (px - p.partialAt) >= 0) fire(`${p.id}|partial|${p.partialAt}`, 1, `${tag}: at your partial level`, `Price ${C.fmtPx(px)} reached ${C.fmtPx(p.partialAt)}. If your plan banks a partial here, close part by hand (the prop platform has no partial TP orders), then re-import.`, 3);
       { const sm = C.stopMove(p, px, (data[p.sym] && data[p.sym].atr[60]) || null);
         if (sm) fire(`${p.id}|stopmove|${sm.kind}`, 1, `${tag}: up ${sm.r.toFixed(1)}R, tighten the stop?`, `Moving the stop to ${C.fmtPx(sm.to)} (${sm.why}) only tightens it and sits 1+ hourly ATR from price. Your plan decides; never widen.`, 3); }
       const dd = data[p.sym];
@@ -187,8 +187,8 @@ function evaluate(watch, market, prev, now, opt) {
     else if (dn && m.funding != null && m.funding > 0) fire(`${s}|sqz|dn`, 2, `⚡ ${s}: long squeeze signs`, `Fast drop (${C.fmtPx(l15.high)}→${C.fmtPx(l15.low)} on 15m) with positive funding. Longs at risk.`, 4);
     else if (Math.abs(l15.high - l15.low) > 2.5 * a15) fire(`${s}|fast`, 1, `${s}: fast 15m move`, `Range ${C.fmtPx(Math.abs(l15.high - l15.low))} vs normal ${C.fmtPx(a15)}.`, 3);
   }
-  if (positions.length && watchAgeH != null && watchAgeH > 24) fire('watch|stale', 1, 'Monitor data is over a day old', 'Re-import your Kraken screenshots and tap "Send to monitor" so alerts match your real positions.', 2);
-  if (stale) fire('feed|stale', 1, 'Monitor: market data stale', 'Kraken public data looked old this run; alerts may be late.', 2);
+  if (positions.length && watchAgeH != null && watchAgeH > 24) fire('watch|stale', 1, 'Monitor data is over a day old', 'Re-import your the exchange screenshots and tap "Send to monitor" so alerts match your real positions.', 2);
+  if (stale) fire('feed|stale', 1, 'Monitor: market data stale', 'the exchange public data looked old this run; alerts may be late.', 2);
   // Coins not fully checked this run keep their health/setup/squeeze memory, so nothing repeats when their turn comes.
   const posSym = {}; for (const p of positions) posSym[p.id] = p.sym;
   const heavyKeySym = k => { const x = k.split('|'); return x[1] === 'health' ? posSym[x[0]] : x[0] === 'entry' ? x[1] : (x[1] === 'sqz' || x[1] === 'fast' || x[1] === 'fib' || x[1] === 'ctx') ? x[0] : null; };
@@ -334,7 +334,7 @@ async function runOnce(watch, prev, now, o) {
     } catch (e) { log(s + ' coinbase: ' + e.message); }
     market[s] = { xfvg, hl: hl && hl[s.split('/')[0]], c, price: est != null ? est * (1 + k.bps / 1e4) : (mark || spot), funding: t ? +t.fundingRate : null, oi: t ? +t.openInterest : null };
   }
-  // Market profile: traits of the last closed hour (Kraken candles) + the matching shard from the repo.
+  // Market profile: traits of the last closed hour (the exchange candles) + the matching shard from the repo.
   for (const s of heavy) {
     const m = market[s]; if (!m || !m.c[60] || !m.c[1440]) continue;
     try {

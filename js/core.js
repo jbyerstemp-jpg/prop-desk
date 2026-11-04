@@ -1,11 +1,11 @@
-/* Kraken Prop Desk - core math (no DOM). Runs in the browser and in Node tests.
+/* the prop platform Desk - core math (no DOM). Runs in the browser and in Node tests.
    Rules sources (checked Nov 1, 2026): see RULES.md. Every number here is editable in Settings. */
 (function (root) {
   'use strict';
 
-  // ---- Kraken Prop rules -------------------------------------------------
-  // MDL, MDD, fees, $200k cap: Kraken support centre. Targets, MDD per plan and prices:
-  // Kraken Prop storefront as recorded by PropRubric (27 Oct 2026). Confirm on the purchase screen.
+  // ---- the prop platform rules -------------------------------------------------
+  // MDL, MDD, fees, $200k cap: the exchange support centre. Targets, MDD per plan and prices:
+  // the prop platform storefront as recorded by PropRubric (27 Oct 2026). Confirm on the purchase screen.
   const PLANS = {
     advanced:     { name: 'Advanced',     target: 0.09, mdd: 0.03, mdl: 0.03,
                     price: { 5000: 20, 10000: 40, 25000: 95, 50000: 180, 100000: 330, 200000: 660 } },
@@ -20,10 +20,10 @@
   const CAPITAL_CAP = 200000;
   const ADDON_90 = 0.20;            // +20% of base price for the 90/10 split
   const RESET_MIN_UTC = 30;         // MDL resets 00:30 UTC
-  // Max leverage per coin (Breakout symbols list, Oct 29 2026; Kraken blog Aug 18 2026: BTC 10x).
+  // Max leverage per coin (Breakout symbols list, Oct 29 2026; the exchange blog Aug 18 2026: BTC 10x).
   // Evals bought before Aug 18 2026 may still be on BTC 5x: set per account.
   const LEVERAGE = { BTC: 10, ETH: 5, SOL: 5, XRP: 5, LINK: 5, LTC: 5, DOGE: 5, AVAX: 5, SUI: 5, HYPE: 3, WLD: 3, _default: 2 };
-  // Checked in the owner's Kraken Prop app (Advanced Eval, Oct 31 2026): BTC 10x, ETH 5x, HYPE 3x, SOL 5x, WLD 3x, XRP 5x.
+  // Checked in the owner's the prop platform app (Advanced Eval, Oct 31 2026): BTC 10x, ETH 5x, HYPE 3x, SOL 5x, WLD 3x, XRP 5x.
   // Max position per market, USD notional (Breakout symbols list). Unknown coins: assume 25k.
   const MAX_NOTIONAL = { BTC: 1e6, ETH: 1e6, SOL: 5e5, XRP: 3e5, LINK: 2e5, LTC: 2e5, DOGE: 2e5, AVAX: 2e5, SUI: 2e5, HYPE: 2e5, _default: 25000 };
 
@@ -43,7 +43,7 @@
   const profileById = id => PROFILES.find(p => p.id === id) || PROFILES[1];
 
   // ---- Time --------------------------------------------------------------
-  // Daily reset, minutes after 00:00 UTC (Kraken Prop: 30 = 00:30 UTC). Each account can set its own.
+  // Daily reset, minutes after 00:00 UTC (the prop platform: 30 = 00:30 UTC). Each account can set its own.
   function lastReset(nowMs, resetMin) {
     const m = resetMin == null ? RESET_MIN_UTC : resetMin;
     const d = new Date(nowMs);
@@ -72,7 +72,7 @@
     return v;
   }
 
-  // ISO time -> ms without Date.parse (Kraken sends 9 decimal places; older Safari rejects that).
+  // ISO time -> ms without Date.parse (the exchange sends 9 decimal places; older Safari rejects that).
   function parseIsoUtc(s) {
     const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/.exec(String(s));
     if (!m) return NaN;
@@ -80,8 +80,8 @@
     return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], ms);
   }
 
-  /* Prop price estimate: Kraken Prop quotes track USDT-margined perps (Breakout: OKX/Bybit USDT perps
-     are the best proxy). Convert the Kraken Futures USD mark into USDT: mark / (USDT price in USD).
+  /* Prop price estimate: the prop platform quotes track USDT-margined perps (Breakout: OKX/Bybit USDT perps
+     are the best proxy). Convert the the futures feed USD mark into USDT: mark / (USDT price in USD).
      Hypothesis from one same-moment comparison (Oct 31): owner must confirm. Unknown input -> null. */
   function propEstimate(markUsd, usdtUsd) {
     if (!(markUsd > 0) || !(usdtUsd > 0.9 && usdtUsd < 1.1)) return null;
@@ -140,9 +140,9 @@
     return { bps: med, n: r.length, spreadBps: r[r.length - 1] - r[0] };
   }
 
-  /* Read a Kraken Prop screen (OCR text or copied text). Returns what it could read; anything not found
+  /* Read a the prop platform screen (OCR text or copied text). Returns what it could read; anything not found
      stays null (never 0). Only the Open section is read; closed positions are ignored. */
-  function parseKrakenProp(text, nowMs) {
+  function parsePropScreen(text, nowMs) {
     const num = v => (v == null ? null : Number(String(v).replace(/,/g, '')));
     const T = String(text || '').replace(/\r/g, '');
     const grab = re => { const m = re.exec(T); return m ? num(m[1]) : null; };
@@ -186,7 +186,7 @@
       out.positions.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD',
         upnl: qm[3] != null ? num(qm[3]) : null, entry: num(em[1]), price: em[2] ? num(em[2]) : null, hasTP: tp, hasSL: sl });
     }
-    // Order sheets (tap an order in Kraken Prop, Nov 1 2026 layout): "Limit Buy / 0.094 BTC / @ 77692 USD", then on the Details tab
+    // Order sheets (tap an order in the prop platform, Nov 1 2026 layout): "Limit Buy / 0.094 BTC / @ 77692 USD", then on the Details tab
     // "Status open - 0% filled", "Type buy-limit", "Price 77,692.00", "Open time …", "Order ID …", and on the TP/SL tab "Take profit
     // price …", "Stop loss price …". An order is NOT a position: it's a working order until it's filled.
     out.orders = [];
@@ -222,7 +222,7 @@
         if (tw) { for (const k of Object.keys(o)) if (tw[k] == null && o[k] != null) tw[k] = o[k]; } else mo.push(Object.assign({}, o)); }
       out.orders = mo; }
     // Generic one-line positions from other platforms, e.g. "BTCUSD Long 0.10 @ 77,606.10 P&L -11.36" or "Sell 0.1 BTC at 77606.1".
-    out.layout = out.positions.length || /Avg\s*price|Total\s+equity/i.test(T) ? 'kraken' : 'generic';
+    out.layout = out.positions.length || /Avg\s*price|Total\s+equity/i.test(T) ? 'exchange' : 'generic';
     if (!out.positions.length) {
       const gre = /(?:\b([A-Z]{2,6})[-\/]?(?:USDT|USDC|USD)?\b[^\n]{0,12}?)?\b(long|short|buy|sell)\b\s*([\d]*\.?\d+)\s*([A-Z]{2,6})?(?:[-\/]?(?:USDT|USDC|USD))?\s*(?:@|at|entry(?:\s*price)?:?)\s*\$?([\d,]+\.?\d*)(?:[^\n]*?(?:P&L|PnL|uPnL|Unrealized)[:\s]*([-+]?\$?[\d,]*\.?\d+))?/gi;
       let gm;
@@ -233,7 +233,7 @@
       }
       if (out.positions.length) out.warnings.push('Read with the general reader (not a known platform layout): check every number before syncing.');
     }
-    // Closed list (Kraken shows each closed position's realized P&L, fees included).
+    // Closed list (the exchange shows each closed position's realized P&L, fees included).
     out.closedRows = [];
     { const cl = closedPart.split('\n').map(l => l.trim()).filter(Boolean);
       for (let i = 0; i < cl.length; i++) {
@@ -333,7 +333,7 @@
       : out.account.equity != null && out.upnlSum != null ? out.account.equity - out.upnlSum : null;
     return out;
   }
-  /* Account size from Kraken's limits: drawdown limit = size x (1 - MDD). */
+  /* Account size from the exchange's limits: drawdown limit = size x (1 - MDD). */
   function sizeFromLimits(plan, drawdownLimit, target) {
     const P = PLANS[plan]; if (!P) return null;
     for (const z of SIZES) {
@@ -346,7 +346,7 @@
   // ---- Symbols -----------------------------------------------------------
   const base = sym => String(sym).split('/')[0].toUpperCase();
   // Leverage comes from the venue, never asked (owner's rule, Nov 1 2026): a value read from his screenshots wins; otherwise the
-  // firm's published preset (Kraken Prop table above). A firm without a preset ("Other firm") has NO leverage until a screenshot
+  // firm's published preset (the prop platform table above). A firm without a preset ("Other firm") has NO leverage until a screenshot
   // shows it: levCap returns null and sizing says what's missing instead of guessing.
   function levMap(a) { const m = Object.assign({}, (a && a.leverage) || {}); if (a && a.plan === 'custom') m._preset = false; return m; }
   const levCap = (sym, lev) => { const b = base(sym); if (lev && lev[b]) return lev[b]; if (lev && lev._preset === false) return null; return LEVERAGE[b] || LEVERAGE._default; };
@@ -367,8 +367,8 @@
   const floorTo = (x, dp) => { const m = Math.pow(10, dp); return Math.floor(x * m + 1e-9) / m; };
 
   // ---- Positions & fees --------------------------------------------------
-  // Kraken books fees into BALANCE when charged: entry commission at open, swap fee every 4 hours,
-  // exit commission at close (Kraken: Understanding Fees). Kraken Prop's position screen shows the next
+  // the exchange books fees into BALANCE when charged: entry commission at open, swap fee every 4 hours,
+  // exit commission at close (the exchange: Understanding Fees). the prop platform's position screen shows the next
   // swap charge exactly 4h after each position's own open time (owner's screenshots, Oct 31 2026), and
   // charges it on the position's current value; we use the entry value (difference ~0.1% of a ~$0.43 fee).
   const dir = p => (p.side === 'short' ? -1 : 1);
@@ -448,7 +448,7 @@
     if (!isFinite(v) || v < lo || v > hi) return { error: `must be between ${lo}% and ${hi}%` };
     return { value: v / 100 };
   }
-  /* Balance ledger for one account, matching Kraken's Balance: every fee when charged, and each
+  /* Balance ledger for one account, matching the exchange's Balance: every fee when charged, and each
      close/partial's remaining amount so that a portion's total equals its stored net `realized`. */
   function ledger(acctId, positions, nowMs, f) {
     f = f || FEES;
@@ -472,7 +472,7 @@
     const f = opt.fees || FEES;
     const pl = planOf(a);
     const start = a.size;
-    // Without a Kraken reconcile, every logged event counts (backfilled trades included).
+    // Without a the exchange reconcile, every logged event counts (backfilled trades included).
     const anchorT = a.anchor ? a.anchor.t : -Infinity;
     const anchorBal = a.anchor ? a.anchor.bal : start;
     const ev = ledger(a.id, positions, nowMs, f);
@@ -494,7 +494,7 @@
       notional += p.entry * q;
       { const cap = levCap(p.sym, lev); if (cap) usedMargin += p.entry * q / cap; else marginUnknown++; }
       const hasStop = p.stop != null && isFinite(p.stop);
-      if (!hasStop) { if (p.krakenSL) slUnknown++; else noStop++; }
+      if (!hasStop) { if (p.platformSL) slUnknown++; else noStop++; }
       if (px == null || !isFinite(px)) {
         // Unknown price: never treat as flat. Value at the stop (worst planned case); no stop = unlimited.
         missingPx++;
@@ -517,7 +517,7 @@
       orderRisk += o.stop != null && isFinite(o.stop) ? o.qty * (Math.abs(o.entry - o.stop) + (o.entry + o.stop) * f.commission) : Infinity;
     }
     usedMargin += orderMargin; riskToStops += orderRisk;
-    // Kraken: equity = balance (fees already in it) + unrealized P&L.
+    // the exchange: equity = balance (fees already in it) + unrealized P&L.
     const equity = balance + upnl;
     const dailyFloor = dayStart * (1 - pl.mdl);
     // Platform's own numbers (from an import) win over the preset math.
@@ -564,7 +564,7 @@
     if (tradesToday >= prof.maxTrades)
       warnings.push({ lvl: 'warn', text: `${tradesToday} trades today: at your ${prof.name} limit of ${prof.maxTrades}.` });
     if (reachedTarget)
-      warnings.push({ lvl: 'warn', text: 'Equity is at the profit target. Check your platform (Kraken Prop auto-closes and marks the eval Passed here).' });
+      warnings.push({ lvl: 'warn', text: 'Equity is at the profit target. Check your platform (the prop platform auto-closes and marks the eval Passed here).' });
     return {
       plan: pl, profile: prof, start, balance, dayStart, equity, upnl, feesOpen, open: open.length, workingOrders: orders.length, orderRisk, orderMargin,
       dailyFloor, maxFloor, floor, room, dailyRoom, maxRoom, roomPct: room / start,
@@ -594,7 +594,7 @@
       const q = openQty(p), d = dir(p);
       g.n++; g.qtyNet += d * q; g[p.side] += q; g.cost += p.entry * q;
       if (p.stop != null && isFinite(p.stop)) g.plannedRisk += Math.max(0, -d * (p.stop - p.entry)) * q + p.stop * q * f.commission;
-      else if (p.krakenSL) g.slUnknown++; else g.noStop++;
+      else if (p.platformSL) g.slUnknown++; else g.noStop++;
       const tgt = p.tp1 != null ? p.tp1 : p.tp2;
       if (tgt != null) g.reward += Math.max(0, d * (tgt - p.entry)) * q - tgt * q * f.commission; else g.noTarget++;
     }
@@ -644,7 +644,7 @@
   // ---- Sizing ------------------------------------------------------------
   function sizeFor(o) {
     // o: {sym, entry, stop, risk, equity, usedMargin?, symNotional?, fees?, leverage?}
-    // Margin is one shared pool (Kraken Prop dashboard: Used / Available margin), so other open
+    // Margin is one shared pool (the prop platform dashboard: Used / Available margin), so other open
     // positions reduce what a new one can take. Each market also has a USD notional cap.
     const f = o.fees || FEES;
     const dist = Math.abs(o.entry - o.stop);
@@ -787,14 +787,14 @@
     }
     return res;
   }
-  /* Opening range. anchor: 'ny' (09:30 New York), 'utc' (00:00 UTC), 'kraken' (00:30 UTC). durMin: range length.
+  /* Opening range. anchor: 'ny' (09:30 New York), 'utc' (00:00 UTC), 'exchange' (00:30 UTC). durMin: range length.
      breakout = first CLOSED candle after the range that closes beyond it. */
   function openingRange(c, anchor, durMin, tz) {
     if (!c.length) return null;
     const step = c.length > 1 ? c[1].time - c[0].time : 300;
     const inRange = x => {
       if (anchor === 'ny') { const tp = tzParts(x.time, tz || 'America/New_York'); return { on: tp.min >= 570 && tp.min < 570 + durMin, key: tp.date }; }
-      const off = anchor === 'kraken' ? 30 : 0;
+      const off = anchor === 'exchange' ? 30 : 0;
       const m = Math.floor(((x.time / 60) - off) % 1440 + 1440) % 1440;
       return { on: m < durMin, key: Math.floor((x.time / 60 - off) / 1440) };
     };
@@ -959,7 +959,7 @@
     let proposal = 'Keep the existing plan';
 
     // 1. Stop exists and is on the right side
-    if ((p.stop == null || !isFinite(p.stop)) && p.krakenSL) { cap = 2; obs('Your platform shows a stop on this position, but its price isn\'t in the app, so the risk can\'t be measured.'); act('Import a screenshot of this position\'s TP/SL so the stop price is known.'); proposal = 'Import the stop price'; }
+    if ((p.stop == null || !isFinite(p.stop)) && p.platformSL) { cap = 2; obs('Your platform shows a stop on this position, but its price isn\'t in the app, so the risk can\'t be measured.'); act('Import a screenshot of this position\'s TP/SL so the stop price is known.'); proposal = 'Import the stop price'; }
     else if (p.stop == null || !isFinite(p.stop)) { cap = 1; obs('No stop. Unlimited risk to the account.'); act('Set a stop on your platform now.'); proposal = 'Add protection'; }
     else if ((d > 0 && px <= p.stop) || (d < 0 && px >= p.stop)) { cap = Math.min(cap, 1); obs(`Price ${fmtPx(px)} is through your stop ${fmtPx(p.stop)}. Stop orders can slip or fail to fill.`); act('Check the order state on your platform now. If it filled, log the close.'); proposal = 'Verify order state'; }
 
@@ -1263,7 +1263,7 @@
   /* Volume read on an impulse leg and its pullback (owner's request, Nov 1 2026). Rule, not a forecast:
      continuation signs = leg on heavy volume (avg RVOL >= 1.3) AND pullback on light volume (avg RVOL <= 0.8) AND no climax bar against it;
      reversal warning = pullback volume >= leg volume, OR a climax bar (RVOL >= 2) closing against the leg within the last 5 bars of the
-     leg or anywhere in the pullback; otherwise unclear. Kraken volume only (one venue). Untested. */
+     leg or anywhere in the pullback; otherwise unclear. the exchange volume only (one venue). Untested. */
   function volumeRead(closed, i0, iEnd, up) {
     const avg = (a, b) => { const r = []; for (let i = a; i <= b; i++) { const x = rvol(closed, i); if (x != null) r.push(x); } return r.length ? r.reduce((s, x) => s + x, 0) / r.length : null; };
     const leg = avg(i0 + 1, iEnd), pull = iEnd < closed.length - 1 ? avg(iEnd + 1, closed.length - 1) : null;
@@ -1520,7 +1520,7 @@
       if (!pos && o.parentId) { pos = appOpen.find(p => opp(p) && p.orderId === o.parentId); if (pos) by = 'parent order ID'; }
       if (!pos) {
         const lvl = p => o.type === 'take-profit' ? p.tp1 : p.stop;
-        const c = appOpen.filter(p => opp(p) && lvl(p) != null && samePx(lvl(p), o.price));   // any size: on Kraken Prop the TP/SL closes whatever is left after manual partials
+        const c = appOpen.filter(p => opp(p) && lvl(p) != null && samePx(lvl(p), o.price));   // any size: on the prop platform the TP/SL closes whatever is left after manual partials
         if (c.length === 1) { pos = c[0]; by = 'price (no ID match)'; }
         else { out.skipped.push({ order: o, why: c.length ? `${c.length} positions have this ${o.type === 'stop' ? 'stop' : 'target'} and size: tap the position and screenshot its details so the IDs match` : 'no open position with this coin, side, size and price' }); continue; }
       }
@@ -1533,7 +1533,7 @@
   }
   /* Verified screenshots win over what was saved (owner, Nov 2 2026). Corrects trades already CLOSED in the app:
      1) a row of the platform's Closed list (side, coin, size, entry, its net result and exit) that matches a closed trade whose saved
-        result or exit differs: the platform's numbers replace the app's (Kraken's own net, fees included);
+        result or exit differs: the platform's numbers replace the app's (the exchange's own net, fees included);
      2) a filled take-profit / stop order that matched no open position: matched to a closed trade (own ID, parent ID, then a unique
         price + full size match) and its exit and result are recomputed from the fill.
      Only trades closed in the last `days` days (default 14), never one with partial closes (those are edited by hand), never the same
@@ -1567,7 +1567,7 @@
     return out;
   }
 
-  /* Ledger rows (newest first as Kraken lists them) in the order they happened: oldest first, numbered 1, 2, 3 ... Rows have dates but
+  /* Ledger rows (newest first as the exchange lists them) in the order they happened: oldest first, numbered 1, 2, 3 ... Rows have dates but
      no times, so the number is the only exact order within a day. Merging with rows saved earlier: a row is the same row when its
      date, amount and running balance all match. */
   function ledgerTimeline(rows, saved) {
@@ -2175,10 +2175,12 @@
     return x.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
   }
   const tfName = tf => ({ '1': '1m', '5': '5m', '15': '15m', '60': '1h', '240': '4h', '1440': '1D' }[String(tf)] || tf + 'm');
+  // Header view switch. Anything other than the explicit simple view stays the full desk (existing installs included).
+  const uiView = v => v === 'simple' ? 'simple' : 'advanced';
 
-  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, parseKrakenProp, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, parsePropScreen, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
-    sessionRanges, openingRange, keyLevels, OPEN, openDays, trend4h, openTrade, openRead, openPlan, health, setupsToWatch, fmtUsd, fmtPx, tfName };
+    sessionRanges, openingRange, keyLevels, OPEN, openDays, trend4h, openTrade, openRead, openPlan, health, setupsToWatch, fmtUsd, fmtPx, tfName, uiView };
   if (typeof module !== 'undefined' && module.exports) module.exports = Core; else root.Core = Core;
 })(typeof window !== 'undefined' ? window : globalThis);
