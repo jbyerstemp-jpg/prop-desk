@@ -1,15 +1,15 @@
-/* Prop Desk research read: the adapter between the app's Kraken candles and the experimental research engine
+/* Prop Desk research read: the adapter between the app's the exchange candles and the experimental research engine
    (js/research-model.js, v0.4). One shared copy for the app, the Coach and (later) the monitor and replay tests.
    Read-only measurements, not signals. No sizing here: account risk stays in core.js (weighIdea). */
 (function (root) {
   'use strict';
   const M = (typeof module !== 'undefined' && module.exports) ? require('./research-model.js') : root.PropDeskResearch;
-  // Price step per Kraken market (unconfirmed against Kraken's pair list; check before relying on tweezers/zones).
+  // Price step per the exchange market (unconfirmed against the exchange's pair list; check before relying on tweezers/zones).
   const TICK = { 'BTC/USD': 0.1, 'ETH/USD': 0.01, 'SOL/USD': 0.01, 'XRP/USD': 0.00001 };
   const TFS = [15, 60, 240, 1440];
   const tickFor = (sym, px) => TICK[sym] || (px >= 1000 ? 0.1 : px >= 10 ? 0.01 : px >= 1 ? 0.001 : 0.00001);
 
-  /* Kraken rows (time = bar OPEN, seconds; last row may still be forming) -> engine stream (time = bar CLOSE, ms).
+  /* the exchange rows (time = bar OPEN, seconds; last row may still be forming) -> engine stream (time = bar CLOSE, ms).
      Broken rows are dropped; the engine then sees the gap and blocks alerts (it never guesses a missing bar). */
   function toStream(sym, tfMin, rows, nowMs, venue) {
     const iv = tfMin * 60e3, bars = [], seen = new Set();
@@ -24,7 +24,7 @@
       else if (close - nowMs <= iv) live = Object.assign(b, { closed: false });
     }
     if (live && bars.length && live.time !== bars[bars.length - 1].time + iv) live = null;   // engine wants exactly the next bar
-    return { stream: { symbol: sym, venue: venue || 'kraken', timeframe: tfMin + 'm', intervalMs: iv, staleAfterMs: 2 * iv + 120e3, bars, liveBar: live }, dropped };
+    return { stream: { symbol: sym, venue: venue || 'exchange', timeframe: tfMin + 'm', intervalMs: iv, staleAfterMs: 2 * iv + 120e3, bars, liveBar: live }, dropped };
   }
 
   const recent = (list, since) => list.filter(e => e.eventTime >= since);
@@ -48,7 +48,7 @@
     };
   }
 
-  /* Run every timeframe on its own; one failing timeframe never hides the others. candlesFor(tfMin) -> Kraken rows. */
+  /* Run every timeframe on its own; one failing timeframe never hides the others. candlesFor(tfMin) -> the exchange rows. */
   function read(sym, candlesFor, nowMs, venue) {
     const out = { sym, at: nowMs, version: M.VERSION, tfs: {} };
     for (const tf of TFS) {

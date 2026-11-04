@@ -1,4 +1,4 @@
-/* Market data: Kraken public feed (REST history + WebSocket v2 live). Coinbase public candles as a
+/* Market data: the exchange public feed (REST history + WebSocket v2 live). Coinbase public candles as a
    labeled fallback (different venue). No keys, read-only. Demo mode (?demo) is synthetic and labeled. */
 (function (root) {
   'use strict';
@@ -29,7 +29,7 @@
     tick[sym] = { last: +last, bid: bid != null ? +bid : null, ask: ask != null ? +ask : null, t: t || Date.now() };
   }
 
-  // ---- Kraken REST history ----
+  // ---- the exchange REST history ----
   async function krHistory(sym, iv) {
     const r = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${krPair(sym)}&interval=${iv}`, { cache: 'no-store' });
     const j = await r.json();
@@ -41,7 +41,7 @@
     if (l && !tick[sym]) setTick(sym, l.close, null, null, Date.now() - 60000);   // REST close is not a live tick
   }
 
-  // ---- Kraken WebSocket v2 ----
+  // ---- the exchange WebSocket v2 ----
   function wsSend(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
   function wsSubscribeAll() {
     const syms = [...tickSubs];
@@ -54,7 +54,7 @@
     if (F.demo) return;
     try { ws = new WebSocket('wss://ws.kraken.com/v2'); } catch (e) { F.errors.push('ws: ' + e.message); startFallback(); return; }
     F.status = 'connecting';
-    ws.onopen = () => { wsBackoff = 1000; F.status = 'live'; F.source = 'Kraken'; stopFallback(); wsSubscribeAll(); emit(); };
+    ws.onopen = () => { wsBackoff = 1000; F.status = 'live'; F.source = 'Exchange'; stopFallback(); wsSubscribeAll(); emit(); };
     ws.onmessage = ev => {
       lastMsg = Date.now();
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -68,10 +68,10 @@
       }
     };
     ws.onclose = () => { F.status = 'reconnecting'; emit(); setTimeout(wsConnect, wsBackoff); wsBackoff = Math.min(30000, wsBackoff * 2); if (wsBackoff >= 8000) startFallback(); };
-    ws.onerror = () => { F.errors.push('Kraken WebSocket error'); };
+    ws.onerror = () => { F.errors.push('the exchange WebSocket error'); };
   }
 
-  // ---- Kraken Futures perp mark price (P&L basis; Kraken Prop values positions at a mark price) ----
+  // ---- the futures feed perp mark price (P&L basis; the prop platform values positions at a mark price) ----
   const mark = {};            // sym -> {price, t}
   const markSubs = new Set();
   let fws = null, fBackoff = 2000;
@@ -87,7 +87,7 @@
       else if (m.event === 'error' || m.event === 'subscribed_failed') F.errors.push('futures: ' + (m.message || m.event));
     };
     fws.onclose = () => { setTimeout(fwsConnect, fBackoff); fBackoff = Math.min(60000, fBackoff * 2); };
-    fws.onerror = () => { F.errors.push('Kraken Futures WebSocket error'); };
+    fws.onerror = () => { F.errors.push('the futures feed WebSocket error'); };
   }
   F.wantMark = sym => {
     if (markSubs.has(sym)) return;
@@ -133,8 +133,8 @@
   // All live quotes for one symbol, for the cross-check panel.
   F.sources = sym => {
     const now = Date.now(), out = [];
-    if (tick[sym]) out.push({ name: 'Kraken spot', price: tick[sym].last, ageSec: (now - tick[sym].t) / 1000 });
-    if (mark[sym]) out.push({ name: 'Kraken Futures mark', price: mark[sym].price, ageSec: (now - mark[sym].t) / 1000 });
+    if (tick[sym]) out.push({ name: 'the spot feed', price: tick[sym].last, ageSec: (now - tick[sym].t) / 1000 });
+    if (mark[sym]) out.push({ name: 'the futures feed mark', price: mark[sym].price, ageSec: (now - mark[sym].t) / 1000 });
     for (const n of Object.keys(refs)) if (refs[n][sym]) out.push({ name: n, price: refs[n][sym].price, ageSec: (now - refs[n][sym].t) / 1000 });
     return out;
   };
@@ -159,7 +159,7 @@
   }
   function startFallback() {
     if (fallbackTimer || F.demo) return;
-    F.source = 'Coinbase (fallback)'; F.note = 'Kraken feed down: showing Coinbase prices. Kraken Prop fills can differ.';
+    F.source = 'Coinbase (fallback)'; F.note = 'the exchange feed down: showing Coinbase prices. the prop platform fills can differ.';
     const run = async () => {
       for (const k of subs) { const [s, iv] = k.split('|'); try { await cbCandles(s, +iv); } catch (e) { F.errors.push('coinbase ' + k); } }
       F.status = 'fallback'; emit();
@@ -228,7 +228,7 @@
     if (F.demo || !newOnes.length) return;
     for (const iv of newOnes) {
       try { await krHistory(sym, iv); }
-      catch (e) { F.errors.push(`Kraken REST ${sym} ${iv}: ${e.message}`); if (fallbackTimer) { try { await cbCandles(sym, iv); } catch (x) { } } }
+      catch (e) { F.errors.push(`the exchange REST ${sym} ${iv}: ${e.message}`); if (fallbackTimer) { try { await cbCandles(sym, iv); } catch (x) { } } }
       if (ws && ws.readyState === 1) wsSend({ method: 'subscribe', params: { channel: 'ohlc', symbol: [sym], interval: iv, snapshot: true } });
     }
     emit();

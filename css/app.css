@@ -1,9 +1,15 @@
 /* Prop Desk. Colors are theme variables (set by js/app.js applyTheme). Danger red and warning yellow
    never change with the theme so a breach warning can't blend in. */
+@font-face{font-family:"Share Tech Mono";src:url("../vendor/fonts/ShareTechMono-Regular.woff2") format("woff2");font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:"Roboto Condensed";src:url("../vendor/fonts/RobotoCondensed-Regular.woff2") format("woff2");font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:"Roboto Condensed";src:url("../vendor/fonts/RobotoCondensed-Bold.woff2") format("woff2");font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:"Courier Prime";src:url("../vendor/fonts/CourierPrime-Regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:"Stardos Stencil";src:url("../vendor/fonts/StardosStencil-Regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:"Rye";src:url("../vendor/fonts/Rye-Regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:swap}
 :root{--bg:#000;--card:#0b0d10;--line:#1e2630;--tx:#d6dde6;--mu:#8696a8;--acc:#5b9cff;--up:#26a69a;--dn:#ef5350;--ok:#3fb950;
   --bad:#ff4d4d;--warn:#ffd23f;--glow:none;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--radius:10px;--navh:58px}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 var(--font);text-shadow:var(--glow)}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 var(--font);text-shadow:var(--glow);touch-action:manipulation}
 body{padding-bottom:calc(var(--navh) + env(safe-area-inset-bottom))}
 a{color:var(--acc)}
 
@@ -19,11 +25,18 @@ a{color:var(--acc)}
 .banner.demo{background:#3a0000;color:#ffb3b3;font-weight:700}
 
 /* Bottom tab bar (thumb reach) */
-.tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:var(--bg);border-top:1px solid var(--line);
-  padding-bottom:env(safe-area-inset-bottom);height:calc(var(--navh) + env(safe-area-inset-bottom))}
-.tabs button{flex:1;background:none;border:0;color:var(--mu);font:600 12px var(--font);letter-spacing:.04em;text-transform:uppercase;
-  border-top:2px solid transparent;padding:0 2px;text-shadow:var(--glow)}
-.tabs button.on{color:var(--acc);border-top-color:var(--acc);background:var(--card)}
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;flex-direction:column;background:var(--bg);border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom)}
+.tabrow{display:flex;width:100%}
+.tabs .tabrow button{flex:1 1 0;min-width:0;min-height:44px;margin:4px 1px;padding:6px 1px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--tx);
+  font:600 clamp(8px,2.35vw,12px) var(--font);letter-spacing:0;text-transform:uppercase;white-space:nowrap;overflow:hidden}
+.tabs .tabrow button.on{background:var(--acc);color:#121313;border-color:var(--acc)}
+.tabs .tabrow button:active{transform:scale(.96)}
+.subtabs{display:flex;gap:10px;overflow-x:auto;padding:4px 8px 0;-webkit-overflow-scrolling:touch}
+.subtabs[hidden]{display:none}
+.subtabs button{flex:0 0 auto;background:none;border:0;border-bottom:2px solid transparent;color:var(--mu);min-height:28px;padding:2px 2px 4px;
+  font:11px "Share Tech Mono",ui-monospace,Menlo,monospace;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.subtabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
 
 main{padding:12px 16px 24px;max-width:1100px;margin:0 auto}
 .tab{display:none}.tab.on{display:block}
@@ -78,6 +91,9 @@ th{color:var(--mu);font-weight:500;font-size:12px}
 .form label{font-size:12px;color:var(--mu);display:flex;flex-direction:column;gap:3px}
 .form .wide{grid-column:1/-1}
 .chk{font-size:13px;color:var(--mu);display:flex;gap:6px;align-items:center}
+.toast{position:fixed;left:12px;right:12px;bottom:calc(96px + env(safe-area-inset-bottom));z-index:40;display:flex;gap:8px;align-items:center;justify-content:space-between;background:var(--card);color:var(--tx);border:1px solid var(--acc);border-radius:8px;padding:8px 10px;font-size:13px;box-shadow:0 0 12px color-mix(in srgb,var(--acc) 35%,transparent)}
+.toast[hidden]{display:none}
+.toast .btn{min-height:36px;white-space:nowrap}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;display:flex;align-items:flex-end;justify-content:center;padding:0}
 .modal[hidden]{display:none}
 .modal-card{background:var(--card);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom));max-width:640px;width:100%;max-height:88vh;overflow:auto}
@@ -88,13 +104,57 @@ th{color:var(--mu);font-weight:500;font-size:12px}
 .swatches{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .swatches button{background:#000;border:2px solid var(--line);border-radius:10px;padding:10px 6px;font:700 12px ui-monospace,Menlo,monospace;letter-spacing:.05em;text-transform:uppercase}
 .swatches button.on{border-color:currentColor;box-shadow:0 0 10px currentColor}
-/* Pip-Boy look */
-html[data-mode=pip]{--font:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--radius:4px}
+/* Pip-Boy look. Numbers use Share Tech Mono; labels use Roboto Condensed. Both are OFL and self-hosted. */
+html[data-mode=pip]{--font:"Share Tech Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;--radius:4px}
 html[data-mode=pip] .brand::before{content:"▣ "}
-html[data-scan=on] body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:200;
-  background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.25) 3px)}
+html[data-mode=pip] .brand,html[data-mode=pip] .btn{font-family:"Roboto Condensed","Segoe UI",sans-serif}
+html[data-mode=pip] h3{font-family:"Courier Prime","Share Tech Mono",ui-monospace,monospace;font-size:15px;font-weight:400;letter-spacing:.01em}
+html[data-mode=pip] h3::before{content:"[ "}html[data-mode=pip] h3::after{content:" ]"}
+html[data-mode=pip] .seg button.on,html[data-mode=pip] .profiles button.on{background:var(--acc);color:var(--bg);text-shadow:none}
+html[data-mode=pip] .bar>i{background:repeating-linear-gradient(90deg,var(--acc) 0 8px,transparent 8px 11px)}
+/* Screen effects live on their own layer, never on html or body.
+   A filter, transform, or fixed overlay on body makes iOS treat the tab bar as part of the page. */
+#screenFx{display:none;position:fixed;inset:0;pointer-events:none;z-index:40}
+html[data-scan=on] #screenFx,html[data-grain=on] #screenFx,html[data-sweep=on] #screenFx{display:block}
+html[data-scan=on] #screenFx{background:radial-gradient(ellipse at center,transparent 62%,rgba(0,0,0,.4) 100%),repeating-linear-gradient(to bottom,rgba(0,0,0,.16) 0 1px,transparent 1px 3px)}
+html[data-grain=on] #screenFx::before{content:"";position:absolute;inset:0;opacity:.04;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");background-size:160px 160px}
+@media (prefers-reduced-motion:no-preference){
+  html[data-scan=on][data-flicker=on] #screenFx{animation:crt-flicker 7s steps(1) infinite}
+  html[data-sweep=on] #screenFx::after{content:"";position:absolute;left:0;right:0;height:22%;top:0;background:linear-gradient(to bottom,transparent,rgba(255,255,255,.07),transparent);animation:crt-sweep 10s linear infinite}
+}
+@keyframes crt-flicker{0%,100%{opacity:1}46%{opacity:.93}47%{opacity:1}81%{opacity:.96}82%{opacity:1}}
+@keyframes crt-sweep{from{transform:translateY(-120%)}to{transform:translateY(520%)}}
+@media (prefers-reduced-motion:reduce){
+  html[data-flicker=on] #screenFx,html[data-sweep=on] #screenFx::after{animation:none}
+  html[data-sweep=on] #screenFx::after{display:none}
+}
+html[data-glow=on] h3,html[data-glow=on] .brand,html[data-glow=on] .stat .v{text-shadow:0 0 2px var(--acc),0 0 8px color-mix(in srgb,var(--acc) 22%,transparent)}
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.presets button{background:#000;border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-height:40px;font:700 12px "Roboto Condensed","Segoe UI",sans-serif;letter-spacing:.03em}
+.presets button.on{border-color:currentColor;box-shadow:0 0 8px currentColor}
+/* Phone and installed PWA: the page itself does not scroll. Only <main> scrolls, and the
+   tab bar is a row in that frame, so iOS cannot drag a position:fixed bar up the page.
+   Do not put transform, filter, or will-change on html or body. */
+@media (max-width:899px){
+  html,body{height:var(--app-h,100dvh);max-height:var(--app-h,100dvh);overflow:hidden}
+  body{position:fixed;left:0;right:0;top:var(--app-top,0px);width:100%;max-width:100%;display:flex;flex-direction:column;padding-bottom:0}
+  .top,#banner,#updBar,main,.tabs{flex:0 0 auto;min-width:0;max-width:100%}
+  main{order:4;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+  .tabs{order:8;position:static;left:auto;right:auto;bottom:auto;width:100%;height:auto;padding-bottom:env(safe-area-inset-bottom)}
+  #screenFx{position:absolute}
+  /* Wide tables scroll inside the card. Cells keep whole words; they must not shrink to one letter. */
+  .card,.tab,details,.grid2,.pair,.row,.form,.kv,.totals,.sc-h,.chartbar,.seg{min-width:0;max-width:100%}
+  .card{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .chartwrap{max-width:100%}
+  p,.small,li,summary{overflow-wrap:break-word}
+  button,.btn,.tag,.seg button,table label{white-space:nowrap}
+  .top .feed{flex:1 1 100%}
+  .tabs{height:auto;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
+  .tabrow{display:flex;width:100%}
+}
 @media (min-width:900px){.tabs{position:static;height:auto;padding:0 8px;border-top:0;border-bottom:1px solid var(--line)}.tabs button{flex:0 0 auto;padding:12px 16px;border-top:0;border-bottom:2px solid transparent}
-  .tabs button.on{border-bottom-color:var(--acc)}body{padding-bottom:0}.modal{align-items:center;padding:16px}.modal-card{border-radius:12px}}
+  .tabs button.on{border-bottom-color:var(--acc)}html,body{height:auto;max-height:none;overflow:visible}body{position:static;display:block;top:auto;padding-bottom:0}main{overflow:visible;min-height:0}
+  .modal{align-items:center;padding:16px}.modal-card{border-radius:12px}}
 @media (max-width:600px){main{padding:10px 16px 20px}.chartwrap{height:50vh}.grid2{grid-template-columns:1fr}.kv{grid-template-columns:1fr 1fr}
   .totals{grid-template-columns:1fr 1fr}.reset{font-size:11px}}
 
@@ -115,3 +175,112 @@ details>summary::before{content:"▸ ";color:var(--acc)}details[open]>summary::b
 .sc-w{margin-top:6px;font-size:12px}.sc-w>summary{color:var(--mu);min-height:28px}.sc-w>div{margin-top:4px}
 .hist{margin:6px 0;font-size:12px}.hist td{padding:2px 6px 2px 0;vertical-align:top}.hist td:first-child{white-space:nowrap}
 .rank{display:inline-block;min-width:26px;color:var(--acc)}.sc.gone{opacity:.55}
+/* Simple view is layout only. Colors, font and scanlines come from the Settings theme.
+   Advanced has no data-ui=simple, so none of these rules apply there. */
+#viewSeg{flex:0 0 auto}
+#viewSeg button{min-height:34px}
+.qmark{width:36px;min-width:36px;height:36px;min-height:36px;padding:0;border-radius:50%;line-height:1;font-weight:700}
+.pair{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:12px;align-items:start;margin-bottom:12px}
+.pair .card{margin:0}
+.pair-main .card{margin:0 0 12px}
+.pair-main .card:last-child{margin:0}
+.srow{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:6px 0}
+.srow>span{font-size:14px;min-width:0}
+html[data-ui=simple] .srow .btn{white-space:nowrap;flex:0 0 auto}
+html[data-ui=simple] #paperBox td.num,html[data-ui=simple] #paperBox th.num{white-space:nowrap}
+html[data-ui=simple] #tab-chart>.grid2{display:none}
+html[data-ui=simple] .chartwrap{height:64vh;min-height:300px}
+html[data-ui=simple] #impExplain{display:none}
+html[data-ui=simple] #importCard{padding:8px 10px}
+html[data-ui=simple] #importCard h3{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+html[data-ui=simple] #importCard .btn.pri{min-height:44px;font-size:15px}
+html[data-ui=simple] .desk-x{display:none}
+html[data-ui=simple] .coach-head{display:block}
+html[data-ui=simple] #monCard{width:100%;max-width:100%;margin:0 0 8px}
+html[data-ui=simple] #monBlurb{display:none}
+html[data-ui=simple] #monCard .row{margin:0}
+html[data-ui=simple] #copyClaude{display:none}
+html[data-ui=simple] .sc-compact .sc-p{grid-template-columns:1fr 1fr}
+html[data-ui=simple] .jhead,html[data-ui=simple] .jrow>summary.jsum{display:grid;grid-template-columns:16px minmax(0,1.15fr) minmax(0,.95fr) minmax(0,.72fr) minmax(0,.95fr) minmax(0,.55fr) minmax(0,.62fr);gap:3px;align-items:center;width:100%;text-align:left;background:none;color:inherit;font:12px/1.3 var(--font);padding:8px 2px;min-height:44px}
+html[data-ui=simple] .jhead{min-height:0;padding:2px 2px 4px;color:var(--mu);font-size:10px;letter-spacing:.04em;text-transform:uppercase}
+html[data-ui=simple] .jrow{border-top:1px solid var(--line)}
+html[data-ui=simple] .jrow>summary.jsum span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+html[data-ui=simple] .jdetail{padding:4px 0 10px 16px}
+html[data-ui=simple] .mkt-fold>summary{font-weight:700;color:var(--acc)}
+@media (max-width:600px){
+  html[data-ui=simple] .pair{grid-template-columns:1fr}
+  html[data-ui=simple] #tab-chart.tab.on{display:flex;flex-direction:column;min-height:100%}
+  html[data-ui=simple] .chartwrap{flex:1 1 auto;height:auto;min-height:200px}
+  html[data-ui=simple] #monCard{width:100%;max-width:100%}
+  html[data-ui=simple] .jhead,html[data-ui=simple] .jrow>summary.jsum{font-size:11px;gap:2px}
+}
+/* Vault: fixed steel and suit-blue. The accent is only the trim. */
+html[data-mode=vault]{--font:"Roboto Condensed","Segoe UI",sans-serif;--radius:2px}
+html[data-mode=vault] .num,html[data-mode=vault] .stat .v,html[data-mode=vault] td.num{font-family:"Share Tech Mono",ui-monospace,monospace}
+html[data-mode=vault] .brand::before{content:"";display:inline-block;width:16px;height:16px;margin-right:6px;vertical-align:-2px;border-radius:50%;
+  background:radial-gradient(circle,#121313 0 26%,transparent 27%),radial-gradient(circle,#8f918f 0 60%,transparent 61%),repeating-conic-gradient(#8f918f 0 9deg,transparent 9deg 18deg);
+  -webkit-mask:radial-gradient(circle,#000 0 70%,transparent 71%);mask:radial-gradient(circle,#000 0 70%,transparent 71%);outline:2px solid var(--acc);outline-offset:1px}
+html[data-mode=vault] .top{border-bottom:0;box-shadow:inset 0 -6px 0 transparent}
+html[data-mode=vault] .top::after{content:"";display:block;position:absolute;left:0;right:0;bottom:0;height:6px;
+  background:repeating-linear-gradient(-45deg,var(--acc) 0 8px,#121313 8px 16px)}
+html[data-mode=vault] .card{border:1px solid #000;border-top:4px solid var(--acc);
+  background:radial-gradient(circle at 10px 10px,#dadbd9 2px,transparent 3px),radial-gradient(circle at calc(100% - 10px) 10px,#dadbd9 2px,transparent 3px),radial-gradient(circle at 10px calc(100% - 10px),#dadbd9 2px,transparent 3px),radial-gradient(circle at calc(100% - 10px) calc(100% - 10px),#dadbd9 2px,transparent 3px),repeating-linear-gradient(90deg,rgba(255,255,255,.04) 0 1px,transparent 1px 3px),linear-gradient(180deg,#1a1c1c,#121313);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.12),inset 0 -2px 0 rgba(0,0,0,.45)}
+html[data-mode=vault] h3,html[data-mode=vault] .brand{font-family:"Stardos Stencil","Roboto Condensed",sans-serif;font-weight:400;font-size:16px;letter-spacing:.04em}
+html[data-mode=vault] .card h3{background:#325886;color:#fff;margin:-12px -12px 8px;padding:8px 12px}
+/* Wasteland: fixed ink and paper. The accent is only the signage. */
+html[data-mode=waste]{--font:"Roboto Condensed","Segoe UI",sans-serif;--radius:2px}
+html[data-mode=waste] .num,html[data-mode=waste] .stat .v,html[data-mode=waste] td.num{font-family:"Share Tech Mono",ui-monospace,monospace}
+html[data-mode=waste] body,html[data-mode=waste]{background-color:#2a2622}
+html[data-mode=waste] .card{border:1px solid rgba(184,138,90,.35);
+  background:radial-gradient(ellipse 40% 30% at 85% 15%,rgba(138,90,58,.18),transparent 70%),radial-gradient(ellipse 30% 25% at 10% 90%,rgba(90,90,74,.16),transparent 70%),repeating-linear-gradient(0deg,rgba(0,0,0,.04) 0 1px,transparent 1px 4px),linear-gradient(160deg,#322c27,#2a2622)}
+html[data-mode=waste] h3,html[data-mode=waste] .brand{font-family:"Rye","Roboto Condensed",serif;font-weight:400;font-size:16px;letter-spacing:.04em;text-transform:uppercase;color:color-mix(in srgb,var(--acc) 80%,#d9c8a8)}
+/* Daytime wasteland: paper and ink stay put. Accent is still only the signage. */
+html[data-mode=wastday]{--font:"Roboto Condensed","Segoe UI",sans-serif;--radius:2px}
+html[data-mode=wastday] .num,html[data-mode=wastday] .stat .v,html[data-mode=wastday] td.num{font-family:"Share Tech Mono",ui-monospace,monospace}
+html[data-mode=wastday] .card{border:1px solid rgba(138,90,58,.35);
+  background:radial-gradient(ellipse 40% 30% at 85% 12%,rgba(184,138,90,.18),transparent 70%),radial-gradient(ellipse 28% 22% at 8% 92%,rgba(90,90,74,.1),transparent 70%),repeating-linear-gradient(0deg,rgba(42,38,34,.04) 0 1px,transparent 1px 4px),linear-gradient(160deg,#fff8ec,#f3ead7)}
+html[data-mode=wastday] h3,html[data-mode=wastday] .brand{font-family:"Rye","Roboto Condensed",serif;font-weight:400;font-size:16px;letter-spacing:.03em;text-transform:uppercase;color:color-mix(in srgb,var(--acc) 42%,#2a2622)}
+html[data-mode=wastday] .up,html[data-mode=wastday] .dn,html[data-mode=wastday] .bull,html[data-mode=wastday] .bear{background:#2a2622;border-radius:3px;padding:0 4px}
+/* Phone scorecard and open paper trades: one tight row, labels once, no big boxes. Desktop keeps the table. */
+.sc-phone{display:none}
+@media (max-width:600px){
+  .sc-desk{display:none}
+  .sc-phone{display:block}
+  .scr-h,.scr-g{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));text-align:center;gap:2px}
+  .scr-h{position:sticky;top:0;z-index:2;background:var(--card);color:var(--mu);font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:2px 0 4px}
+  .scr{border-bottom:1px solid var(--line);padding:5px 0 6px}
+  .scr-n{font-size:13px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .scr-n .mu{font-size:11px;font-weight:400;margin-left:6px}
+  .scr-g b{display:block;font-size:13px;font-weight:600;white-space:nowrap}
+  .scr-g span.mu{display:block;font-size:10px;line-height:1.2}
+  .scr-x{font-size:10px;line-height:1.2;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card:has(.sc-phone),.card:has(table.trades){overflow-x:visible}
+  table.trades{display:block;width:100%;min-width:0}
+  table.trades thead{display:block;position:sticky;top:0;z-index:2;background:var(--card)}
+  table.trades thead tr{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+  table.trades thead th:first-child,table.trades thead th:last-child{display:none}
+  table.trades thead th{border:0;padding:2px 0 4px;min-width:0;text-align:center;font-size:10px;letter-spacing:.04em;text-transform:uppercase}
+  table.trades tbody{display:block}
+  table.trades tr{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:0;border-bottom:1px solid var(--line);border-radius:0;padding:5px 0 6px;margin:0}
+  table.trades td{display:block;min-width:0;border:0;padding:1px 2px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  table.trades td[data-l="Trade"],table.trades td.acts{grid-column:1 / -1;text-align:left;white-space:normal}
+  table.trades td.acts{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding-top:4px}
+  table.trades .btn{min-height:44px;white-space:nowrap}
+  table.stack,table.stack tbody,table.stack tr{display:block;width:100%;min-width:0}
+  table.stack thead,table.stack tr:first-child{display:none}
+  table.stack tr{border-bottom:1px solid var(--line);padding:4px 0 6px}
+  table.stack td,table.stack th{display:block;width:auto;min-width:0;max-width:100%;border:0;padding:1px 0;text-align:left;white-space:normal;overflow-wrap:break-word}
+  table:not(.trades):not(.sc-desk):not(.stack){display:block;width:100%;min-width:0}
+  table:not(.trades):not(.sc-desk):not(.stack) thead{display:none}
+  table:not(.trades):not(.sc-desk):not(.stack) tbody,table:not(.trades):not(.sc-desk):not(.stack) tr{display:block;width:100%}
+  table:not(.trades):not(.sc-desk):not(.stack) tr{border-bottom:1px solid var(--line);padding:4px 0 6px}
+  table:not(.trades):not(.sc-desk):not(.stack) td,table:not(.trades):not(.sc-desk):not(.stack) th{display:block;width:auto;min-width:0;max-width:100%;border:0;padding:1px 0;text-align:left;white-space:normal;overflow-wrap:break-word}
+}
+/* Bottom tab bar, Pip-Boy STAT / INV / DATA style. Classic is unchanged.
+   A hairline in the accent runs across the bar. The selected tab is a bright box that sits on that line. */
+html[data-mode=pip] .tabs .tabrow button,html[data-mode=vault] .tabs .tabrow button,html[data-mode=waste] .tabs .tabrow button,html[data-mode=wastday] .tabs .tabrow button{border:1px solid color-mix(in srgb,var(--acc) 70%,var(--bg));background:color-mix(in srgb,var(--acc) 14%,var(--bg));color:var(--acc);border-radius:3px;box-shadow:inset 0 1px 0 color-mix(in srgb,var(--acc) 40%,transparent);font-family:"Share Tech Mono",ui-monospace,Menlo,monospace}
+html[data-mode=pip] .tabs .tabrow button.on,html[data-mode=vault] .tabs .tabrow button.on,html[data-mode=waste] .tabs .tabrow button.on{background:var(--acc);color:#121313;border-color:var(--acc);box-shadow:0 0 8px color-mix(in srgb,var(--acc) 55%,transparent)}
+html[data-mode=wastday] .tabs .tabrow button{color:#2a2622;border-color:color-mix(in srgb,var(--acc) 70%,#2a2622);background:color-mix(in srgb,var(--acc) 22%,#fff8ec)}
+html[data-mode=wastday] .tabs .tabrow button.on{background:var(--acc);color:#121313}
+html[data-mode=pip] .tabs .tabrow button:active,html[data-mode=vault] .tabs .tabrow button:active,html[data-mode=waste] .tabs .tabrow button:active,html[data-mode=wastday] .tabs .tabrow button:active{transform:scale(.96);box-shadow:inset 0 0 10px rgba(0,0,0,.45)}

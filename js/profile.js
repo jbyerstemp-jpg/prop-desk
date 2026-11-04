@@ -26,7 +26,7 @@ const bucket = (x, cuts, names) => { for (let i = 0; i < cuts.length; i++) if (x
 function featuresAt(c60, c1d, i, cache) {
   cache = cache || {};
   const b = c60[i], tClose = b.time + 3600;
-  if (i < 24 * 10) return null;            // 10+ days of hourly bars (volatility rank uses up to 90 days, fewer live on Kraken's 30)
+  if (i < 24 * 10) return null;            // 10+ days of hourly bars (volatility rank uses up to 90 days, fewer live on the exchange's 30)
   // daily bias: closed days before this hour's close
   const dKey = Math.floor(tClose / 86400);
   if (cache.dKey !== dKey) { cache.dKey = dKey; let j = c1d.length; while (j > 0 && c1d[j - 1].time + 86400 > tClose) j--;

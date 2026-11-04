@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0b0f14">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="manifest" href="manifest.webmanifest">
@@ -12,14 +12,20 @@
 <body>
 <header class="top">
   <div class="brand">Prop Desk</div>
+  <div class="seg" id="viewSeg" role="group" aria-label="Simple or Advanced view">
+    <button type="button" data-view="simple">Simple</button>
+    <button type="button" data-view="advanced">Advanced</button>
+  </div>
   <div class="feed" id="feedPill" title="Data source and age">connecting…</div>
   <button class="btn sm" id="refreshBtn" title="Reload candles and reconnect">↻ Refresh</button>
   <button class="btn sm" id="helpBtn" title="How to use this app, questions and comments">? Help</button>
-  <div class="reset" id="resetPill" title="Daily loss limit resets 00:30 UTC (Kraken Prop rule; check your firm)"></div>
+  <div class="reset" id="resetPill" title="Daily loss limit resets 00:30 UTC (the prop platform rule; check your firm)"></div>
 </header>
 <div class="banner" id="banner" hidden></div>
 <button class="banner upd" id="updBar" hidden>A new version is ready (the model may have improved). Tap to update.</button>
 <nav class="tabs" id="tabs">
+  <div class="subtabs" id="subtabs" hidden></div>
+  <div class="tabrow">
   <button data-tab="chart" class="on">Chart</button>
   <button data-tab="desk">Desk</button>
   <button data-tab="pos">Positions</button>
@@ -27,6 +33,7 @@
   <button data-tab="paper">Paper</button>
   <button data-tab="set">Settings</button>
   <button data-tab="help" hidden>Help</button>
+  </div>
 </nav>
 
 <main>
@@ -69,6 +76,7 @@
 </section>
 
 <section id="tab-desk" class="tab">
+  <div id="deskRules"></div>
   <div id="deskTotals" class="totals"></div>
   <div class="row"><button class="btn" id="addAcct">+ Add prop account</button></div>
   <div id="deskList"></div>
@@ -76,8 +84,8 @@
 
 <section id="tab-pos" class="tab">
   <div class="card" id="importCard">
-    <h3>Add trades from a screenshot <span class="tag">main way · no typing</span></h3>
-    <p class="small mu">Best set: the <b>Portfolio</b> screen (balance, equity, limits, margin), the <b>positions list</b> (with Closed), each position's <b>TP/SL</b>, and <b>History → Trades</b> (exact fills). Only what changed is updated. Pick them all here. Screenshots are read on this phone and never uploaded. If the reader misses something and you allowed it under Settings → Shared learning pool, only the screen's layout is sent (every number replaced).</p>
+    <h3>Add trades from a screenshot <span class="tag">main way · no typing</span> <button type="button" class="btn sm qmark" id="impHelp" hidden title="How screenshot import works">?</button></h3>
+    <p class="small mu" id="impExplain">Best set: the <b>Portfolio</b> screen (balance, equity, limits, margin), the <b>positions list</b> (with Closed), each position's <b>TP/SL</b>, and <b>History → Trades</b> (exact fills). Only what changed is updated. Pick them all here. Screenshots are read on this phone and never uploaded. If the reader misses something and you allowed it under Settings → Shared learning pool, only the screen's layout is sent (every number replaced).</p>
     <div class="row"><label class="btn pri" style="flex:1;text-align:center;font-size:16px;min-height:52px;display:flex;align-items:center;justify-content:center">📷 Import screenshots<input type="file" id="impFiles" accept="image/*" multiple hidden></label>
       <button class="btn" id="impPasteBtn">Paste text</button></div>
     <textarea id="impText" placeholder="…or paste text here" hidden></textarea>
@@ -89,10 +97,12 @@
 </section>
 
 <section id="tab-coach" class="tab">
-  <div class="card"><h3>24/7 monitor</h3>
-    <p class="small mu">After you import screenshots, send the monitor a copy so it can watch your positions around the clock and alert your phone (ntfy) only when something changes.</p>
+  <div class="coach-head">
+  <div class="card" id="monCard"><h3>24/7 monitor</h3>
+    <p class="small mu" id="monBlurb">After you import screenshots, send the monitor a copy so it can watch your positions around the clock and alert your phone (ntfy) only when something changes.</p>
     <div class="row"><button class="btn pri" id="sendMon">Send to monitor</button><span class="small" id="monStatus"></span></div></div>
-  <div class="row">
+  </div>
+  <div class="row" id="coachTools">
     <button class="btn" id="copyClaude">Copy snapshot for Claude</button>
     <label class="chk"><input type="checkbox" id="notifyChk"> Phone alert when a score drops to 2 or less (while the app is open)</label>
   </div>
@@ -104,10 +114,13 @@
 <section id="tab-help" class="tab"><div id="helpBox"></div></section>
 </main>
 
+<div class="toast" id="toast" hidden></div>
 <div class="modal" id="modal" hidden><div class="modal-card" id="modalCard"></div></div>
+<div id="screenFx" aria-hidden="true"></div>
 
 <script src="vendor/lightweight-charts.standalone.production.js"></script>
 <script src="js/core.js"></script>
+<script src="js/theme.js"></script>
 <script src="js/research-model.js"></script>
 <script src="js/research.js"></script>
 <script src="js/profile.js"></script>

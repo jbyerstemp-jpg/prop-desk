@@ -1,5 +1,5 @@
 # Prop Desk: brief for regular Claude chats
-Public brief for Prop Desk, a hobby project. (updated 2026-11-03, main d9efcc6). Don't edit by hand.
+Public brief for Prop Desk, a hobby project. (updated 2026-11-04, main 3f34669). Don't edit by hand.
 
 ## How chats work (owner, Nov 2 2026)
 - This is a talk-only session: brainstorm, plan, review ideas or trades. You can't run code or change the repo here, so don't write code unless he asks for a snippet.
@@ -24,8 +24,8 @@ Do: <task, only if he asked for one>
 - Never raise risk to catch up. 'No trade' is valid. Nothing is financial advice.
 
 ## Hard rules (the app and any assistant)
-- No code places orders, moves money or stores exchange keys (Kraken Prop has no API).
-- Free public data only (Kraken spot WS v2 + REST, Kraken Futures mark, Coinbase fallback, Hyperliquid mids cross-check). No paid sources without the owner's OK.
+- No code places orders, moves money or stores exchange keys (the prop platform has no API).
+- Free public data only (the spot feed WS v2 + REST, the futures feed mark, Coinbase fallback, Hyperliquid mids cross-check). No paid sources without the owner's OK.
 - Shared-pool uploads wait for the in-app consent choice. The server stores a salted hash of the anonymous install id, never the id, and never size, balance or account fields. Nightly verification and shrinkage must be pre-registered before they change a rating, an alert or a size.
 - Escape all user/third-party text with esc() before innerHTML.
 - Research: pre-register rules and pass bar BEFORE running (docs/research/HYPOTHESES.md), log every variant (RESEARCH-LOG.md), held-out + placebo, never upgrade evidence labels without evidence. Nothing reaches alerts/sizing without held-out confirmation, paper trades and the owner's star.
@@ -34,7 +34,7 @@ Do: <task, only if he asked for one>
 - No personal values in app code without a // PRIVATE marker; build-public.js must report no personal info.
 - Actions: no third-party actions; runners ubuntu-24.04.
 
-## Kraken Prop (Advanced)
+## the prop platform (Advanced)
 - advanced: target +9% of start; daily loss 3% below balance at the 00:30 UTC reset; max drawdown 3% below start, static; pass and breach on equity
 - fees: 0.04% per side on notional; swap 0.0055% of notional every 4 h from each position's open time
 - leverage: BTC 10x; ETH, SOL, XRP, LINK, LTC, DOGE, AVAX, SUI 5x; HYPE, WLD 3x; others 2x (js/core.js LEVERAGE)
@@ -55,7 +55,7 @@ As of Nov 2, 2026 (101 variant runs): no FVG/sweep entry rule beats random entri
 - Paper trades: tag each with the analog read and the H6 macro regime (forward tests H8, H10).
 - Event calendar (FOMC/CPI/NFP) from an official source -> gate 2 of the card verdict.
 - Trader benchmarks: retry Coinversa per-wallet lifecycle stats (random samples), then MASTER items 18-19.
-- Build a CSV import for Kraken Prop Trades/Ledger exports once the owner sends one (identifiers removed).
+- Build a CSV import for the prop platform Trades/Ledger exports once the owner sends one (identifiers removed).
 
 ## Cold start (any AI)
 This is the public copy of the brief, published by pull request the owner approves. Read it, follow the rules above, then ask the owner what to do next. Work done in a chat goes back to the master repo through the FOR THE MASTER REPO block.
