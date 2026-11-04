@@ -208,10 +208,16 @@
     if (!chartApi) return;
     const box = document.getElementById('chartWrap');
     if (!box) return;
-    const w = box.clientWidth, h = box.clientHeight;
+    const r = box.getBoundingClientRect();
+    let w = Math.round(r.width), h = Math.round(r.height);
     if (w < 40 || h < 40) return;
-    try { chartApi.resize(w, h); } catch (e) { }
-    try { chartApi.timeScale().applyOptions({ rightOffset: 2 }); chartApi.timeScale().fitContent(); } catch (e) { }
+    // Force the chart element itself to the measured size so the canvas fills it.
+    const el = document.getElementById('chart');
+    if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
+    try {
+      chartApi.resize(w, h);
+      chartApi.applyOptions({ width: w, height: h });
+    } catch (e) { }
     try { drawOverlay(); } catch (e) { }
   }
   function scheduleFrame() {
@@ -252,14 +258,8 @@
     return (n ? n.textContent : h.textContent).replace(/\s+/g, ' ').trim().slice(0, 18);
   }
   function refreshSub() {
-    const bar = $('#subtabs'), root = document.getElementById('tab-' + tab);
-    if (!bar || !root) return;
-    const heads = [...root.querySelectorAll('h3')].filter(h => h.getBoundingClientRect().height > 0 && h.getBoundingClientRect().width > 0);
-    if (heads.length < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
-    heads.forEach((h, i) => { if (!h.id) h.id = 'sec-' + tab + '-' + i; });
-    bar.hidden = false;
-    bar.innerHTML = heads.map(h => `<button type="button" data-jump="${esc(h.id)}">${esc(sectionLabel(h))}</button>`).join('');
-    if (bar.firstElementChild) bar.firstElementChild.classList.add('on');
+    const bar = $('#subtabs');
+    if (bar) { bar.hidden = true; bar.innerHTML = ''; }
   }
   $('#subtabs').onclick = e => {
     const b = e.target.closest('[data-jump]'); if (!b) return;
@@ -346,7 +346,6 @@
     const el = $('#chart');
     const tzFmt = t => new Intl.DateTimeFormat('en-US', { timeZone: T().tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(t * 1000));
     chart = LightweightCharts.createChart(el, {
-      autoSize: true,
       layout: { background: { type: 'solid', color: PAL.bg }, textColor: PAL.tx, fontSize: 11 },
       grid: { vertLines: { color: PAL.card }, horzLines: { color: PAL.card } },
       rightPriceScale: { borderColor: PAL.line },
@@ -448,8 +447,12 @@
     else if (shown.length) { series.update(toPt(shown[shown.length - 1])); if (full) renderStudies(cs); }
     // A new coin or timeframe starts from the normal view (owner, Nov 3 2026): otherwise a stretched price scale from the last coin keeps
     // showing its price range and the new coin's candles sit off the screen.
-    if (renderChart.viewKey !== sym + '|' + tf) { renderChart.viewKey = sym + '|' + tf; resetView(); }
-    try { chart.timeScale().applyOptions({ rightOffset: 2 }); chart.timeScale().fitContent(); } catch (e) { }
+    // Fit only on symbol/timeframe change so zoom and pan stick on the same chart.
+    if (renderChart.viewKey !== sym + '|' + tf) {
+      renderChart.viewKey = sym + '|' + tf;
+      resetView();
+      try { chart.timeScale().applyOptions({ rightOffset: 2 }); chart.timeScale().fitContent(); } catch (e) { }
+    }
     if (!full) return;
     const ca = F.candleAge(sym, tf);
     if (ca != null && ca > 120 && !F.demo && (!renderChart.lastReload || Date.now() - renderChart.lastReload > 60000)) { renderChart.lastReload = Date.now(); F.reloadSeries(sym, tf); }
@@ -687,7 +690,7 @@
     }).join('');
     const b4 = A.struct[240] && A.struct[240].bias, b1 = A.struct[60] && A.struct[60].bias;
     const sum = b4 && b1 ? (b4 === b1 && b4 !== 'range' ? `1h and 4h agree: <b class="${b4}">${b4 === 'bull' ? 'longs with the trend' : 'shorts with the trend'}</b>.` : 'Timeframes disagree or are ranging: trade smaller or wait.') : '';
-    $('#biasBox').innerHTML = `<table><tr><th>TF</th><th>Bias</th><th>Swings</th><th>Last break</th></tr>${rows}</table>
+    $('#biasBox').innerHTML = `<table class="stack"><tr><th>TF</th><th>Bias</th><th>Swings</th><th>Last break</th></tr>${rows}</table>
       <p class=small>${sum}</p><p class="small mu">Bias = last close through a confirmed swing (2 candles each side). BOS = with the trend, CHoCH = flip. Mechanical, not a prediction.</p>`;
     const lv = A.levels.slice().sort((a, b) => b.price - a.price);
     $('#levelBox').innerHTML = p == null ? '<p class=mu>Waiting for price…</p>' : `<table>${lv.map(l => `<tr><td>${esc(l.name)}</td><td class=num>${px(l.price)}</td><td class="num ${cls(l.price - p)}">${((l.price - p) / p * 100).toFixed(2)}%</td></tr>`).join('')}</table>
