@@ -32,7 +32,9 @@ jobs:
         run: |
           git config user.name "prop-monitor-bot"
           git config user.email "prop-monitor-bot@users.noreply.github.com"
-          git add monitor/state.json
+          # A public copy can be checked out before it has alert memory. Missing file = nothing to save, not a failed run.
+          if [ ! -f monitor/state.json ]; then echo "no alert memory yet"; exit 0; fi
+          git add -- monitor/state.json
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -q -m "monitor: alert memory"
           git pull -q --rebase origin main && git push -q origin HEAD:main
