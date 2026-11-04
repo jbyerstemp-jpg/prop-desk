@@ -273,6 +273,13 @@ html[data-mode=wastday] .up,html[data-mode=wastday] .dn,html[data-mode=wastday] 
   table:not(.trades):not(.sc-desk):not(.stack) tbody,table:not(.trades):not(.sc-desk):not(.stack) tr{display:block;width:100%}
   table:not(.trades):not(.sc-desk):not(.stack) tr{border-bottom:1px solid var(--line);padding:4px 0 6px}
   table:not(.trades):not(.sc-desk):not(.stack) td,table:not(.trades):not(.sc-desk):not(.stack) th{display:block;width:auto;min-width:0;max-width:100%;border:0;padding:1px 0;text-align:left;white-space:normal;overflow-wrap:break-word}
+  /* The chart library uses a table for its plot/price-scale/time-scale grid. Do not phone-stack those cells. */
+  #chart .tv-lightweight-charts table,
+  #chart .tv-lightweight-charts thead,
+  #chart .tv-lightweight-charts tbody,
+  #chart .tv-lightweight-charts tr,
+  #chart .tv-lightweight-charts th,
+  #chart .tv-lightweight-charts td { display:revert !important; }
 }
 /* Bottom tab bar, Pip-Boy STAT / INV / DATA style. Classic is unchanged.
    A hairline in the accent runs across the bar. The selected tab is a bright box that sits on that line. */
