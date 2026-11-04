@@ -27,6 +27,7 @@
   <div class="subtabs" id="subtabs" hidden></div>
   <div class="tabrow">
   <button data-tab="chart" class="on">Chart</button>
+  <button data-tab="market">Market</button>
   <button data-tab="desk">Desk</button>
   <button data-tab="pos">Positions</button>
   <button data-tab="coach">Coach</button>
@@ -58,7 +59,9 @@
     <button class="btn sm fsx fsr" id="fsReset">⟲ Reset</button>
     <div class="small fsx fsh" id="missHintFs" hidden></div>
   </div>
-  <div class="grid2">
+  </section>
+<section id="tab-market" class="tab">
+<div class="grid2">
     <div class="card"><h3>Structure &amp; bias <span class="muted small" id="biasAsOf"></span></h3><div id="biasBox"></div></div>
     <div class="card"><h3>Levels</h3><div id="levelBox"></div></div>
     <div class="card"><h3>Open fair value gaps</h3><div id="fvgBox"></div></div>
@@ -74,6 +77,7 @@
     <div class="card"><h3>Research read <span class="tag">experimental, not a signal</span></h3><div id="researchBox"></div></div>
   </div>
 </section>
+
 
 <section id="tab-desk" class="tab">
   <div id="deskRules"></div>
