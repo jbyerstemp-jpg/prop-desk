@@ -18,7 +18,7 @@ function system(kind, p) {
 const S2 = () => system('sma', { fast: 20, slow: 50 });   // the system that passed H15
 const L = (n, k) => Math.max(2, Math.round(n * (k == null ? 1 : k)));   // lookback scaled for the ±20% check
 /* The six H18 daily trend rules (E1 = S2). H19 trend portfolio = all six on each coin at 1/6 size, no picking (passed, label 3).
-   exit(c, i, dir, pos) -> true = leave at the next open. Used by monitor/strategy-lab.js, monitor/trend-portfolio.js and the Paper tab. */
+   exit(c, i, dir, pos) -> true = leave at the next open. Used by monitor/strategy-lab.js, monitor/trend-portfolio.js and Coach's Paper workspace. */
 const ENTRIES = {
   E1: k => ({ entry: (c, i) => { const f = sma(c, i, L(20, k)), s = sma(c, i, L(50, k)); if (f == null || s == null) return 0; return c[i].close > s && f > s ? 1 : c[i].close < s && f < s ? -1 : 0; },
     exit: (c, i, d) => { const f = sma(c, i, L(20, k)); return f != null && (d > 0 ? c[i].close < f : c[i].close > f); } }),

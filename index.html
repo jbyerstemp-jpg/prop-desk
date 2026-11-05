@@ -29,9 +29,7 @@
   <button data-tab="chart" class="on">Chart</button>
   <button data-tab="market">Market</button>
   <button data-tab="desk">Desk</button>
-  <button data-tab="pos">Positions</button>
   <button data-tab="coach">Coach</button>
-  <button data-tab="paper">Paper</button>
   <button data-tab="set">Settings</button>
   <button data-tab="help" hidden>Help</button>
   </div>
@@ -63,11 +61,11 @@
 <section id="tab-market" class="tab">
 <div class="grid2">
     <div class="card"><h3>Structure &amp; bias <span class="muted small" id="biasAsOf"></span></h3><div id="biasBox"></div></div>
+    <div class="card"><h3>Trade ideas <span class="tag">short-term or long-term, graded against the model</span></h3><div id="scanAllBox"><p class=mu>Starting…</p></div></div>
     <div class="card"><h3>Levels</h3><div id="levelBox"></div></div>
     <div class="card"><h3>Open fair value gaps</h3><div id="fvgBox"></div></div>
     <div class="card"><h3>Live data check</h3><div id="dataBox"></div></div>
     <div class="card"><h3>Market open plan <span class="tag">9:30 New York · both sides prepared · untested idea</span></h3><div id="openBox"><p class=mu>Loading…</p></div></div>
-    <div class="card"><h3>Trade ideas <span class="tag">short-term or long-term, graded against the model</span></h3><div id="scanAllBox"><p class=mu>Starting…</p></div></div>
     <div class="card"><h3>Setups to watch <span class="tag">untested idea, not a signal</span></h3><div id="setupBox"></div></div>
     <div class="card"><h3>Market profile now <span class="tag">past hours like this one</span></h3><div id="profileBox"><p class=mu>Loading…</p></div></div>
     <div class="card"><h3>Momentum &amp; context traits <span class="tag">graded, you choose</span></h3><div id="traitBox"><p class=mu>Loading…</p></div></div>
@@ -84,20 +82,33 @@
   <div id="deskTotals" class="totals"></div>
   <div class="row"><button class="btn" id="addAcct">+ Add prop account</button></div>
   <div id="deskList"></div>
-</section>
-
-<section id="tab-pos" class="tab">
-  <div class="card" id="importCard">
-    <h3>Add trades from a screenshot <span class="tag">main way · no typing</span> <button type="button" class="btn sm qmark" id="impHelp" hidden title="How screenshot import works">?</button></h3>
-    <p class="small mu" id="impExplain">Best set: the <b>Portfolio</b> screen (balance, equity, limits, margin), the <b>positions list</b> (with Closed), each position's <b>TP/SL</b>, and <b>History → Trades</b> (exact fills). Only what changed is updated. Pick them all here. Screenshots are read on this phone and never uploaded. If the reader misses something and you allowed it under Settings → Shared learning pool, only the screen's layout is sent (every number replaced).</p>
-    <div class="row"><label class="btn pri" style="flex:1;text-align:center;font-size:16px;min-height:52px;display:flex;align-items:center;justify-content:center">📷 Import screenshots<input type="file" id="impFiles" accept="image/*" multiple hidden></label>
-      <button class="btn" id="impPasteBtn">Paste text</button></div>
-    <textarea id="impText" placeholder="…or paste text here" hidden></textarea>
-    <div id="impStatus" class="small"></div><div id="impPreview"></div>
-  </div>
-  <details class="card" id="manualBox"><summary><b>➕ Add a trade manually</b> <span class="small mu">(if a screenshot won't read)</span></summary><div id="posFormCard" style="margin-top:10px"></div></details>
-  <h3>Open positions</h3><div id="posOpen"></div>
-  <h3>Closed (journal)</h3><div id="posClosed"></div>
+  <section class="card desk-section" id="deskOpenCard">
+    <div class="desk-section-head"><h3>My open positions</h3><div class="desk-section-actions">
+      <button type="button" class="btn sm" id="deskImportToggle" aria-label="Import screenshots">📷 Import</button>
+      <input type="file" id="impFiles" accept="image/*" multiple hidden>
+      <button type="button" class="btn sm" id="deskManualToggle" aria-expanded="false" aria-controls="deskManualPanel">Add manually</button>
+      <button type="button" class="btn sm" id="deskPositionsMore" aria-expanded="false" aria-controls="deskPositionManager">Manage</button>
+    </div></div>
+    <div class="card desk-import-panel" id="importCard" hidden>
+      <h3>Add trades from a screenshot <span class="tag">main way · no typing</span> <button type="button" class="btn sm qmark" id="impHelp" hidden title="How screenshot import works">?</button></h3>
+      <p class="small mu" id="impExplain">Best set: the <b>Portfolio</b> screen (balance, equity, limits, margin), the <b>positions list</b> (with Closed), each position's <b>TP/SL</b>, and <b>History → Trades</b> (exact fills). Only what changed is updated. Pick them all here. Screenshots are read on this phone and never uploaded. Screenshot layout sharing is temporarily paused for privacy.</p>
+      <textarea id="impText" aria-label="Paste screenshot text" placeholder="…or paste text here" hidden></textarea>
+      <div id="impStatus" class="small" role="status" aria-live="polite"></div><div id="impPreview"></div>
+      <button type="button" class="btn sm" id="impClose">Close preview</button>
+    </div>
+    <div class="card desk-import-panel" id="deskManualPanel" hidden><div id="posFormCard"></div><button type="button" class="btn sm" id="impPasteBtn">Paste screenshot text</button></div>
+    <div class="card desk-import-panel" id="deskPositionManager" hidden>
+      <h3>Manage open positions</h3><div id="posOpen"></div>
+      <h3>Closed (journal)</h3><div id="posClosed"></div>
+    </div>
+    <div id="deskOpenPositions"></div>
+  </section>
+  <section class="card desk-section" id="deskIdeasCard">
+    <div class="desk-section-head"><div><h3>Top 5 short-term ideas</h3><div class="small mu" id="deskIdeasMeta"></div></div>
+      <button type="button" class="btn sm" id="deskIdeasMore">View all in Market</button></div>
+    <p class="small mu desk-idea-disclaimer"><span class="tag warn">Untested watchlist, not a signal</span> Check the gates and your rules in the full Market cards before considering an idea.</p>
+    <div id="deskIdeas"></div>
+  </section>
 </section>
 
 <section id="tab-coach" class="tab">
@@ -111,9 +122,9 @@
     <label class="chk"><input type="checkbox" id="notifyChk"> Phone alert when a score drops to 2 or less (while the app is open)</label>
   </div>
   <div id="coachBox"></div>
+  <details class="card" id="coachPaperPanel"><summary><b>Paper trading workspace</b> <span class="tag">simulation only · no orders</span></summary><div id="paperBox"></div></details>
 </section>
 
-<section id="tab-paper" class="tab"><div id="paperBox"></div></section>
 <section id="tab-set" class="tab"><div id="setBox"></div></section>
 <section id="tab-help" class="tab"><div id="helpBox"></div></section>
 </main>
