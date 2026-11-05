@@ -140,64 +140,543 @@
     return { bps: med, n: r.length, spreadBps: r[r.length - 1] - r[0] };
   }
 
+  function hasStopDistance(text) {
+    const s = String(text || '');
+    return [...s.matchAll(/^[ \t]*Distance[ \t]*(?:[+\-−]?[\d,.]+[ \t]*%[ \t]*)?$/gim)].some(m => !/^[ \t]*\n[ \t]*(?:to[ \t]+)?liquidation\b/i.test(s.slice(m.index + m[0].length)));
+  }
+  function labeledNumber(text, label, allowZero, quantity, allowSigned) {
+    const s = String(text || ''), labels = [...s.matchAll(new RegExp(label, 'gi'))];
+    if (labels.length !== 1) return { raw: null, value: null, ambiguous: labels.length > 1, invalid: false };
+    const after = s.slice(labels[0].index + labels[0][0].length);
+    // Inspect the entire value line, including any unit and OCR decoration. Never
+    // discard a trailing word, another number, or malformed numeric fragment.
+    const valueLines = after.replace(/^[ \t]*[:=]?[ \t]*(?:\n[ \t]*)?/, '').split('\n');
+    const line = valueLines[0].replace(/[−–—]/g, '-');
+    const m = /^\$?[ \t]*([+\-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+))(?:[ \t]*(US0|[A-Z]{2,10}))?[ \t]*([~≈;!?,.:\])}]*)[ \t]*$/i.exec(line);
+    const nextLine = (valueLines[1] || '').trim();
+    let wrapped = /^(US0|[A-Z]{2,12})[ \t]*[~≈;!?,.:\])}]*[ \t]*$/i.exec(nextLine);
+    if (wrapped && /^(?:OPEN|CLOSED|DETAILS|TP|SL|LONG|SHORT|VALUE|PRICE|MARGIN|TARGET|EQUITY|BALANCE|ORDER|ORDERS|TRADE|TRADES|HISTORY|LEDGER|DAILY|MAX|MIN|LOSS|PROFIT|SWAP|RESET|STATUS|FEE|ASSETS)$/i.test(wrapped[1])) wrapped = null;
+    const unitPrefix = /^(?:US0|USD|USDT|USDC|USP|USDB|BTC|XBT|ETH|SOL|XRP|LINK|LTC|DOGE|AVAX|SUI|HYPE|WLD|ADA|DOT|BNB|TON|PEPE|ARB|OP|NEAR|APT|TRX|BCH|ATOM)\b/i.test(nextLine);
+    const malformedWrapped = unitPrefix && !/^(?:US0|[A-Z]{2,12})[ \t]*[~≈;!?,.:\])}]*[ \t]*$/i.test(nextLine);
+    const unit = m && (m[2] || wrapped && wrapped[1]);
+    if (!m || malformedWrapped || m[2] && wrapped || !m[2] && /[.,]/.test(m[3]) || !allowSigned && /^[+\-]/.test(m[1]) || unit && !quantity && !/^(?:USD|USDT|USDC|USP|USDB|US0)$/i.test(unit)) return { raw: null, value: null, ambiguous: false, invalid: true };
+    const value = Number(m[1].replace(/,/g, ''));
+    const invalid = !Number.isFinite(value) || !allowSigned && (allowZero ? value < 0 : value <= 0);
+    return { raw: m[1], value: invalid ? null : value, unit: unit ? unit.toUpperCase() : null, ambiguous: false, invalid };
+  }
+  const normalizedUnit = unit => /^(?:USD|USP|USDB|US0)$/.test(unit || '') ? 'USD' : unit;
+  function screenEquity(text) {
+    const s = String(text || ''), label = '(?:Total[ \\t]+equity|Account[ \\t]+equity|Net[ \\t]+liquidation(?:[ \\t]+value)?|(?:^|\\n)[ \\t]*Equity\\b)';
+    if (new RegExp(label, 'i').test(s)) {
+      // Portfolio Overview can show Total equity above a separate Equity row.
+      // Only accept the pair if both are clear, independently parsed and identical.
+      const matches = [...s.matchAll(new RegExp(label, 'gi'))];
+      const totalLabel = 'Total[ \\t]+equity\\b', rowLabel = '(?:^|\\n)[ \\t]*Equity\\b';
+      if (matches.length === 2 && [...s.matchAll(new RegExp(totalLabel, 'gi'))].length === 1 && [...s.matchAll(new RegExp(rowLabel, 'gi'))].length === 1) {
+        const total = labeledNumber(s, totalLabel, false), row = labeledNumber(s, rowLabel, false);
+        if (total.invalid || row.invalid) return { value: null, invalid: true, ambiguous: false };
+        if (total.ambiguous || row.ambiguous || total.value == null || row.value == null || total.value !== row.value || normalizedUnit(total.unit) !== normalizedUnit(row.unit)) return { value: null, invalid: false, ambiguous: true };
+        const decimals = f => (String(f.raw).split('.')[1] || '').length;
+        return decimals(row) > decimals(total) ? row : total;
+      }
+      const reading = labeledNumber(s, label, false);
+      if (!reading.invalid) return reading;
+      // Two legacy OCR layouts append a text-like icon after an explicit dollar
+      // unit. Keep its digits for review only; unknown tail text still blocks sync.
+      const cleaned = s.replace(/(\d[ \t]*(?:US0|USD|USDT|USDC|USP|USDB))[ \t]+(?:Toe|TM)[ \t]*(?=\n|$)/gi, '$1');
+      if (cleaned !== s) { const review = labeledNumber(cleaned, label, false); if (review.value != null) return Object.assign({}, review, { invalid: true }); }
+      return reading;
+    }
+    const target = /\bTarget[ \t]+equity\b/i.exec(s);
+    if (!target) return { value: null, invalid: false, ambiguous: false };
+    const lines = s.slice(0, target.index).split('\n').map(line => line.trim()).filter(Boolean);
+    const amount = /^\$?[\d,.]+\s*US(?:D|P|DB|DC|DT|0)\s*$/i;
+    const fieldLabel = /\b(?:balance|margin|equity|liquidation|profit|loss|drawdown|target|cash|fee|funding|deposit|withdrawal|payout|u?p\s*&?\s*l|value|notional)\b/i;
+    let excluded = 0;
+    const candidates = lines.filter((line, i) => {
+      if (!amount.test(line)) return false;
+      const previous = i ? lines[i - 1] : '';
+      const accountHeading = /^(?:Advanced|Intermediate|Starter|Lite)[ \t]*(?:Eval|Funded)\w*(?:[ \t]*#?[ \t]*\d+)?$/i.test(previous);
+      const genericLabel = /^[\p{L}][\p{L}\p{N}\s&/:%?()#.,\-]*[:=]?$/u.test(previous) && !accountHeading;
+      if (fieldLabel.test(previous) || genericLabel) { excluded++; return false; }
+      return true;
+    });
+    if (candidates.length !== 1) return { value: null, invalid: false, ambiguous: candidates.length > 1 || excluded > 0 };
+    const token = /^\s*\$?([^\s]+)\s*US(?:D|P|DB|DC|DT|0)\s*$/i.exec(candidates[0]);
+    const valid = token && /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/.test(token[1]);
+    const value = valid ? Number(token[1].replace(/,/g, '')) : null;
+    return { raw: token && token[1], value: value > 0 && Number.isFinite(value) ? value : null, invalid: !valid || !(value > 0) || !Number.isFinite(value), ambiguous: false };
+  }
+  /* Advisory only: an account Overview's displayed Balance + account UP&L.
+     This is deliberately independent of parsePropScreen and cannot authorize sync,
+     supply an account field, or establish that positions are flat. The accepted
+     grammar is narrow: one Overview heading, one exact Balance and UP&L label,
+     each with one decimal amount and literal USD on the same value line. A label
+     may be on the preceding line. Other OCR layouts must be reviewed manually.
+     Amounts and their sum are bounded to +/- 1,000,000,000 USD, <= 6 decimals;
+     integer arithmetic at 10^-6 USD makes both the sum and comparisons exact. */
+  function overviewEquityEstimate(text) {
+    if (typeof text !== 'string' || text.length > 40000 || /[\u001c-\u001f]/.test(text)) return null;
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+    if (lines.length > 1000) return null;
+    if (lines.filter(line => /^[ \t]*(?:(?:Account|Portfolio)[ \t]+)?Overview(?:[ \t]+Wallets)?[ \t]*$/i.test(line)).length !== 1) return null;
+    // A background Overview under a foreground sheet is not an account screen.
+    if (/\b(?:details?|orders?|history|ledger|transactions?|trades?|fills?|executions?|deposits?|withdrawals?|transfers?|buy|sell|long|short)\b/i.test(text) ||
+        /\bpositions?[ \t]+(?:overview|information|summary|p[ \t]*&[ \t]*l)\b|^[ \t]*position(?:[ \t]*[:#-]|[ \t]+\d+|[ \t]*$)|\b(?:average[ \t]+opening[ \t]+price|total[ \t]+open[ \t]+quantity|take[ \t]+profit|stop[ \t]+loss|order[ \t]*id|TP[ \t]*\/[ \t]*SL)\b|\b[A-Z]{2,10}\/(?:USD|USDT|USDC)\b/im.test(text)) return null;
+    // An alternative P&L label is ambiguous, even if a valid UP&L also appears.
+    if (/\b(?:unrealized|unrealised)[ \t]+(?:p[ \t]*&[ \t]*l|pnl|profit|loss)\b|\b(?:upnl|pnl)\b|\bUP[ \t]*\/[ \t]*L\b/i.test(text) ||
+        lines.some(line => !/^[ \t]*Balance[ \t]+P[ \t]*&[ \t]*L[ \t]*$/i.test(line) && /\bP[ \t]*&[ \t]*L\b/i.test(line))) return null;
+
+    const ONE = 1000000n, MAX = 1000000000n * ONE;
+    const pow10 = n => 10n ** BigInt(n);
+    const amountRe = /^([+\-−]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,6})?|\.\d{1,6}))[ \t]+USD$/;
+    const fragment = line => {
+      const t = (line || '').trim();
+      if (/^(?:Balance|UP[ \t]*&[ \t]*L|Equity|Overview|Wallets)$/i.test(t)) return false;
+      return /^(?:[+\-−$.,\d]|(?:USD|USDT|USDC|US0|USP|USDB|BTC|ETH|SOL|XRP)\b)/i.test(t) || /^[A-Z]{2,8}$/.test(t);
+    };
+    function amount(raw, nonnegative) {
+      const m = amountRe.exec(raw.trim());
+      if (!m || nonnegative && /^[\-−]/.test(m[1])) return null;
+      const token = m[1], clean = token.replace(/,/g, '').replace('−', '-');
+      const unsigned = clean.replace(/^[+\-]/, ''), parts = unsigned.split('.');
+      // Limit length before BigInt conversion as well as the monetary magnitude.
+      if (parts[0].length > 10) return null;
+      const dp = (parts[1] || '').length;
+      let scaled = BigInt(parts[0] || '0') * ONE + BigInt((parts[1] || '').padEnd(6, '0') || '0');
+      if (/^[\-−]/.test(token)) scaled = -scaled;
+      if (scaled > MAX || scaled < -MAX) return null;
+      return { raw: token, scaled, dp };
+    }
+    function readField(index, prefix, nonnegative) {
+      let tail = lines[index].slice(prefix.length).trim();
+      if (/^[:=]/.test(tail)) tail = tail.slice(1).trim();
+      let valueIndex = index;
+      if (!tail) { valueIndex++; tail = (lines[valueIndex] || '').trim(); }
+      const parsed = amount(tail, nonnegative);
+      // A second number or unit, even beyond blank lines, may belong to this value.
+      const next = lines.slice(valueIndex + 1).find(line => line.trim());
+      if (!parsed || fragment(next)) return null;
+      return parsed;
+    }
+    function occurrences(re) {
+      const found = [];
+      lines.forEach((line, i) => {
+        // The chart heading is not the Balance field.
+        if (/^[ \t]*Balance[ \t]+P[ \t]*&[ \t]*L[ \t]*$/i.test(line)) return;
+        for (const m of line.matchAll(re)) found.push({ i, at: m.index, text: m[0] });
+      });
+      return found;
+    }
+    const balances = occurrences(/\bBalance/gi), pnls = occurrences(/\bUP[ \t]*&[ \t]*L/gi);
+    if (balances.length !== 1 || pnls.length !== 1) return null;
+    const b = balances[0], p = pnls[0];
+    if (lines[b.i].slice(0, b.at).trim() || lines[p.i].slice(0, p.at).trim() ||
+        !/^Balance\b/i.test(b.text) || !/^UP[ \t]*&[ \t]*L\b/i.test(p.text)) return null;
+    const balance = readField(b.i, lines[b.i].slice(0, b.at) + b.text, true);
+    const pnl = readField(p.i, lines[p.i].slice(0, p.at) + p.text, false);
+    if (!balance || !pnl) return null;
+    const sum = balance.scaled + pnl.scaled;
+    if (sum > MAX || sum < -MAX) return null;
+    const dp = Math.max(balance.dp, pnl.dp);
+    function decimal(scaled, places, scalePlaces) {
+      const neg = scaled < 0n, abs = neg ? -scaled : scaled;
+      const digits = abs.toString().padStart(scalePlaces + 1, '0');
+      const whole = digits.slice(0, -scalePlaces), frac = digits.slice(-scalePlaces).slice(0, places);
+      return (neg ? '-' : '') + whole + (places ? '.' + frac : '');
+    }
+    const quantum = x => pow10(6 - x.dp); // full display step, in millionths
+    const roundingTwice = quantum(balance) + quantum(pnl); // twice the sum's assumed rounding error
+    const estimateRaw = decimal(sum, dp, 6);
+    const uncertaintyRaw = decimal(roundingTwice * 5n, 7, 7).replace(/\.?0+$/, '');
+
+    // Current Equity labels only; Target Equity is a goal, not a current reading.
+    // A malformed or duplicate current label is always unknown, not silently ignored.
+    const equities = [], kinds = new Set(), issues = [];
+    lines.forEach((line, i) => {
+      if (!/\bequ(?:i|l|1|\|)ty/i.test(line)) return;
+      if (/^[ \t]*(?:profit[ \t]+)?target[ \t]+equity\b/i.test(line) && (line.match(/\bequity/gi) || []).length === 1) return;
+      const m = /^([ \t]*(?:(Total|Account)[ \t]+)?Equity)\b/i.exec(line);
+      if (!m || (line.match(/\bequ(?:i|l|1|\|)ty/gi) || []).length !== 1) {
+        equities.push({ raw: null, issue: 'unreadable equity label' }); issues.push('unreadable equity label'); return;
+      }
+      const kind = (m[2] || 'Equity').toLowerCase();
+      if (kinds.has(kind)) issues.push('duplicate equity label');
+      kinds.add(kind);
+      const value = readField(i, m[1], false);
+      if (!value) { equities.push({ raw: null, issue: 'unreadable equity value' }); issues.push('unreadable equity value'); }
+      else equities.push(value);
+    });
+    const readable = equities.filter(x => x.scaled !== undefined);
+    const compatible = (a, b, toleranceTwice) => {
+      const diff = a > b ? a - b : b - a;
+      return 2n * diff <= toleranceTwice;
+    };
+    let hasConflict = readable.some(e => !compatible(sum, e.scaled, roundingTwice + quantum(e)));
+    for (let i = 0; i < readable.length; i++) for (let j = i + 1; j < readable.length; j++) {
+      if (!compatible(readable[i].scaled, readable[j].scaled, quantum(readable[i]) + quantum(readable[j]))) hasConflict = true;
+    }
+    const directEquity = {
+      status: issues.length ? 'unknown' : hasConflict ? 'conflict' : readable.length ? 'consistent' : 'absent',
+      hasConflict,
+      readings: equities.map(e => e.scaled === undefined ? { raw: null, issue: e.issue } :
+        { raw: e.raw, value: Number(e.scaled) / Number(ONE), precision: e.dp,
+          consistentWithEstimate: compatible(sum, e.scaled, roundingTwice + quantum(e)) }),
+      issues
+    };
+    return { advisoryOnly: true, balanceRaw: balance.raw, pnlRaw: pnl.raw, estimateRaw,
+      value: Number(sum) / Number(ONE), precision: { balance: balance.dp, pnl: pnl.dp, estimate: dp },
+      uncertainty: { roundingAssumption: 'nearest display unit for each input; not a guarantee', limitations: 'Does not cover OCR errors, stale data or platform accounting differences.',
+        maxRoundingErrorRaw: uncertaintyRaw, unit: 'USD' }, flatness: 'unknown', directEquity };
+  }
+  // Exact direct-equity reading for a single screenshot review only. Unlike the
+  // Balance + UP&L estimate, this accepts no stablecoin conversion and cannot
+  // fill account state or clear any import gate.
+  function directOverviewEquity(text) {
+    if (typeof text !== 'string' || text.length > 40000 || !/(?:\bTotal[ \t]+equity\b|\bAccount[ \t]+equity\b|\bNet[ \t]+liquidation(?:[ \t]+value)?\b|^[ \t]*Equity\b)/im.test(text)) return null;
+    const reading = screenEquity(text);
+    if (reading.invalid || reading.ambiguous || reading.value == null || reading.unit !== 'USD') return null;
+    return { advisoryOnly: true, value: reading.value, raw: reading.raw, unit: 'USD' };
+  }
+  // The enhanced crop is never imported, but it must not be ignored when it
+  // contradicts independently readable account values from the same image.
+  function overviewCropMatches(text, crop) {
+    const direct = directOverviewEquity(crop);
+    const equityCue = /(?:\b(?:Total|Account)[ \t]+equ(?:i|l|1|\|)ty\b|\bNet[ \t]+liquidation(?:[ \t]+value)?\b|^[ \t]*equ(?:i|l|1|\|)ty\b)/im.test(crop || '');
+    const unclearCue = /(?:\b(?:Total|Account)[ \t]+equ(?:l|1|\|)ty\b|^[ \t]*equ(?:l|1|\|)ty\b)/im.test(crop || '');
+    if (unclearCue) return false;
+    if (!direct) return !equityCue;
+    const original = parsePropScreen(text), account = original.account;
+    if (account.equity != null && account.equity !== direct.value) return false;
+    if (account.balance == null || account.upnl == null) return true;
+    const estimate = overviewEquityEstimate(text);
+    if (!estimate) return false;
+    const check = overviewEquityEstimate(`Overview\nBalance ${estimate.balanceRaw} USD\nUP&L ${estimate.pnlRaw} USD\nEquity ${direct.raw} USD`);
+    return !!check && check.directEquity.status === 'consistent' && !check.directEquity.hasConflict;
+  }
+  // Manual inputs can supplement absent fields, never replace readable fields
+  // or contradict a same-image Balance + UP&L vs Equity comparison. If enough
+  // fields exist for a comparison but the strict overview reader cannot prove
+  // consistency, fail closed rather than accepting an uncertain calculation.
+  function manualAccountMatches(text, crop, manual) {
+    if (!manual || typeof text !== 'string') return false;
+    const original = parsePropScreen(text), account = original.account;
+    if (original.accountConflict || original.orderEvidence || original.historyEvidence || original.ledgerEvidence || original.numericIssues.length || !overviewCropMatches(text, crop)) return false;
+    const same = (a, b) => a === b;
+    if (manual.balance != null && account.balance != null && !same(manual.balance, account.balance)) return false;
+    if (manual.equity != null && account.equity != null && !same(manual.equity, account.equity)) return false;
+    const cropEquity = directOverviewEquity(crop);
+    if (manual.equity != null && cropEquity && !same(manual.equity, cropEquity.value)) return false;
+    const balance = manual.balance != null ? manual.balance : account.balance;
+    const equity = manual.equity != null ? manual.equity : account.equity != null ? account.equity : cropEquity && cropEquity.value;
+    if (balance == null || equity == null || account.upnl == null) return true;
+    const token = (raw, value) => String(raw || value).replace(/\s*USD\s*$/i, '').replace(/^\s*\$\s*/, '').trim();
+    let combined = text;
+    if (manual.balance != null && account.balance == null) combined += '\nBalance ' + token(manual.balanceRaw, manual.balance) + ' USD';
+    if (account.equity == null && cropEquity) combined += '\nEquity ' + cropEquity.raw + ' USD';
+    else if (manual.equity != null && account.equity == null) combined += '\nEquity ' + token(manual.equityRaw, manual.equity) + ' USD';
+    const check = overviewEquityEstimate(combined);
+    return !!check && check.directEquity.status === 'consistent' && !check.directEquity.hasConflict;
+  }
+
+  // A detail identity occupies the entire line: never turn a second asset or
+  // a broken quantity into a valid-looking prefix. A signed displayed P&L is
+  // allowed, but its optional unit must be a supported dollar unit.
+  function positionHeader(line, nextLine) {
+    const s = String(line || '').trim();
+    const decimal = '(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?|\\.\\d+';
+    const re = new RegExp('^(' + decimal + ')[ \\t]*([A-Z]{2,6})(?:[ \\t]+[+\\-−–—](' + decimal + ')(?:[ \\t]*(USD|USDT|USDC|USP|USDB|US0))?)?[ \\t]*[~≈;!?\\])}]*[ \\t]*$', 'i');
+    const m = re.exec(s), base = m && m[2].toUpperCase(), qty = m && Number(m[1].replace(/,/g, ''));
+    const coins = /^(?:BTC|XBT|ETH|SOL|XRP|LINK|LTC|DOGE|AVAX|SUI|HYPE|WLD|ADA|DOT|BNB|TON|PEPE|ARB|OP|NEAR|APT|TRX|BCH|ATOM|USD|USDT|USDC|USP|USDB|US0)$/;
+    const joined = base && Array.from({ length: base.length - 1 }, (_, i) => i + 1).some(i => coins.test(base.slice(0, i)) && coins.test(base.slice(i)));
+    const next = String(nextLine || '').trim();
+    const extraUnit = /^(?:US0|[A-Z]{2,6})[ \t]*[~≈;!?,.:\])}]*$/i.test(next) && !/^(?:OPEN|CLOSED|DETAILS|TP|SL|LONG|SHORT|VALUE|PRICE|MARGIN|TARGET)$/i.test(next);
+    if (m && qty > 0 && Number.isFinite(qty) && (!m[3] || Number.isFinite(Number(m[3].replace(/,/g, '')))) && !/^(?:USD|USDT|USDC|USP|USDB|US0)$/.test(base) && !joined && !extraUnit)
+      return { qty, base, sym: base + '/USD' };
+    // Missing identity is recoverable; a visible but malformed identity is not.
+    return /^(?:[\d.,+\-−–—]|[OoIl|](?:[\d.,OoIl|]|[ \t]+[A-Z]{2,}))/i.test(s) ? { invalid: true } : null;
+  }
+  // Read one TP/SL image at a time. An unlabelled number is never a stop or target.
+  function stopSheetFields(text) {
+    const s = String(text || '').replace(/\r/g, '');
+    const distance = hasStopDistance(s);
+    const looks = /(?:Take\s*profit|Stop\s*loss)\s*price/i.test(s) || distance && /(?:Edit\s*)?\bTP\s*\/\s*(?:\d\s*)?SL\b/i.test(s);
+    const order = /\b(?:Limit|Market|Stop(?:[\s-]*(?:Limit|Market|Loss))?|Take[\s-]*Profit)\s+(?:Buy|Sell)\b/i.test(s) ||
+      /\bType\s*[:=\-]?\s*(?:buy|sell)[\s-]+(?:limit|market|stop)\b/i.test(s) || /\bOrder\s*(?:ID|Type|Status)\b/i.test(s);
+    function field(label) { return labeledNumber(s, label, false); }
+    const hs = [...s.matchAll(/(?:^|\n)[ \t]*(Long|Short)[ \t]*\n(?:[ \t]*\n)*[ \t]*([^\n]+)/gi)]
+      .map(m => ({ side: m[1].toLowerCase(), header: positionHeader(m[2], (s.slice(m.index + m[0].length).match(/^\n([^\n]*)/) || [])[1]) }));
+    const identities = hs.filter(h => h.header && !h.header.invalid);
+    const identity = identities.length === 1 ? Object.assign({ side: identities[0].side }, identities[0].header) : null;
+    const sides = [...new Set([...s.matchAll(/^[ \t]*(Long|Short)[ \t]*$/gim)].map(x => x[1].toLowerCase()))];
+    const lines = s.split('\n');
+    const pairs = lines.map((line, i) => positionHeader(line, lines[i + 1])).filter(h => h && !h.invalid);
+    const uniquePairs = [...new Map(pairs.map(x => [x.qty + ':' + x.base, x])).values()];
+    const invalidPartial = lines.some((line, i) => {
+      const v = line.trim();
+      if (!/^(?:[+\-−–—\d.,][\d.,OoIl|+\-−–—]*|[OoIl|][\d.,OoIl|]*[\d.,]|[OoIl|](?=[ \t]+))[ \t]*[A-Z]{2,}/i.test(v) || /^\d+[ \t]*(?:TP|SL)\b/i.test(v) ||
+          /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[ \t]*(?:USD|USDT|USDC|USP|USDB|US0)[ \t]*[~≈;!?,.:\])}]*$/i.test(v)) return false;
+      const h = positionHeader(v, lines[i + 1]); return !!(h && h.invalid);
+    });
+    return { looks, order, identity, sideHint: sides.length === 1 ? sides[0] : null, pairHint: uniquePairs.length === 1 ? uniquePairs[0] : null,
+      ambiguous: s.includes('\u001e') || identities.length > 1 || sides.length > 1 || uniquePairs.length > 1,
+      invalidIdentity: invalidPartial || hs.some(h => h.header && h.header.invalid),
+      quantity: labeledNumber(s, 'Total\\s*open\\s*quantity', false, true), sl: field('Stop\\s*loss\\s*price'), tp: field('Take\\s*profit\\s*price'), entry: field('Average\\s*opening\\s*price') };
+  }
+  // Reconcile two readings of the SAME image; never concatenate the enhanced text into account/list OCR.
+  function recoverStopSheet(original, enhanced) {
+    const a = stopSheetFields(original), b = stopSheetFields(enhanced);
+    if (a.order || b.order) return { status: 'order' };
+    if (!a.looks) return { status: 'not-sheet' };
+    if (a.ambiguous || b.ambiguous || [a.sl, a.tp, a.entry, a.quantity, b.sl, b.tp, b.entry, b.quantity].some(f => f.ambiguous)) return { status: 'ambiguous' };
+    if (a.invalidIdentity || b.invalidIdentity || [a.sl, a.tp, a.entry, a.quantity, b.sl, b.tp, b.entry, b.quantity].some(f => f.invalid)) return { status: 'invalid' };
+    const sides = [a.sideHint, b.sideHint, a.identity && a.identity.side, b.identity && b.identity.side].filter(Boolean);
+    const pairs = [a.pairHint, b.pairHint, a.identity, b.identity].filter(Boolean);
+    if (new Set(sides).size > 1 || new Set(pairs.map(p => p.qty + ':' + p.base)).size > 1) return { status: 'conflict' };
+    if ([a.quantity, b.quantity].some(q => q.value != null && pairs.some(p => q.value !== p.qty || q.unit && q.unit !== p.base))) return { status: 'conflict' };
+    if (a.quantity.value != null && b.quantity.value != null && (a.quantity.value !== b.quantity.value || a.quantity.unit && b.quantity.unit && a.quantity.unit !== b.quantity.unit)) return { status: 'conflict' };
+    if (a.identity && b.identity && (a.identity.side !== b.identity.side || a.identity.sym !== b.identity.sym || a.identity.qty !== b.identity.qty)) return { status: 'conflict' };
+    if (['sl', 'tp', 'entry'].some(k => a[k].value != null && b[k].value != null && a[k].value !== b[k].value)) return { status: 'conflict' };
+    const identity = b.identity || a.identity;
+    const sl = a.sl.value != null ? a.sl : b.sl, tp = a.tp.value != null ? a.tp : b.tp, entry = a.entry.value != null ? a.entry : b.entry;
+    if (!identity || sl.value == null && tp.value == null) return { status: 'unreadable' };
+    return { status: 'recovered', detail: Object.assign({}, identity, { sl: sl.value, tp: tp.value, entry: entry.value, price: null, openedMs: null, orderId: null }),
+      shown: { sl: sl.raw, tp: tp.raw, entry: entry.raw } };
+  }
+  // Manual input may fill missing evidence, never replace a readable identity
+  // or labeled value from either OCR pass of the same screenshot.
+  function manualStopMatches(original, enhanced, manual) {
+    if (!manual || !['long', 'short'].includes(manual.side) || !manual.sym || !(manual.qty > 0) || !(manual.entry > 0) || !(manual.sl > 0) || !(manual.tp > 0)) return false;
+    const readings = [stopSheetFields(original), stopSheetFields(enhanced)];
+    if (!readings[0].looks) return false;
+    return readings.every(f => {
+      if (f.order || f.ambiguous || f.invalidIdentity || [f.sl, f.tp, f.entry, f.quantity].some(x => x.invalid || x.ambiguous)) return false;
+      if (f.sideHint && f.sideHint !== manual.side) return false;
+      if (f.quantity.value != null && (f.quantity.value !== manual.qty || f.quantity.unit && f.quantity.unit !== base(manual.sym))) return false;
+      for (const hint of [f.pairHint, f.identity].filter(Boolean)) {
+        if (hint.qty !== manual.qty || hint.sym !== manual.sym || hint.side && hint.side !== manual.side) return false;
+      }
+      return ['sl', 'tp', 'entry'].every(k => f[k].value == null || f[k].value === manual[k]);
+    });
+  }
+  // Read a foreground order card with two OCR passes of the SAME screenshot.
+  // The original must establish type/side/coin/size/entry; a crop may supply
+  // only explicitly labelled TP/SL values. This never reclassifies an order
+  // as a position or authorizes syncing it.
+  function recoverOrderSheet(original, enhanced) {
+    const a = parsePropScreen(original), b = enhanced ? parsePropScreen(enhanced) : { orders: [] };
+    if (a.orders.length !== 1 || (b.orders || []).length > 1) return { status: 'ambiguous' };
+    const base = a.orders[0], other = (b.orders || [])[0];
+    if (!base || !['limit', 'market', 'stop', 'take-profit'].includes(base.type) || !['long', 'short'].includes(base.side) ||
+        !/^[A-Z]{2,10}$/.test(base.base || '') || !(Number.isFinite(base.qty) && base.qty > 0) || !(Number.isFinite(base.price) && base.price > 0)) return { status: 'invalid' };
+    const sameIdentity = o => o.type === base.type && o.side === base.side && o.base === base.base && o.qty === base.qty && o.price === base.price;
+    if (other && !sameIdentity(other)) return { status: 'conflict' };
+    const slRead = enhanced ? labeledNumber(enhanced, 'Stop\\s*loss\\s*price', false, false) : { value: null, invalid: false, ambiguous: false };
+    const tpRead = enhanced ? labeledNumber(enhanced, 'Take\\s*profit\\s*price', false, false) : { value: null, invalid: false, ambiguous: false };
+    if (slRead.invalid || slRead.ambiguous || tpRead.invalid || tpRead.ambiguous) return { status: 'invalid' };
+    const sl = slRead.value != null ? slRead.value : base.sl, tp = tpRead.value != null ? tpRead.value : base.tp;
+    if ((base.sl != null && slRead.value != null && base.sl !== slRead.value) || (base.tp != null && tpRead.value != null && base.tp !== tpRead.value)) return { status: 'conflict' };
+    if (sl != null && !(Number.isFinite(sl) && sl > 0) || tp != null && !(Number.isFinite(tp) && tp > 0)) return { status: 'invalid' };
+    if (base.side === 'long' && (sl != null && sl >= base.price || tp != null && tp <= base.price) ||
+        base.side === 'short' && (sl != null && sl <= base.price || tp != null && tp >= base.price)) return { status: 'invalid' };
+    const order = Object.assign({}, base, { sl: sl == null ? null : sl, tp: tp == null ? null : tp });
+    return { status: 'recovered', order, complete: order.sl != null && order.tp != null && order.status != null };
+  }
+
   /* Read a the prop platform screen (OCR text or copied text). Returns what it could read; anything not found
      stays null (never 0). Only the Open section is read; closed positions are ignored. */
   function parsePropScreen(text, nowMs) {
     const num = v => (v == null ? null : Number(String(v).replace(/,/g, '')));
-    const T = String(text || '').replace(/\r/g, '');
+    const T = String(text || '').replace(/\r\n?/g, '\n').replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g, ' ').replace(/[\u2028\u2029]/g, '\n');
     const grab = re => { const m = re.exec(T); return m ? num(m[1]) : null; };
-    const out = { account: {}, positions: [], groups: [], warnings: [], _now: nowMs };
-    const nm = /\b(Advanced|Intermediate|Starter|Lite)\s*(Eval|Funded)\w*\s*#?\s*(\d+)?/i.exec(T);
+    const screens = T.split('\u001e');
+    const isTradeHistoryScreen = screen => /(?:^|\n)[ \t]*History[ \t]*$/im.test(screen) || /(?:^|\n)[ \t]*(?:Buy|Sell)[ \t]+[A-Z]{2,6}[ \t]+(?:Opening|Closing)\b/i.test(screen) || /\b(?:History\b[\s\S]{0,300}\bTrades|Trades\b[\s\S]{0,300}\bHistory)\b/i.test(screen);
+    const ledgerKindSource = '(Prop[ \\t\\n]+margin[ \\t\\n]+trade|Prop[ \\t\\n]+funding|Swap[ \\t\\n]+fee|Commission|Deposit|Withdrawal|Payout|Adjustment|Funding[ \\t\\n]+fee|Rollover)';
+    const ledgerMatches = screen => {
+      const matches = [...screen.matchAll(new RegExp('\\b' + ledgerKindSource + '\\b', 'gi'))], detail = stopSheetFields(screen);
+      if (matches.length !== 1 || !detail.looks || !detail.identity || detail.ambiguous || detail.invalidIdentity || [detail.sl, detail.tp, detail.entry, detail.quantity].some(f => f.invalid || f.ambiguous) || detail.order || /\b(?:History|Ledger)\b/i.test(screen)) return matches;
+      return matches.filter(m => {
+        const lineStart = screen.lastIndexOf('\n', m.index) + 1, prefix = screen.slice(lineStart, m.index), after = screen.slice(m.index + m[0].length);
+        const lines = after.split('\n'), amountMatch = lines.slice(0, 2).map((line, i) => ({ line, i, match: /^[ \t]*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)[ \t]+USD[ \t]*$/i.exec(line) })).find(x => x.match);
+        const amountLine = amountMatch ? amountMatch.i : -1, amountValue = amountMatch ? Number(amountMatch.match[1].replace(/,/g, '')) : null;
+        const metric = amountLine >= 0 && amountValue > 0 && lines.slice(0, amountLine).every(line => !line.trim());
+        const anyDate = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[ \t]+\d{1,2}\b|\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b/i.test(screen);
+        const anyBalance = /(?:^|\n)[ \t]*(?:Running[ \t]+)?Balance\b/i.test(screen);
+        const currencyAmounts = [...screen.matchAll(/[~≈]?[ \t]*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[ \t]+USD\b/gi)];
+        const feeLineStart = amountMatch ? screen.indexOf(amountMatch.line, screen.indexOf(m[0], m.index)) : -1;
+        const feeAmounts = amountMatch ? currencyAmounts.filter(x => x.index >= feeLineStart && x.index < feeLineStart + amountMatch.line.length) : [];
+        const knownDetailValues = [detail.entry.value, detail.sl.value, detail.tp.value].filter(x => Number.isFinite(x) && x > 0);
+        const allAmountsAccountedFor = feeAmounts.length === 1 && currencyAmounts.every(x => {
+          if (x.index >= feeLineStart && x.index < feeLineStart + (amountMatch ? amountMatch.line.length : 0)) return true;
+          const lineStart = screen.lastIndexOf('\n', x.index) + 1, lineEnd = screen.indexOf('\n', x.index), line = screen.slice(lineStart, lineEnd < 0 ? screen.length : lineEnd);
+          const prevStart = screen.lastIndexOf('\n', lineStart - 2) + 1, prevLine = screen.slice(prevStart, lineStart ? lineStart - 1 : 0);
+          const labeledPrice = /\b(?:Average opening price|Entry price|Take profit price|Stop loss price)\b/i.test(line) ||
+            /^(?:Average opening price|Entry price|Take profit price|Stop loss price)[ \t]*$/i.test(prevLine);
+          return labeledPrice && knownDetailValues.includes(Number(x[0].replace(/[~≈\s]/g, '').replace(/USD$/i, '').replace(/,/g, '')));
+        });
+        return !(/^Funding[ \t\n]+fee$/i.test(m[1]) && /^[ \t]*(?:Est\.|Estimated)[ \t]+$/i.test(prefix) && metric && !anyDate && !anyBalance && allAmountsAccountedFor);
+      });
+    };
+    const isLedgerScreen = screen => /\bLedger\b/i.test(screen) || ledgerMatches(screen).length > 0;
+    // An order cue is safety evidence even when its details are unreadable or the order is only partly shown.
+    const out = { account: {}, positions: [], groups: [], warnings: [], numericIssues: [], orderEvidence: screens.some(screen => stopSheetFields(screen).order),
+      historyEvidence: screens.some(isTradeHistoryScreen), ledgerEvidence: screens.some(isLedgerScreen), _now: nowMs };
+    const precision = token => { const m = /\.(\d+)/.exec(token || ''); return m ? m[1].length : 0; };
+    const rounding = token => 0.5 * Math.pow(10, -precision(token));
+    const differs = (a, b) => !Number.isFinite(a.value) || !Number.isFinite(b.value) || Math.abs(a.value - b.value) > Math.max(0.020000001, a.rounding + b.rounding + 1e-9);
+    const accountNames = [...T.matchAll(/\b(Advanced|Intermediate|Starter|Lite)[ \t]*(Eval|Funded)\w*(?:[ \t]*#?[ \t]*(\d+)(?![\d,.]))?/gi)];
+    const nm = accountNames.find(m => m[3] != null) || accountNames[0];
     if (nm) out.account = { plan: nm[1].toLowerCase(), phase: /fund/i.test(nm[2]) ? 'funded' : 'eval',
       label: (nm[1][0].toUpperCase() + nm[1].slice(1).toLowerCase()) + ' ' + (nm[2][0].toUpperCase() + nm[2].slice(1).toLowerCase()) + (nm[3] ? ' ' + nm[3] : '') };
-    out.account.equity = grab(/(?:Total\s+equity|Account\s+equity|Net\s+liquidation(?:\s+value)?|(?:^|\n)\s*Equity)[^\d-]{0,20}([\d,]+\.\d+)/i);
-    if (out.account.equity == null) {   // label scrolled off: first "N,NNN.NNNN USD" above Target equity
-      const head = T.split(/Target\s+equity/i)[0];
-      const m = /(?:^|\n)\s*([\d,]+\.\d{2,})\s*us/i.exec(head);
-      if (m && T.length > head.length) out.account.equity = num(m[1]);
-    }
+    const accountKinds = new Set(accountNames.map(m => [m[1].toLowerCase(), m[2].toLowerCase()].join('|')));
+    const accountIds = new Set(accountNames.filter(m => m[3] != null).map(m => [m[1].toLowerCase(), m[2].toLowerCase(), m[3]].join('|')));
+    out.accountConflict = accountKinds.size > 1 || accountIds.size > 1;
+    const equityReadings = screens.map(screenEquity);
+    if (equityReadings.some(e => e.invalid || e.ambiguous)) out.numericIssues.push('An account equity value is invalid or ambiguous.');
+    const firstEquity = equityReadings.find(e => !e.invalid && !e.ambiguous && e.value != null);
+    out.account.equity = firstEquity ? firstEquity.value : null;
     // Portfolio screen: Balance and open P&L are shown directly (most reliable source for the balance).
-    out.account.balance = grab(/(?:^|\n)\s*Balance\s+([\d,]+\.\d+)\s*US/i);
-    out.account.upnl = (m => m ? num(m[1]) : null)(/(?:^|\n)\s*UP\s*&\s*L\s+([-+]?[\d,]*\.?\d+)/i.exec(T));
+    const accountFields = (label, name, zero, signed) => screens.map(screen => {
+      const f = labeledNumber(screen, label, zero, false, signed);
+      if (f.invalid || f.ambiguous) out.numericIssues.push(`An account ${name} is invalid or ambiguous.`);
+      return f;
+    });
+    const values = xs => xs.map(f => f.value).filter(v => v != null), first = xs => values(xs)[0] ?? null;
+    const balances = accountFields('(?:^|\\n)[ \\t]*Balance\\b(?![ \\t]+P[ \\t]*&[ \\t]*L\\b)', 'balance', true, true);
+    const totals = accountFields('(?:^|\\n)[ \\t]*UP[ \\t]*&[ \\t]*L\\b', 'open P&L', true, true);
+    out.account.balance = first(balances);
+    out.account.upnl = first(totals);
     out.account.usedMargin = grab(/Used\s+margin\s+([\d,]+\.\d+)/i);
     out.account.availMargin = grab(/Available\s+margin\s+([\d,]+\.\d+)/i);
-    out.account.target = grab(/(?:Target\s+equity|Profit\s+target(?:\s+balance)?)[^\d]{0,10}([\d,]+\.\d+)/i);
-    out.account.dailyLimit = grab(/(?:Daily\s+loss\s+limit|Daily\s+drawdown\s+limit|Max(?:imum)?\s+daily\s+loss\s+(?:limit|level))[^\d]{0,10}([\d,]+\.\d+)/i);
-    out.account.drawdownLimit = grab(/(?:Drawdown\s+limit|Max(?:imum)?\s+(?:drawdown|loss)\s+(?:limit|level))[^\d]{0,10}([\d,]+\.\d+)/i);
-    const parts = T.split(/\n\s*Closed\b/i), openPart = parts[0], closedPart = parts.slice(1).join('\n');
-    const lines = openPart.split('\n').map(l => l.trim()).filter(Boolean);
+    const targets = accountFields('(?:Target[ \\t]+equity|Profit[ \\t]+target(?:[ \\t]+balance)?)', 'target equity', false, false);
+    const daily = accountFields('(?:Daily[ \\t]+loss[ \\t]+limit|Daily[ \\t]+drawdown[ \\t]+limit|Max(?:imum)?[ \\t]+daily[ \\t]+loss[ \\t]+(?:limit|level))', 'daily limit', false, false);
+    const drawdowns = accountFields('(?:^|\\n)[ \\t]*(?:Drawdown[ \\t]+limit|Max(?:imum)?[ \\t]+(?:drawdown|loss)[ \\t]+(?:limit|level))', 'drawdown limit', false, false);
+    out.account.target = first(targets);
+    const dailyValues = daily.filter(f => !f.invalid && !f.ambiguous && f.value != null);
+    const dailyConflict = dailyValues.some((a, i) => dailyValues.slice(i + 1).some(b => Math.abs(a.value - b.value) > rounding(a.raw) + rounding(b.raw) + 1e-9));
+    if (dailyConflict) out.numericIssues.push('The daily loss limit readings disagree. Use current consistent screenshots.');
+    out.account.dailyLimit = dailyConflict ? null : first(daily);
+    out.account.drawdownLimit = first(drawdowns);
+    out.account.limitEvidence = { target: values(targets), drawdown: values(drawdowns) };
+    // A record separator marks each selected image; Closed in one screen must not hide later screens.
+    const closedParts = [], listChecks = [];
+    let unresolvedGroup = false;
     const sideRe = /\b(Short|Long)\b\s*([-+]?\d+(?:\.\d+)?)\s*%/i;
-    const qtyRe = /^([\d]*\.?\d+)\s*([A-Z]{2,6})\b(?!\/)\s*([-+]?[\d,]*\.?\d+)?/;
-    const entryRe = /@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?\s*([\d,]+\.?\d*)?/i;
-    for (let i = 0; i < lines.length; i++) {
-      const g = /\b([A-Z]{2,6})\/USD\b\s+([\d,]+\.\d+)/.exec(lines[i]);
-      if (g) out.groups.push({ base: g[1], notional: num(g[2]) });
-      const sm = sideRe.exec(lines[i]);
-      if (!sm || !lines[i + 1]) continue;
-      const qm = qtyRe.exec(lines[i + 1].replace(/\s+(?=BTC|ETH|SOL|XRP|HYPE|WLD)/, ''));
-      const em = lines[i + 2] ? entryRe.exec(lines[i + 2]) : null;
-      if (!qm || !em) { out.warnings.push('Could not read a position near: ' + lines[i]); continue; }
-      let tp = false, sl = false;
-      for (let j = i + 3; j < Math.min(lines.length, i + 5); j++) {
-        if (sideRe.test(lines[j]) || /\b[A-Z]{2,6}\/USD\b/.test(lines[j])) break;
-        if (/\d\s*TP\b/i.test(lines[j])) tp = true;
-        if (/\d\s*S[LlI1|]\b/.test(lines[j])) sl = true;
+    const qtyRe = /^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)\s*([A-Z]{2,6})\b(?!\/)([^\n]*)$/;
+    const decimal = '(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?|\\.\\d+';
+    const usdUnit = '(?:USD|USDT|USDC|USP|USDB|US0)';
+    const rowPnl = s => { const m = new RegExp('^\\s*([+-](?:' + decimal + '))(?:\\s*' + usdUnit + ')?\\s*$', 'i').exec(s) || new RegExp('^\\s*(' + decimal + ')\\s+' + usdUnit + '\\s*$', 'i').exec(s); const v = m ? num(m[1]) : null; return Number.isFinite(v) ? v : null; };
+    const entryRe = new RegExp('^@\\s*(' + decimal + ')(?:\\s*' + usdUnit + ')?(?:\\s+(' + decimal + '))?\\s*$', 'i');
+    for (const screen of screens) {
+      const closed = /(?:^|\n)\s*Closed\b/i.exec(screen), openPart = closed ? screen.slice(0, closed.index) : screen;
+      if (closed) closedParts.push(screen.slice(closed.index + closed[0].length));
+      if (isTradeHistoryScreen(screen)) continue;
+      const lines = openPart.split('\n').map(l => l.trim()).filter(Boolean), first = out.positions.length, warningCount = out.warnings.length, rowMeta = [], screenGroups = [];
+      for (let i = 0; i < lines.length; i++) {
+        const g = /\b([A-Z]{2,6})\/USD\b[ \t]+([\d,.]+)/.exec(lines[i]);
+        const unreadGroup = !g && /^(?:[^\w]{1,4}\s*)?([A-Z]{2,6})\/USD\b/.exec(lines[i]);
+        if (unreadGroup) screenGroups.push({ base: unreadGroup[1], index: i, summaryIndex: -1, token: null, invalid: true });
+        if (g) {
+          const goodNotional = new RegExp('^(?:' + decimal + ')$').test(g[2]) && Number.isFinite(num(g[2]));
+          if (goodNotional) out.groups.push({ base: g[1], notional: num(g[2]) });
+          const inline = lines[i].slice(g.index + g[0].length).replace(/^[ \t]*(?:USD|USDT|USDC|USP|USDB|US0)\b/i, '').trim();
+          const next = lines[i + 1] || '';
+          const summaryRe = /^(?:[^\w]{1,3}\s*|[A-Z]\s+)?(?:Short|Long)\s+([+\-−–—][\d,.]+)(?:\s*(?:USD|USDT|USDC|USP|USDB|US0))?\s*[~≈;!?\])}]*\s*$/i;
+          const inlineMatch = inline ? summaryRe.exec(inline) : null, nextMatch = summaryRe.exec(next);
+          const nextCue = /^(?:[^\w]{1,3}\s*|[A-Z]\s+)?(?:Short|Long)\s+[+\-−–—]/i.test(next) && !sideRe.test(next);
+          const candidate = inlineMatch || nextMatch, token = candidate && candidate[1].replace(/[−–—]/g, '-');
+          const valid = token && new RegExp('^[+\\-](?:' + decimal + ')$').test(token) && Number.isFinite(num(token));
+          screenGroups.push({ base: g[1], index: i, summaryIndex: nextMatch ? i + 1 : -1, token: valid ? token : null,
+            invalid: !goodNotional || !!inline && !inlineMatch || !!inlineMatch && !!nextMatch || !!nextCue && !nextMatch || !!candidate && !valid });
+        }
+        const sm = sideRe.exec(lines[i]);
+        if (!sm) continue;
+        const qm = lines[i + 1] ? qtyRe.exec(lines[i + 1].replace(/\s+(?=BTC|ETH|SOL|XRP|HYPE|WLD)/, '')) : null;
+        const em = lines[i + 2] ? entryRe.exec(lines[i + 2]) : null;
+        const header = qm && positionHeader(qm[1] + ' ' + qm[2]);
+        const safeTail = qm && (!qm[3].trim() || rowPnl(qm[3]) != null || /^\s*(?:\d+\s*TP\s*\/\s*\d+\s*SL|\d+(?:\.\d+)?\s*[x×])\s*$/i.test(qm[3]));
+        if (!qm || !em || !header || header.invalid || !safeTail || !(num(em[1]) > 0) || !Number.isFinite(num(em[1])) || em[2] && (!(num(em[2]) > 0) || !Number.isFinite(num(em[2])))) {
+          if (qm && !safeTail && /[+\-−–—\d]/.test(qm[3])) out.numericIssues.push('A position P&L has an invalid or ambiguous number or unit.');
+          out.warnings.push('Could not read a position row.'); continue;
+        }
+        if (rowPnl(qm[3]) == null && /(?:^|\s)[+\-−–—]\s*[\d,.]|[\d,.]+\s+USD\b|^\s*[\d,.]+\s*$/i.test(qm[3])) out.numericIssues.push('A position P&L has an invalid or ambiguous number.');
+        let tp = null, sl = null;
+        const inlineTp = /(\d+)\s*TP\b/i.exec(qm[3]), inlineSl = /(\d+)\s*S[LlI1|]\b/i.exec(qm[3]);
+        if (inlineTp) tp = +inlineTp[1] > 0;
+        if (inlineSl) sl = +inlineSl[1] > 0;
+        for (let j = i + 3; j < Math.min(lines.length, i + 5); j++) {
+          if (sideRe.test(lines[j]) || /\b[A-Z]{2,6}\/USD\b/.test(lines[j])) break;
+          const tpm = /(\d+)\s*TP\b/i.exec(lines[j]), slm = /(\d+)\s*S[LlI1|]\b/i.exec(lines[j]);
+          if (tpm) { const value = +tpm[1] > 0; if (tp != null && tp !== value) out.numericIssues.push('A position has conflicting take-profit evidence.'); else tp = value; }
+          if (slm) { const value = +slm[1] > 0; if (sl != null && sl !== value) out.numericIssues.push('A position has conflicting stop evidence.'); else sl = value; }
+        }
+        out.positions.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD',
+          upnl: rowPnl(qm[3]), entry: num(em[1]), price: em[2] ? num(em[2]) : null, hasTP: tp === true, hasSL: sl === true, tpEvidence: tp, slEvidence: sl });
+        rowMeta.push({ index: i, pos: out.positions[out.positions.length - 1], pnlText: qm[3].trim().replace(/\s*(?:USD|USDT|USDC|USP|USDB|US0)$/i, '') });
       }
-      out.positions.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD',
-        upnl: qm[3] != null ? num(qm[3]) : null, entry: num(em[1]), price: em[2] ? num(em[2]) : null, hasTP: tp, hasSL: sl });
+      let groupConflict = false;
+      for (let j = 0; j < screenGroups.length; j++) {
+        const group = screenGroups[j], end = screenGroups[j + 1] ? screenGroups[j + 1].index : lines.length;
+        if (group.invalid) { groupConflict = true; continue; }
+        const members = rowMeta.filter(x => x.index > group.index && x.index < end);
+        if (!members.length || members.some(x => x.pos.base !== group.base)) { groupConflict = true; continue; }
+        if (group.token == null) continue;
+        if (members.some(x => x.pos.upnl == null)) { groupConflict = true; continue; }
+        const sum = members.reduce((a, x) => a + x.pos.upnl, 0);
+        const tolerance = 0.5 * Math.pow(10, -precision(group.token)) + members.reduce((a, x) => a + 0.5 * Math.pow(10, -precision(x.pnlText)), 0) + 1e-9;
+        if (!Number.isFinite(sum) || Math.abs(num(group.token) - sum) > tolerance) groupConflict = true;
+      }
+      if (groupConflict) unresolvedGroup = true;
+      const counts = [];
+      for (let i = 0; i < lines.length; i++) {
+        for (const m of lines[i].matchAll(/\bPositions\b([^\n]*)/gi)) {
+          if (/\b(?:no|zero)\s+open\s*$/i.test(lines[i].slice(0, m.index))) continue;
+          const tail = m[1].replace(/^[ \t]*(?:[·•:–—-][ \t]*)?/, '').trim();
+          const token = tail ? tail.split(/\s+/)[0] : (lines[i + 1] || '').split(/\s+/)[0];
+          if (!token || /^(?:open|closed|orders?|details)$/i.test(token)) continue;
+          if (tail || /^[\d+\-−–—.,OoIl|?○〇●]/.test(token)) counts.push(token);
+        }
+      }
+      const validCount = counts.length === 1 && /^\d+$/.test(counts[0]) && Number.isSafeInteger(Number(counts[0]));
+      const count = validCount ? counts[0] : null;
+      const rows = out.positions.slice(first), identities = new Set(rows.map(p => [p.sym, p.side, p.qty, p.entry].join('|')));
+      const hasOpenHeading = lines.some(line => /^Open(?:\s+[^\w]{1,4})?$/i.test(line));
+      const emptyLabel = /\b(?:(?:no|zero)\s+open\s+positions|no\s+position\s+entries\s+available)\b/i.test(openPart);
+      const isDetail = /\bDetails\b|Average\s*opening\s*price|(?:Take\s*profit|Stop\s*loss)\s*price|\b(?:Limit|Market)\s+(?:Buy|Sell)\b/i.test(openPart);
+      if (hasOpenHeading || rows.length || counts.length && !isDetail) {
+        const expected = count != null ? +count : null;
+        const openIndex = lines.findIndex(line => /^Open(?:\s+[^\w]{1,4})?$/i.test(line));
+        const openStart = openIndex >= 0 ? openIndex + 1 : 0;
+        const openLines = openIndex >= 0 || expected === 0 && emptyLabel ? lines.slice(openStart) : [];
+        const groupLines = new Set(screenGroups.map(g => g.summaryIndex));
+        const sideCues = openLines.filter((line, offset) => !groupLines.has(openStart + offset) && /^(?:[^\w]{1,3}\s*|[A-Z]\s+)?(?:Long|Short)\b/i.test(line)).length;
+        const quantityCues = openLines.filter(line => { const m = qtyRe.exec(line); return m && !/^(?:USD|USDT|USDC|TP|SL)$/i.test(m[2]); }).length;
+        const entryCues = openLines.filter(line => /^@\s*\S/.test(line)).length;
+        const unreadRows = sideCues > rows.length || quantityCues > rows.length || entryCues > rows.length;
+        const complete = expected != null && (expected === 0 ? emptyLabel : hasOpenHeading) && expected === rows.length && identities.size === rows.length && !unreadRows && out.warnings.length === warningCount;
+        const eq = screenEquity(openPart);
+        const agg = labeledNumber(openPart, '(?:^|\\n)[ \\t]*UP[ \\t]*&[ \\t]*L\\b', true, false, true);
+        const sum = rows.every(p => p.upnl != null) ? rows.reduce((sum, p) => sum + p.upnl, 0) : null;
+        const upnl = Number.isFinite(sum) ? sum : null;
+        if (sum != null && upnl == null) out.numericIssues.push('A position P&L sum is invalid.');
+        listChecks.push({ expected, read: rows.length, complete, equity: eq.value, upnl, aggregateUpnl: agg.value, groupConflict,
+          validEvidence: !eq.invalid && !eq.ambiguous && !agg.invalid && !agg.ambiguous,
+          pnlRounding: rowMeta.reduce((n, x) => n + rounding(x.pnlText), 0), aggregateRounding: rounding(agg.raw),
+          rounding: rounding(eq.raw) + rowMeta.reduce((n, x) => n + rounding(x.pnlText), 0) });
+      }
     }
     // Order sheets (tap an order in the prop platform, Nov 1 2026 layout): "Limit Buy / 0.094 BTC / @ 77692 USD", then on the Details tab
     // "Status open - 0% filled", "Type buy-limit", "Price 77,692.00", "Open time …", "Order ID …", and on the TP/SL tab "Take profit
     // price …", "Stop loss price …". An order is NOT a position: it's a working order until it's filled.
     out.orders = [];
     let Tg = T;   // text for the general position reader, with order sheets taken out (it would misread "Limit Buy 0.094 BTC @ 77692" as a position)
-    { const ore = /\b(Limit|Market|Stop[\s-]*(?:Limit|Market|Loss)?|Take[\s-]*Profit)\s+(Buy|Sell)\s*\n\s*([\d]*\.?\d+)\s*([A-Z]{2,6})\b[^\n]*\n\s*@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?([\s\S]*?)(?=\n\s*(?:Limit|Market|Stop|Take[\s-]*Profit)\s+(?:Buy|Sell)\s*\n|$)/gi;
+    { const ore = /\b(Limit|Market|Stop[\s-]*(?:Limit|Market|Loss)?|Take[\s-]*Profit)\s+(Buy|Sell)\s*\n\s*([\d]*\.?\d+)\s*([A-Z]{2,6})\b[^\n]*\n\s*@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?((?:(?!\u001e)[\s\S])*?)(?=\n\s*(?:Limit|Market|Stop|Take[\s-]*Profit)\s+(?:Buy|Sell)\s*\n|\u001e|$)/gi;
       let om;
       while ((om = ore.exec(T))) {
         const body = om[6], g = re => { const m = re.exec(body); return m ? num(m[1]) : null; };
         const st = /Status\s+(open|filled|closed|cancel+ed|canceled|expired|partially\s*filled)\s*-?\s*(\d{1,3}(?:\.\d+)?)?\s*%?\s*(?:filled)?/i.exec(body);
         const pct = st && st[2] != null ? +st[2] : null, word = st ? st[1].toLowerCase() : null;
-        const status = !st ? null : /cancel|expired/.test(word) ? 'cancelled' : (/filled|closed/.test(word) && pct == null) || pct >= 100 ? 'filled' : pct > 0 ? 'partial' : 'working';
+        const status = !st ? null : /cancel|expired/.test(word) ? 'cancelled' : /^partially/.test(word) && pct == null ? 'partial' : (/filled|closed/.test(word) && pct == null) || pct >= 100 ? 'filled' : pct > 0 ? 'partial' : 'working';
         const ot = /Open\s*time\s*([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2}),?\s*(\d{4})\s*(?:at)?\s*(\d{1,2}):(\d{2})\s*([AP])\.?M/i.exec(body);
         let openedMs = null;
         if (ot) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ot[1].toLowerCase()) / 3; let h = +ot[4] % 12; if (/p/i.test(ot[6])) h += 12;
@@ -216,9 +695,9 @@
           parentId: pidm ? pidm[1].toUpperCase() : null, avgFill, filledMs });
         Tg = Tg.replace(om[0], '\n');
       }
-      // The Details tab and the TP/SL tab of one order are two screenshots: join them (same type, side, size and price).
+      // Join order sheets only when both carry the same ID and symbol; similar price/size alone is not proof.
       const mo = [];
-      for (const o of out.orders) { const tw = mo.find(m => m.type === o.type && m.side === o.side && m.qty === o.qty && m.price === o.price && (m.orderId == null || o.orderId == null || m.orderId === o.orderId));
+      for (const o of out.orders) { const tw = mo.find(m => m.sym === o.sym && m.type === o.type && m.side === o.side && m.qty === o.qty && m.price === o.price && m.orderId && o.orderId && m.orderId === o.orderId);
         if (tw) { for (const k of Object.keys(o)) if (tw[k] == null && o[k] != null) tw[k] = o[k]; } else mo.push(Object.assign({}, o)); }
       out.orders = mo; }
     // Generic one-line positions from other platforms, e.g. "BTCUSD Long 0.10 @ 77,606.10 P&L -11.36" or "Sell 0.1 BTC at 77606.1".
@@ -228,71 +707,130 @@
       let gm;
       while ((gm = gre.exec(Tg))) {
         const base = (gm[4] || gm[1] || '').toUpperCase(); if (!base || /^(USD|USDT|USDC)$/.test(base)) continue;
+        const qty = num(gm[3]), entry = num(gm[5]), upnl = gm[6] != null ? num(gm[6].replace('$', '')) : null;
+        if (!Number.isFinite(qty) || !(qty > 0) || !Number.isFinite(entry) || !(entry > 0) || upnl != null && !Number.isFinite(upnl)) { out.numericIssues.push('A position has an invalid number.'); continue; }
         out.positions.push({ side: /short|sell/i.test(gm[2]) ? 'short' : 'long', qty: num(gm[3]), base, sym: base + '/USD', entry: num(gm[5]),
-          upnl: gm[6] != null ? num(gm[6].replace('$', '')) : null, price: null, hasTP: false, hasSL: false });
+          upnl, price: null, hasTP: false, hasSL: false });
       }
       if (out.positions.length) out.warnings.push('Read with the general reader (not a known platform layout): check every number before syncing.');
     }
     // Closed list (the exchange shows each closed position's realized P&L, fees included).
     out.closedRows = [];
-    { const cl = closedPart.split('\n').map(l => l.trim()).filter(Boolean);
+    for (const part of closedParts) { const cl = part.split('\n').map(l => l.trim()).filter(Boolean);
       for (let i = 0; i < cl.length; i++) {
         const sm = /\b(Short|Long)\b/i.exec(cl[i]); if (!sm || !cl[i + 1]) continue;
-        const qm = /^([\d]*\.?\d+)\s*([A-Z]{2,6})\b(?!\/)\s*([-+]?[\d,]*\.?\d+)?/.exec(cl[i + 1].replace(/\s+(?=BTC|ETH|SOL|XRP|HYPE|WLD)/, ''));
-        const em = cl[i + 2] ? /@\s*([\d,]+\.?\d*)\s*(?:US[DPB]?|usD|usp)?\s*([\d,]+\.?\d*)?/i.exec(cl[i + 2]) : null;
-        if (!qm || !em || qm[3] == null) continue;
-        out.closedRows.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD', realized: num(qm[3]), entry: num(em[1]), exit: em[2] ? num(em[2]) : null });
+        const qm = qtyRe.exec(cl[i + 1].replace(/\s+(?=BTC|ETH|SOL|XRP|HYPE|WLD)/, ''));
+        const em = cl[i + 2] ? entryRe.exec(cl[i + 2]) : null;
+        const header = qm && positionHeader(qm[1] + ' ' + qm[2]);
+        const malformed = (!qm && /^[\d,.]/.test(cl[i + 1])) || qm && (!header || header.invalid || rowPnl(qm[3]) == null && /[+\-−–—\d]/.test(qm[3])) ||
+          cl[i + 2] && /^@/.test(cl[i + 2]) && (!em || !(num(em[1]) > 0) || !Number.isFinite(num(em[1])) || em[2] && (!(num(em[2]) > 0) || !Number.isFinite(num(em[2]))));
+        if (malformed) { out.numericIssues.push('A closed position has an invalid or ambiguous number.'); continue; }
+        if (!qm || !em || rowPnl(qm[3]) == null) continue;
+        out.closedRows.push({ side: sm[1].toLowerCase(), qty: num(qm[1]), base: qm[2], sym: qm[2] + '/USD', realized: rowPnl(qm[3]), entry: num(em[1]), exit: em[2] ? num(em[2]) : null });
       } }
     // Trades tab (History -> Trades): each fill with side, open/close, size, order type, price and time.
     // Time-only rows are today (phone's local date); older rows show a date and no time.
     out.fills = [];
-    { const fl = T.split('\n').map(l => l.trim()).filter(Boolean);
+    for (const screen of screens) { const fl = screen.split('\n').map(l => l.trim()).filter(Boolean);
       const base = new Date(out._now || Date.now());
       for (let i = 0; i < fl.length; i++) {
         const hm = /\b(Buy|Sell)\s+([A-Z]{2,6})\s+(Opening|Closing)\b\s*(?:(\d{1,2}):(\d{2})\s*([AP])\.?M|([A-Z][a-z]{2})\w*\s+(\d{1,2}),\s*(\d{4}))?/i.exec(fl[i]);
         if (!hm || !fl[i + 1]) continue;
-        const qm = /^([\d]*\.?\d+)\s*(?:USD|BTC|ETH|SOL|XRP|[A-Z]{2,6})?\b/.exec(fl[i + 1]);
-        const pm = fl[i + 2] ? /@\s*(Market|Limit|Stop[\w\s-]*|Take[\w\s-]*)?\s*([\d,]+\.?\d*)/i.exec(fl[i + 2]) : null;
-        if (!qm) continue;
+        const qm = new RegExp('^(' + decimal + ')(?:[ \\t]*([A-Z]{2,6}))?[ \\t]*$', 'i').exec(fl[i + 1]);
+        const priceLine = fl[i + 2] && /^@/.test(fl[i + 2]);
+        const pm = priceLine ? new RegExp('^@[ \\t]*(?:(Market|Limit|Stop(?:[ -](?:Limit|Market|Loss))?|Take(?:[ -]Profit)?)[ \\t]+)?(' + decimal + ')(?:[ \\t]*(?:USD|USDT|USDC|USP|USDB|US0))?[ \\t]*$', 'i').exec(fl[i + 2]) : null;
+        if (!qm || !(num(qm[1]) > 0) || !Number.isFinite(num(qm[1])) || qm[2] && !/^(?:USD|USDT|USDC)$/i.test(qm[2]) && qm[2].toUpperCase() !== hm[2].toUpperCase() ||
+            priceLine && (!pm || !(num(pm[2]) > 0) || !Number.isFinite(num(pm[2])))) {
+          out.numericIssues.push('A trade fill has an invalid or ambiguous number or unit.'); continue;
+        }
         let t = null, day = null;
         if (hm[4]) { let h = +hm[4] % 12; if (/p/i.test(hm[6])) h += 12; t = new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, +hm[5]).getTime(); if (t > base.getTime() + 6e4) t -= 864e5; }
         else if (hm[7]) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(hm[7].toLowerCase()) / 3; if (mo >= 0) day = new Date(+hm[9], mo, +hm[8]).getTime(); }
         out.fills.push({ side: hm[1].toLowerCase(), base: hm[2].toUpperCase(), sym: hm[2].toUpperCase() + '/USD', action: /open/i.test(hm[3]) ? 'open' : 'close',
           qty: num(qm[1]), type: pm && pm[1] ? pm[1].trim().toLowerCase() : null, price: pm ? num(pm[2]) : null, t, day });
       } }
+    // Conflicting explicit protection evidence across screenshots must not be hidden by deduplication.
+    const positionEvidence = new Map();
+    for (const p of out.positions) { const k = [p.sym, p.side, p.qty, p.entry].join('|'), e = positionEvidence.get(k) || { sl: new Set(), tp: new Set() }; if (p.slEvidence != null) e.sl.add(p.slEvidence); if (p.tpEvidence != null) e.tp.add(p.tpEvidence); positionEvidence.set(k, e); }
+    out.positionEvidenceConflict = unresolvedGroup || [...positionEvidence.values()].some(e => e.sl.size > 1 || e.tp.size > 1);
+    if (unresolvedGroup) out.numericIssues.push('A position group is unreadable or lacks matching rows. Use a current complete list.');
+    if (out.positionEvidenceConflict && !unresolvedGroup) out.warnings.push('Position screenshots disagree about stop or target protection. Use a current consistent list.');
     // De-duplicate (the same position can appear on two overlapping screenshots)
     const seen = new Set();
-    out.positions = out.positions.filter(p => { const k = [p.side, p.qty, p.entry].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
+    out.positions = out.positions.filter(p => { const k = [p.sym, p.side, p.qty, p.entry].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
     // Position detail sheets (tap a position): side, size, take-profit and stop-loss prices.
     out.details = [];
-    const dre = /\b(Short|Long)\s*\n\s*([\d]*\.?\d+)\s*([A-Z]{2,6})\b([\s\S]*?)(?=\n\s*(?:Short|Long)\s*\n|$)/g;
+    const dre = /(?:^|\n)[ \t]*(Short|Long)[ \t]*\n(?:[ \t]*\n)*[ \t]*([^\n]+)((?:(?!\u001e)[\s\S])*?)(?=\n[ \t]*(?:Short|Long)[ \t]*\n|\u001e|$)/gi;
     let dm;
     while ((dm = dre.exec(T))) {
-      const body = dm[4];
-      const g = re => { const m = re.exec(body); return m ? num(m[1]) : null; };
-      const tp = g(/Take\s*profit\s*price\s*([\d,]+\.?\d*)/i), sl = g(/Stop\s*loss\s*price\s*([\d,]+\.?\d*)/i);
-      const entry = g(/Average\s*opening\s*price\s*([\d,]+\.?\d*)/i), price = g(/Current\s*price\s*([\d,]+\.?\d*)/i);
-      const fee = g(/Opening\s*fee\s*([\d,]*\.?\d+)/i), qty2 = g(/Total\s*open\s*quantity\s*([\d]*\.?\d+)/i);
-      // "Open time Oct 31, 2026 at 7:37PM" is the phone's local time.
-      const ot = /Open\s*time\s*([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2}),?\s*(\d{4})\s*(?:at)?\s*(\d{1,2}):(\d{2})\s*([AP])\.?M/i.exec(body);
+      const body = dm[3], header = positionHeader(dm[2], (body.match(/^\n([^\n]*)/) || [])[1]);
+      if (!header || header.invalid) {
+        if (header && header.invalid && /\bDetails\b|Average\s*opening\s*price|(?:Take\s*profit|Stop\s*loss)\s*price|\bTP\s*\/\s*SL\b/i.test(body)) out.numericIssues.push('A position detail has an invalid or ambiguous identity.');
+        continue;
+      }
+      const readDetail = (label, name, allowZero, quantity) => {
+        const f = labeledNumber(body, label, allowZero, quantity);
+        if (f.invalid || f.ambiguous) out.numericIssues.push(`A position detail has an invalid or ambiguous ${name}.`);
+        return f.value;
+      };
+      const tp = readDetail('Take\\s*profit\\s*price', 'target', false, false), sl = readDetail('Stop\\s*loss\\s*price', 'stop', false, false);
+      const entry = readDetail('Average\\s*opening\\s*price', 'entry', false, false), price = readDetail('Current\\s*price', 'current price', false, false);
+      const fee = readDetail('Opening\\s*fee', 'opening fee', true, false), qty2 = readDetail('Total\\s*open\\s*quantity', 'quantity', false, true);
+      if (qty2 != null && Math.abs(qty2 - header.qty) > 1e-9) out.numericIssues.push('A position detail shows conflicting quantities.');
+      const qtyField = labeledNumber(body, 'Total\\s*open\\s*quantity', false, true);
+      if (qtyField.unit && qtyField.unit !== header.base) out.numericIssues.push('A position detail shows conflicting asset symbols.');
+      // The platform displays local wall time. Consume the complete labeled
+      // value: an OCR-valid prefix must not hide suffixes, malformed month
+      // names, or a second Open-time cue elsewhere in this position sheet.
+      // Do not let Date roll an impossible date or ambiguous DST time forward.
+      const openTimeIssue = 'A position detail has an invalid or ambiguous open time.';
+      const openTimeCues = [...body.matchAll(/\bOpen\s*time\b/gi)];
       let openedMs = null;
-      if (ot) { const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ot[1].toLowerCase()) / 3; let h = +ot[4] % 12; if (/p/i.test(ot[6])) h += 12;
-        if (mo >= 0) openedMs = new Date(+ot[3], mo, +ot[2], h, +ot[5]).getTime(); }
+      if (openTimeCues.length) {
+        if (openTimeCues.length !== 1) out.numericIssues.push(openTimeIssue);
+        else {
+          const cue = openTimeCues[0], tail = body.slice(cue.index + cue[0].length);
+          const lines = tail.split(/\r\n?|\n/), inline = (lines.shift() || '').replace(/^[ \t]*:[ \t]*/, '').trim();
+          const value = inline || lines.find(line => line.trim())?.trim() || '';
+          const ot = /^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2}),?\s*(\d{4})\s*(?:at\s*)?(\d{1,2}):(\d{2})\s*([AP])\.?M\.?$/i.exec(value);
+          if (!ot) out.numericIssues.push(openTimeIssue);
+          else {
+            const mo = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(ot[1].slice(0, 3).toLowerCase()) / 3;
+            const day = +ot[2], year = +ot[3], hour12 = +ot[4], minute = +ot[5];
+            let hour = hour12 % 12; if (/p/i.test(ot[6])) hour += 12;
+            if (mo < 0 || day < 1 || day > 31 || year < 1900 || year > 9999 || hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) {
+              out.numericIssues.push(openTimeIssue);
+            } else {
+              const date = new Date(year, mo, day, hour, minute), sameWall = d => d.getFullYear() === year && d.getMonth() === mo && d.getDate() === day && d.getHours() === hour && d.getMinutes() === minute;
+              const exact = sameWall(date); let ambiguousWallTime = false;
+              if (exact) for (let delta = 15 * 60000; delta <= 180 * 60000; delta += 15 * 60000) {
+                if (sameWall(new Date(date.getTime() - delta)) || sameWall(new Date(date.getTime() + delta))) { ambiguousWallTime = true; break; }
+              }
+              if (!exact || ambiguousWallTime) out.numericIssues.push(openTimeIssue);
+              else openedMs = date.getTime();
+            }
+          }
+        }
+      }
       const did = /Order\s*ID\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{3,}){1,4})/i.exec(body);
-      if (tp != null || sl != null || entry != null) out.details.push({ side: dm[1].toLowerCase(), qty: qty2 != null ? qty2 : num(dm[2]), base: dm[3], sym: dm[3] + '/USD',
+      if (tp != null || sl != null || entry != null) out.details.push({ side: dm[1].toLowerCase(), qty: qty2 != null ? qty2 : header.qty, base: header.base, sym: header.sym,
         tp, sl, entry, price, openFee: fee, openedMs, orderId: did ? did[1].toUpperCase() : null });
     }
+    if (screens.some(screen => { const f = stopSheetFields(screen); return f.looks && !f.order && f.invalidIdentity; }) &&
+        !out.numericIssues.includes('A position detail has an invalid or ambiguous identity.'))
+      out.numericIssues.push('A position detail has an invalid or ambiguous identity.');
     const seenD = new Set();
-    out.details = out.details.filter(d => { const k = [d.side, d.qty, d.tp, d.sl, d.entry].join('|'); if (seenD.has(k)) return false; seenD.add(k); return true; });
-    // Merge the TP/SL tab and the Details tab of the same position (same side + coin + size, one of each).
-    const merged = [];
-    for (const d of out.details) {
-      const twin = merged.find(m => m.side === d.side && m.base === d.base && m.qty === d.qty &&
-        out.details.filter(x => x.side === d.side && x.base === d.base && x.qty === d.qty).length === 2 &&
-        ((m.entry == null) !== (d.entry == null)));
-      if (twin) { for (const k of Object.keys(d)) if (twin[k] == null && d[k] != null) twin[k] = d[k]; } else merged.push(Object.assign({}, d));
-    }
-    out.details = merged;
+    out.details = out.details.filter(d => { const k = [d.sym, d.side, d.qty, d.tp, d.sl, d.entry, d.openedMs].join('|'); if (seenD.has(k)) return false; seenD.add(k); return true; });
+    // Do not join two sheets by side, symbol and size alone: multiple positions can share those fields.
+    // Some dark position sheets lose the side label in OCR. Never attach their prices to a guessed position.
+    out.unreadableDetails = screens.filter(screen => {
+      const label = /(?:Take\s*profit|Stop\s*loss)/i.test(screen), tabs = /\bTP\s*\/\s*(?:\d\s*)?SL\b|Edit\s+TP\s*\/\s*SL/i.test(screen);
+      const distance = hasStopDistance(screen);
+      if (!(label && /\bDetails\b|\bprice\b|TP\s*\/\s*(?:\d\s*)?SL/i.test(screen) || tabs && distance) || /\b(?:Limit|Market|Stop|Take\s*Profit)\s+(?:Buy|Sell)\b/i.test(screen)) return false;
+      const matches = [...screen.matchAll(new RegExp(dre.source, 'gi'))];
+      return !matches.some(m => { const h = positionHeader(m[2], (m[3].match(/^\n([^\n]*)/) || [])[1]); return h && !h.invalid && /(?:Take\s*profit|Stop\s*loss)\s*price\s*[\d,]+\.?\d*/i.test(m[3]); });
+    }).length;
+    if (out.unreadableDetails) out.warnings.push('Some stop/target screenshots could not be linked to a position. Those stop and target prices will not be imported; check them manually.');
     // Leverage shown on the platform (order ticket, position sheet, market info): "BTC ... 10x", "Leverage 10x", "Max leverage: 5x".
     // A number with x on a line that names one coin (or the line under it); "Leverage Nx" alone counts only when the screen names
     // exactly one coin. Only 1x-200x is believed.
@@ -307,40 +845,116 @@
         const coin = coinOf(ls[i]) || (ctx ? coinOf(ls[i - 1]) || coinOf(ls[i - 2]) || (only.length === 1 ? only[0] : null) : null);
         if (coin && (ctx || coinOf(ls[i]))) out.leverage[coin] = v;
       } }
-    // History -> Ledger: each row = type, signed amount, date, running balance; newest first. The top row's running
-    // balance is the account balance right now, fees included. Rows are checked against each other (older balance +
-    // amount = newer balance); if any link fails, an OCR digit is wrong and the balance isn't used.
+    // History -> Ledger: each row = type, signed amount, date, running balance; newest first.
+    // The running balance is only a candidate, not proof of current account balance: source timestamps,
+    // account identity and unique event identifiers are needed before Ledger sync can be enabled.
+    // Check adjacent rows for arithmetic disagreement, which can indicate an OCR error.
     out.ledger = [];
-    const LR = /(Prop\s+margin\s+trade|Swap\s+fee|Commission|Deposit|Withdrawal|Payout|Adjustment|Funding\s+fee|Rollover)\s+([+\-\u2212\u2013]\s?[\d,]*\.\d+)\s+([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\s+([\d,]+\.\d+)/gi;
-    for (let m; (m = LR.exec(T));) {
-      const kind = /swap/i.test(m[1]) ? 'swap' : /margin/i.test(m[1]) ? 'trade' : m[1].toLowerCase().replace(/\s+/g, ' ');
-      out.ledger.push({ kind, amt: num(m[2].replace(/[\u2212\u2013]/, '-').replace(/\s/g, '')), date: m[3].replace(/\s+/g, ' '), bal: num(m[4]) });
+    const ledgerScreens = [], priorLedgerRows = new Set();
+    let ledgerMalformed = false;
+    for (const screen of screens) {
+      const kinds = ledgerMatches(screen), rows = [];
+      for (let i = 0; i < kinds.length; i++) {
+        const kindMatch = kinds[i], tail = screen.slice(kindMatch.index + kindMatch[0].length, kinds[i + 1] ? kinds[i + 1].index : screen.length);
+        const m = /^[ \t\n]+([^\n]+?)[ \t\n]+([A-Z][a-z]{2}[ \t]+\d{1,2},[ \t]*\d{4})[ \t\n]+([^\n]+)/i.exec(tail);
+        if (!m) {
+          if (/^[ \t\n]+[+\-−–—\d.,]/.test(tail)) ledgerMalformed = true;
+          continue;
+        }
+        const nextLine = (tail.slice(m[0].length).match(/^[ \t]*\n([^\n]*)/) || [])[1] || '';
+        const unitCue = /^[ \t]*(?:US0|[A-Z]{2,12})(?:[ \t~≈;!?,.:\])}]|$)/i.test(nextLine) && !/^[ \t]*(?:HISTORY|LEDGER|ORDERS|TRADES|OPEN|CLOSED|BALANCE|ASSETS|VIEW ALL|OPEN POSITIONS)[ \t]*$/i.test(nextLine);
+        const wrappedUnit = /^[ \t]*(?:US0|[A-Z]{2,12})[ \t]*[~≈;!?,.:\])}]*[ \t]*$/i.test(nextLine);
+        const amt = labeledNumber('Ledger ' + m[1], 'Ledger', true, false, true);
+        const bal = labeledNumber('Ledger ' + m[3] + (unitCue ? '\n' + nextLine.toUpperCase() : ''), 'Ledger', true, false, false);
+        if (!/^[ \t]*[+\-−–—]/.test(m[1]) || amt.invalid || bal.invalid || unitCue && !wrappedUnit || amt.value == null || bal.value == null) { ledgerMalformed = true; continue; }
+        const kind = /swap/i.test(kindMatch[1]) ? 'swap' : /margin/i.test(kindMatch[1]) ? 'trade' : kindMatch[1].toLowerCase().replace(/\s+/g, ' ');
+        rows.push({ row: { kind, amt: amt.value, date: m[2].replace(/\s+/g, ' '), bal: bal.value }, amtRounding: rounding(amt.raw), rounding: rounding(bal.raw) });
+      }
+      ledgerScreens.push(rows);
+      // De-duplicate overlap across captures, without hiding duplicate rows in one capture.
+      const key = x => [x.row.kind, x.row.date, x.row.amt, x.row.bal].join('|');
+      for (const x of rows) if (!priorLedgerRows.has(key(x))) out.ledger.push(x.row);
+      for (const x of rows) priorLedgerRows.add(key(x));
     }
+    if (out.ledger.length) out.ledgerEvidence = true;
+    if (ledgerMalformed) out.numericIssues.push('A ledger row has an invalid or ambiguous number.');
     if (out.ledger.length) {
       const L = out.ledger, bad = [];
-      for (let i = 0; i + 1 < L.length; i++) if (Math.abs(L[i + 1].bal + L[i].amt - L[i].bal) > 0.0006) bad.push(i);
-      out.ledgerOk = !bad.length;
-      out.ledgerSum = { swap: L.filter(x => x.kind === 'swap').reduce((a, x) => a + x.amt, 0), trade: L.filter(x => x.kind === 'trade').reduce((a, x) => a + x.amt, 0), n: L.length };
-      if (bad.length) out.warnings.push(`Ledger: ${bad.length} row(s) don't add up (a number was misread), so its balance isn't used. Try a sharper screenshot.`);
-      else if (out.account.balance == null) { out.account.balance = L[0].bal; out.account.balanceFrom = 'ledger'; }
+      for (const rows of ledgerScreens) for (let i = 0; i + 1 < rows.length; i++) {
+        const difference = rows[i + 1].row.bal + rows[i].row.amt - rows[i].row.bal;
+        const tolerance = Math.max(0.000600001, rows[i + 1].rounding + rows[i].amtRounding + rows[i].rounding + 1e-9);
+        if (!Number.isFinite(difference) || Math.abs(difference) > tolerance) bad.push(i);
+      }
+      const swap = L.filter(x => x.kind === 'swap').reduce((a, x) => a + x.amt, 0), trade = L.filter(x => x.kind === 'trade').reduce((a, x) => a + x.amt, 0);
+      if (!Number.isFinite(swap) || !Number.isFinite(trade)) { ledgerMalformed = true; out.numericIssues.push('A ledger sum is invalid.'); }
+      out.ledgerOk = !bad.length && !ledgerMalformed;
+      out.ledgerSum = { swap: Number.isFinite(swap) ? swap : null, trade: Number.isFinite(trade) ? trade : null, n: L.length };
+      if (bad.length) {
+        out.numericIssues.push('Ledger running balances do not agree. Use a current clear screenshot.');
+        out.warnings.push(`Ledger: ${bad.length} row(s) don't add up (a number was misread), so its balance isn't used. Try a sharper screenshot.`);
+      }
+    } else if (ledgerMalformed) out.ledgerOk = false;
+    // A count and all distinct rows must agree on each list screen; never infer missing positions are closed otherwise.
+    const pnlDisagrees = c => c.upnl != null && c.aggregateUpnl != null && differs({ value: c.upnl, rounding: c.pnlRounding }, { value: c.aggregateUpnl, rounding: c.aggregateRounding });
+    const potential = listChecks.filter(c => c.complete && c.validEvidence && !c.groupConflict && c.equity != null && c.upnl != null &&
+      !pnlDisagrees(c)).map(c => ({ value: c.equity - c.upnl, rounding: c.rounding }));
+    if (potential.some(c => !Number.isFinite(c.value))) out.numericIssues.push('An inferred balance is invalid.');
+    const candidates = potential.filter(c => Number.isFinite(c.value));
+    // Compare a complete list with every readable aggregate in the batch. Images
+    // from different times may legitimately differ, but they cannot certify one
+    // another for a destructive reconciliation until the user supplies a consistent batch.
+    const aggregateReadings = totals.filter(f => !f.invalid && !f.ambiguous && f.value != null)
+      .map(f => ({ value: f.value, rounding: rounding(f.raw) }));
+    const crossPnlConflict = listChecks.some(c => c.complete && c.validEvidence && aggregateReadings.length &&
+      (c.upnl == null || aggregateReadings.some(total => c.expected === 0 && total.value !== 0 || differs({ value: c.upnl, rounding: c.pnlRounding }, total))));
+    const pnlConflict = crossPnlConflict || listChecks.some(c => c.groupConflict || c.complete && pnlDisagrees(c));
+    const direct = balances.filter(f => f.value != null).map(f => ({ value: f.value, rounding: rounding(f.raw) }));
+    // A portfolio's explicit equity and aggregate P&L are also comparable, but
+    // only within their own image; never combine fields from different captures.
+    const aggregateCandidates = equityReadings.map((eq, i) => {
+      const pnl = totals[i];
+      return !eq.invalid && !eq.ambiguous && eq.value != null && !pnl.invalid && !pnl.ambiguous && pnl.value != null
+        ? { value: eq.value - pnl.value, rounding: rounding(eq.raw) + rounding(pnl.raw) } : null;
+    }).filter(Boolean);
+    if (aggregateCandidates.some(c => !Number.isFinite(c.value))) out.numericIssues.push('An inferred balance is invalid.');
+    const ledgerCandidates = out.ledgerOk ? ledgerScreens.filter(rows => rows.length).map(rows => ({ value: rows[0].row.bal, rounding: rows[0].rounding })) : [];
+    const allBalances = direct.concat(candidates, aggregateCandidates, ledgerCandidates);
+    const balanceConflict = allBalances.some((a, i) => allBalances.slice(i + 1).some(b => differs(a, b)));
+    const equities = equityReadings.filter(e => !e.invalid && !e.ambiguous && e.value != null).map(e => ({ value: e.value, rounding: rounding(e.raw), unit: normalizedUnit(e.unit) }));
+    const equityConflict = equities.some((a, i) => equities.slice(i + 1).some(b => a.unit !== b.unit || differs(a, b)));
+    if (equityConflict) { out.account.equity = null; out.numericIssues.push('The equity readings disagree. Use current consistent screenshots.'); }
+    if (balanceConflict) {
+      out.numericIssues.push('The balance readings disagree. Use current consistent screenshots.');
     }
-        // "Positions·0" means flat; otherwise no rows read means we don't know the open P&L.
-    out.flat = /Positions\s*\W?\s*0\b/i.test(T) && !out.positions.length;
+    if (balanceConflict || pnlConflict) {
+      out.account.balance = null;
+      delete out.account.balanceFrom;
+    } else if (out.account.balance == null && ledgerCandidates.length) { out.account.balance = ledgerCandidates[0].value; out.account.balanceFrom = 'ledger'; }
+    if (pnlConflict) out.warnings.push('The total open P&L disagrees with, or could not be verified against, the position rows. Use matching current screenshots.');
+    if (out.groups.length && listChecks.some(c => c.complete && c.expected === 0)) {
+      out.positionEvidenceConflict = true;
+      out.numericIssues.push('Position groups conflict with a screenshot showing no open positions. Include a current, complete position list.');
+    }
+    out.positionCoverage = out.positionEvidenceConflict || pnlConflict || balanceConflict ? 'incomplete' : !listChecks.length ? (out.positions.length ? 'unknown' : 'none')
+      : listChecks.every(c => c.complete) && new Set(listChecks.map(c => c.expected)).size === 1 && out.positions.length === listChecks[0].expected ? 'complete' : 'incomplete';
+    out.flat = out.positionCoverage === 'complete' && listChecks.length > 0 && listChecks.every(c => c.expected === 0) && !out.positions.length;
     const known = out.positions.every(p => p.upnl != null);
-    out.upnlSum = out.positions.length && known ? out.positions.reduce((a, p) => a + p.upnl, 0) : (out.flat ? 0 : null);
+    const openSum = out.positions.length && known && out.positionCoverage === 'complete' ? out.positions.reduce((a, p) => a + p.upnl, 0) : (out.flat ? 0 : null);
+    out.upnlSum = Number.isFinite(openSum) ? openSum : null;
+    if (openSum != null && out.upnlSum == null) { out.numericIssues.push('A position P&L sum is invalid.'); out.positionCoverage = 'incomplete'; out.flat = false; }
+    const ownList = !equityConflict && !out.positionEvidenceConflict && out.positionCoverage === 'complete' ? listChecks.find(c => c.complete && c.validEvidence && !c.groupConflict && c.equity != null && c.upnl != null && Number.isFinite(c.equity - c.upnl)) : null;
+    if (out.account.balance == null && ownList) { out.account.equity = ownList.equity; out.upnlSum = ownList.upnl; out.account.balanceFrom = 'same-list'; }
     out.balance = out.account.balance != null ? out.account.balance
-      : out.account.equity != null && out.account.upnl != null ? out.account.equity - out.account.upnl
-      : out.account.equity != null && out.upnlSum != null ? out.account.equity - out.upnlSum : null;
+      : ownList ? ownList.equity - ownList.upnl : null;
     return out;
   }
   /* Account size from the exchange's limits: drawdown limit = size x (1 - MDD). */
   function sizeFromLimits(plan, drawdownLimit, target) {
     const P = PLANS[plan]; if (!P) return null;
-    for (const z of SIZES) {
-      if (drawdownLimit != null && Math.abs(z * (1 - P.mdd) - drawdownLimit) < 0.5) return z;
-      if (target != null && Math.abs(z * (1 + P.target) - target) < 0.5) return z;
-    }
-    return null;
+    if (drawdownLimit == null && target == null) return null;
+    const matches = SIZES.filter(z => (drawdownLimit == null || Number.isFinite(drawdownLimit) && Number.isFinite(P.mdd) && Math.abs(z * (1 - P.mdd) - drawdownLimit) < 0.5) &&
+      (target == null || Number.isFinite(target) && Number.isFinite(P.target) && Math.abs(z * (1 + P.target) - target) < 0.5));
+    return matches.length === 1 ? matches[0] : null;
   }
 
   // ---- Symbols -----------------------------------------------------------
@@ -558,7 +1172,7 @@
       warnings.push({ lvl: 'bad', text: isFinite(riskToStops) ? 'If every stop fills, the account breaches. Stops sit past the breach line.' : 'Risk is unlimited until every position has a stop.' });
     if (isFinite(riskToStops) && riskToStops > maxOpen + 0.01)
       warnings.push({ lvl: 'warn', text: `Open risk ${fmtUsd(riskToStops)} is over your ${prof.name} max of ${fmtUsd(maxOpen)}.` });
-    if (unknownToday) warnings.push({ lvl: 'warn', text: `${unknownToday} trade(s) closed today with no result on the screenshot: counted as losses until you enter the result (Positions → Closed).` });
+    if (unknownToday) warnings.push({ lvl: 'warn', text: `${unknownToday} trade(s) closed today with no result on the screenshot: counted as losses until you enter the result (Desk → Manage → Closed journal).` });
     if (lossesToday >= prof.stopAfterLosses)
       warnings.push({ lvl: 'warn', text: `${lossesToday} losses today. Your ${prof.name} rule says done for the day.` });
     if (tradesToday >= prof.maxTrades)
@@ -960,6 +1574,7 @@
 
     // 1. Stop exists and is on the right side
     if ((p.stop == null || !isFinite(p.stop)) && p.platformSL) { cap = 2; obs('Your platform shows a stop on this position, but its price isn\'t in the app, so the risk can\'t be measured.'); act('Import a screenshot of this position\'s TP/SL so the stop price is known.'); proposal = 'Import the stop price'; }
+    else if ((p.stop == null || !isFinite(p.stop)) && p.platformSL === null) { cap = 1; obs('The platform stop status and price could not be confirmed. Risk is unknown.'); act('Verify the stop on your platform before relying on this position.'); proposal = 'Verify protection'; }
     else if (p.stop == null || !isFinite(p.stop)) { cap = 1; obs('No stop. Unlimited risk to the account.'); act('Set a stop on your platform now.'); proposal = 'Add protection'; }
     else if ((d > 0 && px <= p.stop) || (d < 0 && px >= p.stop)) { cap = Math.min(cap, 1); obs(`Price ${fmtPx(px)} is through your stop ${fmtPx(p.stop)}. Stop orders can slip or fail to fill.`); act('Check the order state on your platform now. If it filled, log the close.'); proposal = 'Verify order state'; }
 
@@ -1514,6 +2129,7 @@
       const isExit = o.type === 'stop' || o.type === 'take-profit';
       if (!isExit || !(o.status === 'filled' || o.status === 'partial')) continue;
       if (o.orderId && done.has(o.orderId)) { out.skipped.push({ order: o, why: 'already applied' }); continue; }
+      if (!(o.qty > 0) || o.status === 'partial' && !(o.filledPct > 0 && o.filledPct <= 100)) { out.skipped.push({ order: o, why: 'filled quantity not known; check the trade history' }); continue; }
       const left = p => openQty(p) - (used.get(p.id) || 0), opp = p => p.sym === o.sym && p.side !== o.side && left(p) > 1e-12;
       let pos = null, by = null;
       if (o.orderId) { pos = appOpen.find(p => opp(p) && (p.tpOrderId === o.orderId || p.slOrderId === o.orderId)); if (pos) by = 'order ID'; }
@@ -1525,7 +2141,7 @@
         else { out.skipped.push({ order: o, why: c.length ? `${c.length} positions have this ${o.type === 'stop' ? 'stop' : 'target'} and size: tap the position and screenshot its details so the IDs match` : 'no open position with this coin, side, size and price' }); continue; }
       }
       const qty = o.status === 'partial' && o.filledPct != null ? +(o.qty * o.filledPct / 100).toFixed(10) : o.qty;
-      const q = o.status === 'partial' ? Math.min(qty, left(pos)) : left(pos), price = o.avgFill != null ? o.avgFill : o.price;
+      const q = Math.min(qty, left(pos)), price = o.avgFill != null ? o.avgFill : o.price;
       used.set(pos.id, (used.get(pos.id) || 0) + q);
       out.actions.push({ pos, order: o, qty: q, price, priceKnown: o.avgFill != null || o.type === 'take-profit', t: o.filledMs || null, full: Math.abs(left(pos)) < 1e-9 || used.get(pos.id) >= openQty(pos) - 1e-9, by });
     }
@@ -1552,7 +2168,7 @@
     }
     for (const o of (orders || [])) {
       if (!(o.type === 'stop' || o.type === 'take-profit') || o.status !== 'filled' || (o.orderId && done.has(o.orderId))) continue;
-      const opp = p => ok(p) && !used.has(p.id) && p.sym === o.sym && p.side !== o.side && (!p.closed.orderId || p.closed.orderId === o.orderId);
+      const opp = p => ok(p) && !used.has(p.id) && p.sym === o.sym && p.side !== o.side && o.qty > 0 && Math.abs(p.qty - o.qty) < 1e-9 && (!p.closed.orderId || p.closed.orderId === o.orderId);
       let pos = o.orderId && appClosed.find(p => opp(p) && (p.tpOrderId === o.orderId || p.slOrderId === o.orderId)), by = pos ? 'order ID' : null;
       if (!pos && o.parentId) { pos = appClosed.find(p => opp(p) && p.orderId === o.parentId); if (pos) by = 'parent order ID'; }
       if (!pos) { const lvl = p => o.type === 'take-profit' ? p.tp1 : p.stop;
@@ -1597,6 +2213,157 @@
     const c = (timeline || []).filter(x => x.kind === 'trade' && !u.has(x.seq) && x.ms != null && new Date(x.ms).toISOString().slice(0, 10) === day
       && Math.abs(x.amt - gross) <= Math.max(0.5, Math.abs(gross) * 0.02));
     return c.length === 1 ? c[0] : null;
+  }
+
+  /* ERR-03 contract: reconcile normalized evidence only; this planner has no storage or I/O.
+     Timestamps must describe the platform fact, never import/file time. Source priority only
+     breaks an exact-time, same-value tie; it cannot resolve a conflict or stale evidence. */
+  const RECON_SOURCE_RULES = Object.freeze({
+    overview: { rank: 0, entities: ['account'], records: ['snapshot'] },
+    positions: { rank: 1, entities: ['position'], records: ['snapshot'] },
+    positionDetails: { rank: 1, entities: ['position'], records: ['snapshot'] },
+    ledger: { rank: 2, entities: ['account'], records: ['event'] },
+    orders: { rank: 3, entities: ['order', 'position'], records: ['snapshot', 'event'] },
+    closedTrades: { rank: 4, entities: ['trade'], records: ['event'] }
+  });
+  const RECON_IDENTITY_KINDS = Object.freeze({
+    account: ['platform-account-id'],
+    position: ['platform-position-id', 'verified-position-link', 'verified-composite'],
+    order: ['platform-order-id'],
+    trade: ['platform-trade-id']
+  });
+  const RECON_FIELD_TYPES = Object.freeze({
+    account: { balance: 'number', equity: 'number', upnl: 'number', amount: 'number', usedMargin: 'number', availMargin: 'number', target: 'number', dailyLimit: 'number', drawdownLimit: 'number', status: ['active', 'closed'], phase: ['eval', 'funded'] },
+    position: { open: 'boolean', status: ['open', 'closed'], qty: 'number', entry: 'number', price: 'number', currentPrice: 'number', stop: 'number', target: 'number', tp: 'number', upnl: 'number', openedAtMs: 'number', closedAtMs: 'number', realized: 'number' },
+    order: { status: ['working', 'partial', 'filled', 'cancelled', 'expired'], qty: 'number', price: 'number', avgFill: 'number', filledQty: 'number', filledPct: 'number', openedAtMs: 'number', filledAtMs: 'number' },
+    trade: { status: ['open', 'closed'], qty: 'number', entry: 'number', exit: 'number', realized: 'number', openedAtMs: 'number', closedAtMs: 'number' }
+  });
+  const RECON_SOURCE_FIELDS = Object.freeze({
+    overview: { account: ['balance', 'equity', 'upnl', 'usedMargin', 'availMargin', 'target', 'dailyLimit', 'drawdownLimit', 'status', 'phase'] },
+    positions: { position: ['open', 'status', 'qty', 'entry', 'price', 'currentPrice', 'stop', 'target', 'tp', 'upnl', 'openedAtMs'] },
+    positionDetails: { position: ['qty', 'entry', 'price', 'currentPrice', 'stop', 'target', 'tp', 'upnl', 'openedAtMs'] },
+    ledger: { account: ['amount', 'balance'] },
+    orders: { order: ['status', 'qty', 'price', 'avgFill', 'filledQty', 'filledPct', 'openedAtMs', 'filledAtMs'],
+      position: ['open', 'status', 'qty', 'price', 'stop', 'target', 'closedAtMs'] },
+    closedTrades: { trade: ['status', 'qty', 'entry', 'exit', 'realized', 'openedAtMs', 'closedAtMs'] }
+  });
+  function reconcileSourceFacts(evidence) {
+    const blockers = [], groups = new Map(), blockedGroups = new Set(), eventIds = new Map(), eventFields = new Map(), blockedEvents = new Set();
+    const factKey = x => JSON.stringify([String(x.accountKey || '').trim(), String(x.entityType || ''), String(x.entityKey || '').trim(), String(x.field || '').trim()]);
+    const eventKey = x => JSON.stringify([x.accountKey, x.eventId]);
+    const addBlocker = (index, code, message, x) => {
+      blockers.push({ index, code, message });
+      if (x && typeof x === 'object' && typeof x.accountKey === 'string' && typeof x.entityType === 'string' &&
+          typeof x.entityKey === 'string' && typeof x.field === 'string') blockedGroups.add(factKey(x));
+    };
+    const validZone = zone => zone === 'UTC' || zone === 'Z' || (() => {
+      const m = /^([+-])(\d{2}):(\d{2})$/.exec(zone || '');
+      if (!m) return false;
+      const h = +m[2], min = +m[3];
+      return !(m[1] === '-' && h === 0 && min === 0) && h <= 14 && min < 60 && (h < 14 || min === 0);
+    })();
+    const fieldValueOk = (entityType, field, value) => {
+      const rule = RECON_FIELD_TYPES[entityType] && RECON_FIELD_TYPES[entityType][field];
+      if (rule === 'number') return typeof value === 'number' && Number.isFinite(value);
+      if (rule === 'boolean') return typeof value === 'boolean';
+      if (Array.isArray(rule)) return typeof value === 'string' && rule.includes(value);
+      return false;
+    };
+    if (!Array.isArray(evidence)) return { valid: false, canApply: false, selected: [], events: [], blockers: [{ index: null, code: 'invalid-evidence-list', message: 'Evidence must be an array.' }] };
+    if (!evidence.length) return { valid: false, canApply: false, selected: [], events: [], blockers: [{ index: null, code: 'no-evidence', message: 'No source evidence was supplied.' }] };
+    evidence.forEach((x, index) => {
+      if (!x || typeof x !== 'object' || Array.isArray(x)) { addBlocker(index, 'invalid-evidence', 'Evidence record is not a plain fact record.', null); return; }
+      const rule = RECON_SOURCE_RULES[x.source], errors = [];
+      const sourceShapeOk = !!(rule && rule.entities.includes(x.entityType) && rule.records.includes(x.recordType) &&
+        ((RECON_SOURCE_FIELDS[x.source] || {})[x.entityType] || []).includes(x.field) &&
+        (x.source === 'overview' ? x.entityType === 'account' && x.recordType === 'snapshot' :
+          x.source === 'positions' ? x.entityType === 'position' && x.recordType === 'snapshot' :
+            x.source === 'positionDetails' ? x.entityType === 'position' && x.recordType === 'snapshot' && !['open', 'status'].includes(x.field) :
+              x.source === 'ledger' ? x.entityType === 'account' && x.recordType === 'event' :
+                x.source === 'closedTrades' ? x.entityType === 'trade' && x.recordType === 'event' :
+                  x.source === 'orders' ? (x.entityType === 'order' && (x.recordType === 'snapshot' || x.recordType === 'event') || x.entityType === 'position' && x.recordType === 'event') : false));
+      if (!sourceShapeOk) errors.push(['unsupported-source-shape', 'Source, entity and record type do not form a supported evidence shape.']);
+      if (typeof x.evidenceId !== 'string' || !x.evidenceId.trim()) errors.push(['missing-evidence-id', 'A source/image evidence identifier is required.']);
+      if (typeof x.accountKey !== 'string' || !x.accountKey.trim() || x.accountIdentityVerified !== true || x.accountIdentityKind !== 'platform-account-id') errors.push(['unverified-account-identity', 'A verified stable platform account identity is required.']);
+      if (typeof x.entityKey !== 'string' || !x.entityKey.trim() || x.entityIdentityVerified !== true || !(RECON_IDENTITY_KINDS[x.entityType] || []).includes(x.entityIdentityKind)) errors.push(['unverified-entity-identity', 'A verified stable identity for this account entity is required.']);
+      if (x.entityType === 'account' && x.entityKey !== x.accountKey) errors.push(['account-entity-mismatch', 'Account facts must use the verified account identity as their entity identity.']);
+      if (typeof x.field !== 'string' || !x.field.trim() || !fieldValueOk(x.entityType, x.field, x.value)) errors.push(['invalid-fact-value', 'The fact field or value has an unsupported type or state; unknown is not zero.']);
+      if (typeof x.field === 'string' && /AtMs$/.test(x.field) && (!Number.isSafeInteger(x.value) || x.value <= 0 || !Number.isFinite(new Date(x.value).getTime()))) {
+        errors.push(['invalid-fact-timestamp', 'Fields ending in AtMs must be positive safe-integer epoch milliseconds within the supported instant range.']);
+      }
+      if (x.verification !== 'verified') errors.push(['unverified-fact', 'Ambiguous, estimated or unreadable evidence cannot be reconciled.']);
+      if (!Number.isSafeInteger(x.sourceAtMs) || x.sourceAtMs <= 0 || !Number.isFinite(new Date(x.sourceAtMs).getTime()) || x.sourceTimeVerified !== true || x.timestampPrecision !== 'instant' || !validZone(x.sourceTimeZone)) errors.push(['untrusted-source-time', 'A verified source/event timestamp with instant precision and an explicit UTC offset is required.']);
+      if (x.source === 'positions' && x.complete !== true) errors.push(['incomplete-position-snapshot', 'Position-list facts require an explicitly complete, validated snapshot.']);
+      const positionClosure = x.entityType === 'position' && (x.field === 'open' && x.value === false || x.field === 'status' && x.value === 'closed');
+      if (positionClosure &&
+          !(x.source === 'positions' && x.recordType === 'snapshot' && x.complete === true) &&
+          !(x.source === 'orders' && x.recordType === 'event' && x.stateFact === true && x.fullPositionCloseVerified === true)) {
+        errors.push(['unproven-position-close', 'A position can be marked closed only by a complete verified positions snapshot or a verified full-close event linked to that position.']);
+      }
+      if (x.source === 'orders' && x.entityType === 'position' && x.recordType === 'event' && x.field === 'closedAtMs' && x.fullPositionCloseVerified !== true) {
+        errors.push(['unverified-position-close-time', 'An order event cannot timestamp a position close without verified proof of the full close linked to that position.']);
+      }
+      if (x.source === 'closedTrades' && x.field === 'status' && x.value !== 'closed') {
+        errors.push(['closed-trade-source-state-conflict', 'Closed-trade history cannot assert an open or non-closed trade status.']);
+      }
+      if (x.recordType === 'event') {
+        if (typeof x.eventId !== 'string' || !x.eventId.trim() || x.eventIdentityVerified !== true || typeof x.eventType !== 'string' || !x.eventType.trim()) errors.push(['unverified-event-identity', 'Events require a verified stable event ID and event type.']);
+        if (typeof x.stateFact !== 'boolean') errors.push(['missing-event-semantics', 'Event evidence must explicitly say whether it asserts a current fact.']);
+      }
+      if (x.source === 'ledger' && x.field === 'balance' && x.stateFact === true &&
+          (x.balanceAnchorVerified !== true || x.coverageComplete !== true || x.latestRowVerified !== true)) errors.push(['incomplete-ledger-balance-proof', 'A Ledger balance cannot represent current balance without a verified anchor, complete event coverage and proof it is the latest row.']);
+      if (x.source === 'ledger' && x.field === 'amount' && x.stateFact === true) errors.push(['ledger-event-is-not-current-state', 'A Ledger amount is an activity event, not a current account-state fact.']);
+      if (x.source === 'orders' && x.entityType === 'position' && x.field === 'open' && x.value === false && x.stateFact === true && x.fullPositionCloseVerified !== true) errors.push(['unverified-full-position-close', 'An order event cannot mark a position closed without a verified full close linked to that position.']);
+      if (errors.length) { for (const [code, message] of errors) addBlocker(index, code, message, x); return; }
+      const c = {
+        source: x.source, recordType: x.recordType, evidenceId: x.evidenceId.trim(), accountKey: x.accountKey.trim(),
+        entityType: x.entityType, entityKey: x.entityKey.trim(), entityIdentityKind: x.entityIdentityKind, field: x.field.trim(), value: x.value,
+        sourceAtMs: x.sourceAtMs, sourceTimeZone: x.sourceTimeZone, sourceTimeVerified: true,
+        eventId: x.recordType === 'event' ? x.eventId.trim() : null, eventType: x.recordType === 'event' ? x.eventType.trim() : null,
+        stateFact: x.recordType === 'snapshot' || x.stateFact === true
+      };
+      if (x.recordType === 'event') {
+        const ek = eventKey(c), prior = eventIds.get(ek), fk = factKey(c);
+        if (prior && (prior.entityType !== c.entityType || prior.entityKey !== c.entityKey || prior.sourceAtMs !== c.sourceAtMs || prior.eventType !== c.eventType || prior.stateFact !== c.stateFact)) {
+          blockedEvents.add(ek); blockedGroups.add(fk); for (const oldKey of prior.factKeys) blockedGroups.add(oldKey);
+          addBlocker(index, 'event-id-reuse-conflict', 'The same event ID identifies conflicting entities, event types, source timestamps or state semantics.', x);
+        } else if (prior) prior.factKeys.add(fk);
+        else eventIds.set(ek, { entityType: c.entityType, entityKey: c.entityKey, sourceAtMs: c.sourceAtMs, eventType: c.eventType, stateFact: c.stateFact, factKeys: new Set([fk]) });
+        const efk = JSON.stringify([ek, c.field]), oldFact = eventFields.get(efk);
+        if (oldFact && (oldFact.value !== c.value || oldFact.sourceAtMs !== c.sourceAtMs || oldFact.entityKey !== c.entityKey)) {
+          blockedEvents.add(ek); blockedGroups.add(fk); blockedGroups.add(factKey(oldFact));
+          addBlocker(index, 'event-id-value-conflict', 'The same event ID has conflicting values for the same fact.', x);
+        } else if (oldFact) {
+          if (!oldFact.evidence.some(ev => ev.source === c.source && ev.evidenceId === c.evidenceId)) oldFact.evidence.push({ source: c.source, evidenceId: c.evidenceId });
+        } else eventFields.set(efk, Object.assign({}, c, { evidence: [{ source: c.source, evidenceId: c.evidenceId }] }));
+      }
+      if (c.stateFact) {
+        const fk = factKey(c), arr = groups.get(fk) || [];
+        arr.push(c); groups.set(fk, arr);
+      }
+    });
+    const selected = [];
+    for (const [key, rows] of groups) {
+      if (blockedGroups.has(key) || rows.some(x => x.eventId && blockedEvents.has(eventKey(x)))) continue;
+      const ordered = rows.slice().sort((a, b) => b.sourceAtMs - a.sourceAtMs || RECON_SOURCE_RULES[a.source].rank - RECON_SOURCE_RULES[b.source].rank || a.evidenceId.localeCompare(b.evidenceId));
+      const newest = ordered.filter(x => x.sourceAtMs === ordered[0].sourceAtMs), value = newest[0].value;
+      if (newest.some(x => x.value !== value)) {
+        blockers.push({ index: null, code: 'same-time-fact-conflict', message: 'Newest evidence for the same account/entity/fact has conflicting values; no value was selected.' });
+        continue;
+      }
+      const preferred = newest[0];
+      selected.push({ accountKey: preferred.accountKey, entityType: preferred.entityType, entityKey: preferred.entityKey, field: preferred.field,
+        value, source: preferred.source, sourceAtMs: preferred.sourceAtMs, sourceTimeZone: preferred.sourceTimeZone,
+        evidenceIds: [...new Set(newest.map(x => x.evidenceId))].sort(), corroboratingSources: [...new Set(newest.map(x => x.source))].sort((a, b) => RECON_SOURCE_RULES[a].rank - RECON_SOURCE_RULES[b].rank),
+        supersededEvidenceIds: [...new Set(ordered.filter(x => x.sourceAtMs < preferred.sourceAtMs).map(x => x.evidenceId))].sort() });
+    }
+    const events = [...eventFields.entries()].filter(([key, row]) => !blockedEvents.has(JSON.parse(key)[0])).map(([, row]) => ({
+      accountKey: row.accountKey, eventId: row.eventId, eventType: row.eventType, entityType: row.entityType, entityKey: row.entityKey,
+      field: row.field, value: row.value, sourceAtMs: row.sourceAtMs, stateFact: row.stateFact,
+      evidence: row.evidence.slice().sort((a, b) => RECON_SOURCE_RULES[a.source].rank - RECON_SOURCE_RULES[b.source].rank || a.evidenceId.localeCompare(b.evidenceId))
+    })).sort((a, b) => a.accountKey.localeCompare(b.accountKey) || a.sourceAtMs - b.sourceAtMs || a.eventId.localeCompare(b.eventId) || a.field.localeCompare(b.field));
+    selected.sort((a, b) => a.accountKey.localeCompare(b.accountKey) || a.entityType.localeCompare(b.entityType) || a.entityKey.localeCompare(b.entityKey) || a.field.localeCompare(b.field));
+    return { valid: blockers.length === 0, canApply: false, selected, events, blockers };
   }
 
   /* Market snapshot for a trade at one moment (owner, Nov 2 2026: the model should learn from as much as possible). Built ONLY from candles
@@ -2037,6 +2804,10 @@
     const c = (planned || []).filter(x => x.sym === q.sym && x.side === q.side);
     return c.find(x => x.qty && Math.abs(x.qty - q.qty) < 1e-9) || c.find(x => Math.abs(x.entry - q.entry) <= x.entry * 0.005) || null;
   }
+  function ambiguousPlannedMatches(planned, positions) {
+    const plans = planned || [], rows = positions || [], matches = rows.map(q => matchPlanned(plans, q)).filter(Boolean);
+    return new Set(matches).size !== matches.length || rows.some(q => plans.filter(x => x.sym === q.sym && x.side === q.side && (x.qty && Math.abs(x.qty - q.qty) < 1e-9 || x.entry > 0 && Math.abs(x.entry - q.entry) <= x.entry * 0.005)).length > 1);
+  }
 
   /* Order history + "what happened" for a closed trade (owner's request, Nov 1 2026). Facts only, from his own log and the candles:
      - timeline: opened, every stop/target change (with why, and widened), partial closes, the close;
@@ -2178,9 +2949,106 @@
   // Header view switch. Anything other than the explicit simple view stays the full desk (existing installs included).
   const uiView = v => v === 'simple' ? 'simple' : 'advanced';
 
-  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, sampleFor, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, parsePropScreen, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  // Strict projection for the optional monitor: backups are user-controlled, so never pass nested records through.
+  function modelWatchProjection(w) {
+    w = w && typeof w === 'object' ? w : {};
+    const finite = v => typeof v === 'number' && Number.isFinite(v), positive = v => finite(v) && v > 0;
+    const optionalNumber = (o, k, test = finite) => o && test(o[k]) ? o[k] : undefined;
+    const opaque = v => typeof v === 'string' && /^pd_[a-f0-9]{32}$/.test(v) ? v : null;
+    const symbol = v => typeof v === 'string' && v.endsWith('/USD') && Object.prototype.hasOwnProperty.call(LEVERAGE, v.slice(0, -4)) ? v : null;
+    const safeProfile = v => PROFILES.some(p => p.id === v) ? v : 'steady';
+    const safePlan = v => Object.prototype.hasOwnProperty.call(PLANS, v) ? v : 'custom';
+    const obj = v => v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+    const accounts = (Array.isArray(w.accounts) ? w.accounts : []).flatMap(a0 => {
+      const a = obj(a0), id = opaque(a.id), phase = a.phase === 'eval' || a.phase === 'funded' ? a.phase : null;
+      if (!id || !phase || !positive(a.size)) return [];
+      const x = { id, plan: safePlan(a.plan), size: a.size, phase, profile: safeProfile(a.profile) };
+      const numeric = ['resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'dayResetAt'];
+      for (const k of numeric) { const v = optionalNumber(a, k, n => finite(n) && n >= 0); if (v !== undefined) x[k] = v; }
+      const anchor = obj(a.anchor), at = optionalNumber(anchor, 't'), bal = optionalNumber(anchor, 'bal');
+      if (at !== undefined && bal !== undefined) x.anchor = { t: at, bal };
+      const day = obj(a.dayStartOverride), reset = optionalNumber(day, 'reset'), dayBal = optionalNumber(day, 'bal');
+      if (reset !== undefined && dayBal !== undefined) x.dayStartOverride = { reset, bal: dayBal };
+      x.leverage = Object.fromEntries(Object.entries(obj(a.leverage)).filter(([s, v]) => Object.prototype.hasOwnProperty.call(LEVERAGE, s) && positive(v)));
+      x.fills = (Array.isArray(a.fills) ? a.fills : []).flatMap(f => f && f.action === 'open' && finite(f.t) ? [{ action: 'open', t: f.t }] : []).slice(-300);
+      return [x];
+    });
+    const accountIds = new Set(accounts.map(a => a.id));
+    const positions = (Array.isArray(w.positions) ? w.positions : []).flatMap(p0 => {
+      const p = obj(p0), id = opaque(p.id), acct = opaque(p.acct), sym = symbol(p.sym);
+      if (!id || !acct || !accountIds.has(acct) || !sym || !['long', 'short'].includes(p.side) || !positive(p.qty) || !positive(p.entry) || p.closed) return [];
+      const p2 = { id, acct, sym, side: p.side, qty: p.qty, entry: p.entry };
+      for (const k of ['stop', 'origStop', 'tp1', 'tp2', 'opened', 'partialAt']) { const v = optionalNumber(p, k, n => finite(n) && (['stop', 'origStop', 'tp1', 'tp2'].includes(k) ? n > 0 : true)); if (v !== undefined) p2[k] = v; }
+      if (finite(p.tf) && p.tf > 0 && p.tf <= 10080) p2.tf = p.tf;
+      for (const k of ['openedUnknown', 'platformSL']) if (typeof p[k] === 'boolean') p2[k] = p[k];
+      p2.partials = (Array.isArray(p.partials) ? p.partials : []).flatMap(q => q && finite(q.t) && positive(q.qty) && finite(q.realized) ? [{ t: q.t, qty: q.qty, realized: q.realized }] : []).slice(-100);
+      return [p2];
+    });
+    const orders = (Array.isArray(w.orders) ? w.orders : []).flatMap(o0 => {
+      const o = obj(o0), acct = opaque(o.acct), sym = symbol(o.sym);
+      if (!acct || !accountIds.has(acct) || !sym || !['long', 'short'].includes(o.side) || !positive(o.qty) || !positive(o.entry) || o.status !== 'placed') return [];
+      const x = { acct, sym, side: o.side, qty: o.qty, entry: o.entry, status: 'placed' };
+      for (const k of ['stop', 'tp1', 'placedAt']) { const v = optionalNumber(o, k, n => finite(n) && (k === 'placedAt' || n > 0)); if (v !== undefined) x[k] = v; }
+      return [x];
+    });
+    const rules = obj(w.rules), setupIds = new Set(SETUP_CHOICES.map(x => x[0]));
+    const traits = (Array.isArray(rules.traits) ? rules.traits : []).filter(v => /^T[1-8]$/.test(v)).slice(0, 8);
+    const benched = (Array.isArray(rules.benched) ? rules.benched : []).filter(v => setupIds.has(v)).slice(0, 32);
+    const calib = (Array.isArray(w.calib) ? w.calib : []).flatMap(c => c && finite(c.t) && symbol(c.sym) && positive(c.prop) && positive(c.est) ? [{ t: c.t, sym: c.sym, prop: c.prop, est: c.est }] : []).slice(-10);
+    const updated = finite(w.updated) ? w.updated : 0;
+    return { v: 1, updated, symbols: [...new Set((Array.isArray(w.symbols) ? w.symbols : []).map(symbol).filter(Boolean))],
+      rules: { beAt1R: rules.beAt1R === true, traits, benched }, calib, accounts, positions, orders };
+  }
+  function modelPaperProjection(p) {
+    p = p && typeof p === 'object' ? p : {};
+    const finite = v => typeof v === 'number' && Number.isFinite(v),
+      symbol = v => typeof v === 'string' && v.endsWith('/USD') && Object.prototype.hasOwnProperty.call(LEVERAGE, v.slice(0, -4)),
+      positive = v => finite(v) && v > 0, opaque = v => typeof v === 'string' && /^pd_[a-f0-9]{32}$/.test(v),
+      statuses = new Set(['open', 'pending', 'closed', 'cancelled']), setupIds = new Set(SETUP_CHOICES.map(x => x[0]));
+    const accounts = (Array.isArray(p.accounts) ? p.accounts : []).flatMap(a => {
+      if (!a || !opaque(a.id) || a.status !== 'active' || !positive(a.size) || !Object.prototype.hasOwnProperty.call(PLANS, a.plan) ||
+          !['eval', 'funded'].includes(a.phase) || !PROFILES.some(x => x.id === a.profile)) return [];
+      return [{ id: a.id, label: 'Paper account', plan: a.plan, size: a.size, phase: a.phase, profile: a.profile, status: 'active' }];
+    });
+    const accountIds = new Set(accounts.map(a => a.id));
+    const trades = (Array.isArray(p.trades) ? p.trades : []).flatMap(t => {
+      if (!t || !opaque(t.id) || !symbol(t.sym) || !statuses.has(t.status) || !['long', 'short'].includes(t.side) ||
+          !positive(t.entry) || !positive(t.stop) || !positive(t.stop0) || !finite(t.opened)) return [];
+      const x = { id: t.id, sym: t.sym, side: t.side, status: t.status, entry: t.entry, stop: t.stop, stop0: t.stop0, opened: t.opened };
+      if (t.acct && opaque(t.acct) && accountIds.has(t.acct)) x.acct = t.acct;
+      if (positive(t.target)) x.target = t.target;
+      if (positive(t.qty)) x.qty = t.qty;
+      for (const k of ['placedAt', 'closed', 'exit']) if (finite(t[k])) x[k] = t[k];
+      if (setupIds.has(t.setupKey)) x.setupKey = t.setupKey;
+      return [x];
+    }).slice(-1000);
+    return { v: 2, updated: finite(p.updated) ? p.updated : 0, accounts, trades };
+  }
+  function scrubMonitorConfig(root) {
+    const explicit = new Set(['kpdgh', 'kpdghrepo', 'kpdwatchsalt', 'monrepo', 'monitorrepo', 'ghrepo', 'githubrepo', 'watchrepo', 'ghtoken', 'githubtoken', 'monitortoken', 'watchtoken', 'watchsalt', 'monitorsalt', 'githubsalt', 'monitordestination', 'githubdestination', 'watchdestination']);
+    const seen = new WeakSet();
+    function walk(value) {
+      if (!value || typeof value !== 'object' || seen.has(value)) return false;
+      seen.add(value); let changed = false;
+      if (Array.isArray(value)) { for (const item of value) changed = walk(item) || changed; return changed; }
+      for (const key of Object.keys(value)) {
+        const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+        const legacy = explicit.has(normalized) || ['repo', 'repository', 'token', 'salt'].includes(normalized);
+        if (legacy) { delete value[key]; changed = true; }
+        else changed = walk(value[key]) || changed;
+      }
+      return changed;
+    }
+    return walk(root);
+  }
+
+  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, ambiguousPlannedMatches, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, reconcileSourceFacts, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, stopSheetFields, recoverStopSheet, manualStopMatches, recoverOrderSheet, parsePropScreen, overviewEquityEstimate, directOverviewEquity, overviewCropMatches, manualAccountMatches, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, OPEN, openDays, trend4h, openTrade, openRead, openPlan, health, setupsToWatch, fmtUsd, fmtPx, tfName, uiView };
+  Core.sampleFor = sampleFor;
+  Core.modelWatchProjection = modelWatchProjection;
+  Core.modelPaperProjection = modelPaperProjection;
+  Core.scrubMonitorConfig = scrubMonitorConfig;
   if (typeof module !== 'undefined' && module.exports) module.exports = Core; else root.Core = Core;
 })(typeof window !== 'undefined' ? window : globalThis);

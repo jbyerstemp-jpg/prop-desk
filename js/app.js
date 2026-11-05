@@ -20,11 +20,13 @@
   S = Object.assign({ calib: [], paper: [] }, DEF, S); if (!Array.isArray(S.calib)) S.calib = []; if (!Array.isArray(S.paper)) S.paper = []; if (!Array.isArray(S.paperAccts)) S.paperAccts = []; if (!Array.isArray(S.planned)) S.planned = []; if (!S.usedSetups || typeof S.usedSetups !== 'object') S.usedSetups = {}; S.settings = Object.assign({}, DEF.settings, S.settings || {});
   S.settings.layers = Object.assign({}, DEF.settings.layers, S.settings.layers || {});
   if (savedV < 2) { S.settings.priceBasis = 'usdt'; S.settings.v = 2; }
-  // v3: no personal defaults in the shared app. Existing installs keep the monitor repo they were using.
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } };
+  // v3: shared defaults contain no private repo destination; the monitor repo is device-local, not backup state.
+  if (savedV < 3) S.settings.v = 3;
+  const save = () => { try { C.scrubMonitorConfig(S); localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } };
   // Older saves used the previous names. Copy them once so nothing already on this phone is lost.
   (function migrateSaved() {
     let changed = false;
+    if (C.scrubMonitorConfig(S)) changed = true;
     if (S.settings.orbAnchor === 'kraken') { S.settings.orbAnchor = 'exchange'; changed = true; }
     const rows = (S.positions || []).concat(S.planned || []);
     for (const p of rows) {
@@ -186,6 +188,8 @@
     if (window.matchMedia('(min-width:900px)').matches) {
       document.documentElement.style.removeProperty('--app-h');
       document.documentElement.style.removeProperty('--app-top');
+      document.documentElement.style.removeProperty('--chart-vp-h');
+      document.documentElement.style.removeProperty('--chart-vp-top');
       return;
     }
     const vv = window.visualViewport;
@@ -194,14 +198,19 @@
     const focused = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
     const standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
     let h = ih, top = 0;
+    let chartH = vv && vv.height ? vv.height : (ih || sh);
+    let chartTop = vv && Number.isFinite(vv.offsetTop) ? vv.offsetTop : 0;
     if (vv && vv.height) {
       if (focused) { h = vv.height; top = vv.offsetTop || 0; }
       else h = Math.max(vv.height, ih);
     }
     // iOS often reports a short visual viewport right after the app is resumed. In the home-screen app, fill the screen instead of leaving a gap under the tab bar.
     if (!focused && standalone && sh && h && h < sh * 0.85) { h = sh; top = 0; }
+    if (!focused && standalone && sh && chartH && chartH < sh * 0.85) { chartH = sh; chartTop = 0; }
     document.documentElement.style.setProperty('--app-h', Math.round(h || ih || sh) + 'px');
     document.documentElement.style.setProperty('--app-top', Math.round(top) + 'px');
+    document.documentElement.style.setProperty('--chart-vp-h', Math.round(chartH || ih || sh) + 'px');
+    document.documentElement.style.setProperty('--chart-vp-top', Math.round(chartTop) + 'px');
   }
   let chartApi = null, frameToken = 0;
   function sizeChart() {
@@ -392,14 +401,14 @@
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wrap.classList.contains('fs') && !wakeLock) keepAwake(true); });
   function enterFs() {
-    wrap.classList.add('fs'); keepAwake(true);
+    wrap.classList.add('fs'); scheduleFrame(); keepAwake(true);
     const r = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
-    if (r) { try { const p = r.call(wrap); if (p && p.catch) p.catch(() => { }); } catch (e) { } }
+    if (r) { try { const p = r.call(wrap); if (p && p.catch) p.catch(() => { scheduleFrame(); }); } catch (e) { scheduleFrame(); } }
     try { screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => { }); } catch (e) { }
     setTimeout(drawOverlay, 300);
   }
   function exitFs() {
-    wrap.classList.remove('fs'); keepAwake(false);
+    wrap.classList.remove('fs'); scheduleFrame(); keepAwake(false);
     if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => { });
     setTimeout(drawOverlay, 300);
   }
@@ -408,8 +417,11 @@
   // edge, price scale automatic again. Chart settings (indicators, type, timeframe) are untouched.
   function resetView() { if (!chart) return; try { chart.timeScale().resetTimeScale(); chart.timeScale().scrollToRealTime(); chart.priceScale('right').applyOptions({ autoScale: true }); if (extra.vol) chart.priceScale('vol').applyOptions({ autoScale: true }); } catch (e) { } drawOverlay(); }
   $('#resetView').onclick = resetView; $('#fsReset').onclick = resetView;
-  document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && wrap.classList.contains('fs')) { wrap.classList.remove('fs'); keepAwake(false); } setTimeout(drawOverlay, 200); });
-  document.addEventListener('keydown', e => { if (e.key === 'f' && tab === 'chart' && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) wrap.classList.contains('fs') ? exitFs() : enterFs(); });
+  document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && wrap.classList.contains('fs')) { wrap.classList.remove('fs'); keepAwake(false); } scheduleFrame(); setTimeout(drawOverlay, 200); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && wrap.classList.contains('fs')) { e.preventDefault(); exitFs(); return; }
+    if (e.key === 'f' && tab === 'chart' && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) wrap.classList.contains('fs') ? exitFs() : enterFs();
+  });
 
   let curA = null;
   function candleOpts(ct) {
@@ -491,7 +503,7 @@
       if (t.stop != null && LY().paperStops !== false) pl(t.stop, `📝 paper stop`, '#ff4d4d', 1, 1);
       if (t.target != null) pl(t.target, `📝 paper target`, PAL.tp, 1, 1);
     }
-    // Daily trend system paper position (ticked in the Paper tab).
+    // Daily trend system paper position (shown in Coach's Paper workspace).
     if (T().trendOnChart && window.PDTrend && TREND_SYMS.includes(sym)) { const k = trendForward().coins.find(x => x.sym === sym);
       if (k && k.open) { pl(k.open.entry, `📈 trend paper ${k.open.dir > 0 ? 'long' : 'short'} entry${k.openR != null && L.openR !== false ? ` · ${k.openR >= 0 ? '+' : ''}${k.openR.toFixed(2)}R` : ''}`, '#b388ff', 1, 2);
         if (LY().paperStops !== false) pl(k.open.stop, '📈 trend paper stop', '#ff4d4d', 1, 1); } }
@@ -728,7 +740,7 @@
   }
   let lastUps = [], chartMem = {}, scanMem = {};
   // ---------- Scan all coins: the full model on every coin (FVG + sweeps, both ways, alert grade, traits, profile) ----------
-  let scanAll = { at: 0, running: false, rows: [], errors: [] };
+  let scanAll = { at: 0, running: false, rows: [], errors: [], ranked: [] };
   async function runScanAll(manual) {
     if (scanAll.running) return; scanAll.running = true; renderScanAll();
     const rows = [], errors = [], now = () => Date.now();
@@ -775,16 +787,18 @@
     const box = $('#scanAllBox'); if (!box) return;
     const hz = T().ideaHorizon === 'long' ? 'long' : 'short';
     const tabs = `<div class=row style="margin-bottom:8px"><div class=seg><button data-hz=short class="${hz === 'short' ? 'on' : ''}">Short-term (15m–4h)</button><button data-hz=long class="${hz === 'long' ? 'on' : ''}">Long-term (daily)</button></div></div>`;
-    if (hz === 'long') { box.innerHTML = tabs + longIdeas(); return; }
-    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow, verdictRank); const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
+    const sa = scanAll; sa.rows = C.sortLive(sa.rows, liveOf, fitsNow, verdictRank);
+    const sb = C.rankBoard(sa.rows, scanMem, Date.now()); scanMem = sb.mem; sa.ranked = sb.rows;
+    if (hz === 'long') { box.innerHTML = tabs + longIdeas(); if (tab === 'desk') renderDeskIdeas(); return; }
+    const top = sa.rows.slice(0, 12), chosen = T().alertTraits || [];
     const head = `<div class=row style="margin-bottom:6px"><button class="btn sm pri" id=scanAllGo ${sa.running ? 'disabled' : ''}>${sa.running ? 'Scanning…' : 'Scan all coins now'}</button>
       <span class="small mu">${sa.at ? 'Last scan ' + fmtTime(sa.at, true) + ' · ' + sa.rows.length + ' setups on ' + esc(T().symbols.join(', ')) + ' · ' + sa.rows.filter(r => r.ready).length + ' ready · ' + sa.rows.filter(r => r.grade.ok && r.ready).length + ' alert grade' : 'Runs when the app opens and every 5 minutes while it is open.'}</span></div>`;
-    const sb = C.rankBoard(sa.rows, scanMem, Date.now()); scanMem = sb.mem;
-    const shown = sb.rows.filter(r => r.gone || r.rank <= 12);
+    const shown = sa.ranked.filter(r => r.gone || r.rank <= 12);
     const body = shown.length ? shown.map(r => r.gone ? goneCard(r) : setupCard('scan', r.rank - 1, r.u, ` <button class="btn sm" data-saweigh="${r.rank - 1}">Weigh</button><div class=small data-saout="${r.rank - 1}"></div>`, r)).join('')
       : (sa.at ? '<p class=mu>No setups on any coin right now. No trade is a valid answer.</p>' : '');
     box.innerHTML = tabs + head + body + (sa.errors.length ? `<p class="small warn">${esc(sa.errors.join(' · '))}</p>` : '') +
       '<p class=small><b>Evidence:</b> <span class="tag warn">untested idea · no edge found</span> These FVG and sweep setups were tested 94 ways on 2016–2026 data and none beat random entries after costs. Use them as a watchlist and for paper trades; if you take one live, your plan, stop and size decide.</p><p class="small mu">Sorted: ready first, then alert grade, then best R. Same model as the 24/7 monitor.</p>';
+    if (tab === 'desk') renderDeskIdeas();
   }
   $('#scanAllBox').addEventListener('click', e => {
     if (e.target.id === 'scanAllGo') { runScanAll(true); return; }
@@ -800,7 +814,16 @@
   setInterval(() => { if (document.visibilityState !== 'hidden') runScanAll(false); }, 300e3);
   // ---------- Paper trading: try setups with no money; same rules as the replay; record saved to monitor/paper.json ----------
   let paperPushTimer = null, paperMsg = '';
-  function savePaper(why) { save(); clearTimeout(paperPushTimer); paperPushTimer = setTimeout(async () => { const r = await pushFile('monitor/paper.json', { v: 2, updated: Date.now(), accounts: S.paperAccts, trades: S.paper.filter(t => !t.remote) }, 'paper trades: ' + why); paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)'); if (tab === 'paper') renderPaper(); }, 4000); }
+  function savePaper(why) {
+    save(); clearTimeout(paperPushTimer);
+    paperPushTimer = setTimeout(async () => {
+      let r;
+      try { r = await pushFile('monitor/paper.json', await buildPaperWatch(), 'paper trades: ' + why); }
+      catch (e) { r = { ok: false, msg: 'secure local paper payload could not be prepared' }; }
+      paperMsg = r.ok ? 'Saved to your repo ' + fmtTime(Date.now(), true) : (ghToken() ? 'Not saved to the repo yet (' + (r.msg || 'offline') + ')' : 'Kept on this phone (add the 24/7 monitor key in Settings to save it to your repo)');
+      if (tab === 'coach') renderPaper();
+    }, 4000);
+  }
   function paperMeta(u) {
     const vd = verdictOf(u), m = { ctxAtEntry: ctxSnapshot(u.sym), verdict: vd.verdict, failedGate: vd.failedGate, label: vd.label, alertGrade: C.alertGrade(u).ok, rr: u.rr != null ? +u.rr.toFixed(2) : null, rvol: u.rvol != null ? +u.rvol.toFixed(2) : null, open: u.open || null, withTrend: u.withTrend != null ? u.withTrend : null };
     try { const h = F.candles(u.sym, 60).slice(0, -1), d = F.candles(u.sym, 1440).slice(0, -1), x = window.PDTraits && h.length > 240 ? PDTraits.ctxAt(h, d, h.length - 1) : null;
@@ -824,18 +847,18 @@
       else if (!confirm('Your paper prop account says not now: ' + z.rules.filter(r => !r.ok).map(r => r.t).join(', ') + '.\n\nOpen it as an R-only paper trade (no $ P&L) anyway?')) return;
     }
     t.setupKey = u.key; t.model = C.MODEL; S.paper.push(t); markUsed(u.key, 'paper'); savePaper('open ' + u.sym + ' ' + u.dir);
-    toast((isLimit ? 'Paper limit waiting: ' : 'Paper trade opened: ') + u.sym + ' ' + u.dir, 'paper', 'View in Paper');
+    toast((isLimit ? 'Paper limit waiting: ' : 'Paper trade opened: ') + u.sym + ' ' + u.dir, 'coach', 'Open in Coach', 'coachPaperPanel');
   }
   let toastTimer = 0;
-  function toast(msg, goTab, goLabel) {
+  function toast(msg, goTab, goLabel, openPanel) {
     const el = $('#toast'); if (!el) return;
-    el.innerHTML = `<span>${esc(msg)}</span>` + (goTab ? `<button type="button" class="btn sm" data-toast="${esc(goTab)}">${esc(goLabel || 'View')}</button>` : '');
+    el.innerHTML = `<span>${esc(msg)}</span>` + (goTab ? `<button type="button" class="btn sm" data-toast="${esc(goTab)}"${openPanel ? ` data-toast-panel="${esc(openPanel)}"` : ''}>${esc(goLabel || 'View')}</button>` : '');
     el.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.hidden = true; }, 5000);
   }
   const toastEl = $('#toast');
-  if (toastEl) toastEl.onclick = e => { const b = e.target.closest('[data-toast]'); if (!b) return; toastEl.hidden = true; switchTab(b.dataset.toast); };
+  if (toastEl) toastEl.onclick = e => { const b = e.target.closest('[data-toast]'); if (!b) return; toastEl.hidden = true; switchTab(b.dataset.toast); if (b.dataset.toastPanel) setTimeout(() => { const panel = document.getElementById(b.dataset.toastPanel); if (!panel) return; if (panel.matches('details')) panel.open = true; else if (panel.id === 'deskPositionManager') showDeskPanel(panel.id, true); const target = panel.id === 'deskPositionManager' ? document.getElementById('posPlanned') || panel : panel; target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 80); };
   // Monitor-opened auto paper trades (H24 amendment 1): data/auto-paper.json is written ONLY by the 24/7 monitor (Worker secret GH_WRITE_TOKEN),
   // which also closes them at their stops and targets. The app reads it with the monitor key and shows them like its own (tag `remote`);
   // it never steps them or pushes them back, so the two never write the same trade.
@@ -846,7 +869,7 @@
       if (!r.ok) return; const f = await r.json(); if (!f || !Array.isArray(f.trades)) return;
       const old = new Map(S.paper.filter(t => t.remote).map(t => [t.id, t]));
       S.paper = S.paper.filter(t => !t.remote).concat(f.trades.map(t => { const o = old.get(t.id); return Object.assign({}, t, o ? { wentLive: o.wentLive, onChart: o.onChart } : {}, { remote: true }); }));
-      S.autoPulledAt = Date.now(); save(); if (tab === 'paper') renderPaper();
+      S.autoPulledAt = Date.now(); save(); if (tab === 'coach') renderPaper();
     } catch (e) { }
   }
   // Auto paper trades (H24, pre-registered in docs/research/HYPOTHESES.md before collection): after each scan, every setup that passes the
@@ -864,14 +887,14 @@
     const pa = paperAcct();
     if (pa) { const z = C.paperSize(pa, S.paper, u, t.order === 'limit' ? u.entry : p0, now, prices()); if (z.ok) { t.acct = pa.id; t.qty = z.size.qty; t.riskUsd = z.size.lossAtStop; } }   // account says not now: still collected as an R-only trade
     S.paper.push(t); markUsed(u.key, 'paper'); savePaper('auto open ' + u.sym + ' ' + u.dir);
-    if (tab === 'paper') renderPaper();
+    if (tab === 'coach') renderPaper();
     return true;
   }
   function paperTick() {
     let changed = false;
     S.paper = S.paper.map(t => { if ((t.status !== 'open' && t.status !== 'pending') || t.remote) return t; const u = C.paperStep(t, F.candles(t.sym, 15), 900, pnlPrice(t.sym), Date.now()); if (u.status !== t.status) changed = true; return u; });
     if (changed) { savePaper('closed by price'); if (T().notify) for (const t of S.paper.filter(t => t.status === 'closed' && t.closed > Date.now() - 60e3)) ntSend(`Paper ${t.sym} ${t.side}: ${t.why}`, `${t.R >= 0 ? '+' : ''}${t.R.toFixed(2)}R after fees. Paper only.`, 2); }
-    if (tab === 'paper') renderPaper();
+    if (tab === 'coach') renderPaper();
   }
   setInterval(() => { try { paperTick(); } catch (e) { console.warn(e); } }, 5000);   // live price: stop/target checks every 5 s
   // ---------- Simulated prop account for paper trades (same accountState as the Desk) ----------
@@ -1101,7 +1124,7 @@
   }
   document.addEventListener('click', e => {
     const b = e.target.closest('[data-sp],[data-sl],[data-goplanned]'); if (!b) return;
-    if (b.hasAttribute('data-goplanned')) { switchTab('pos'); setTimeout(() => { const el = $('#posPlanned'); if (el) el.scrollIntoView({ behavior: 'smooth' }); }, 50); return; }
+    if (b.hasAttribute('data-goplanned')) { openDeskManager(); setTimeout(() => { const el = $('#posPlanned'); if (el) el.scrollIntoView({ behavior: 'smooth' }); }, 80); return; }
     const [list, i] = (b.dataset.sp || b.dataset.sl).split(':'), u = (SETUP_LISTS[list] && SETUP_LISTS[list]() || [])[+i]; if (!u) return;
     if (b.dataset.sp) paperAdd(u); else { const t = openPaperOf(u); if (t) paperToLive(t); else takeLive(u); }
   });
@@ -1154,7 +1177,7 @@
       const vd0 = verdictOf(u);
       S.planned.push({ id: uid(), acct: $('#tlA').value, sym: u.sym, side: u.dir, entry: e0, stop: st, tp1: num($('#tlT').value), qty: q, tf: u.tf, tag, tagNote, ctxAtEntry: ctxSnapshot(u.sym), verdictAtEntry: { verdict: vd0.verdict, failedGate: vd0.failedGate, label: vd0.label, model: C.MODEL },
         setup: u.kind === 'sweep' ? 'Liquidity sweep' : 'FVG', thesis: $('#tlTh').value.trim(), ref: { key: C.setupKey(u.kind, u.tf), model: C.MODEL }, setupKey: u.key, created: Date.now(), fromPaper: fromPaper ? fromPaper.id : undefined, orderType: $('#tlType').value });
-      markUsed(u.key, 'planned', $('#tlA').value); save(); closeModal(); toast('Plan saved: ' + u.sym + ' ' + u.dir, 'pos', 'View in Positions');
+      markUsed(u.key, 'planned', $('#tlA').value); save(); closeModal(); toast('Plan saved: ' + u.sym + ' ' + u.dir, 'desk', 'View in Desk', 'deskPositionManager');
     };
   }
   // Planned -> live: he placed it on the platform. Fill price and size as the platform shows them.
@@ -1255,7 +1278,7 @@
   }
   async function loadPool() {
     if (F.demo || Date.now() - poolAt < 10 * 60e3) return; poolAt = Date.now();
-    try { const r = await fetch(POOL_URL); if (r.ok) { POOL = (await r.json()).models || null; if (tab === 'paper') renderPaper(); } } catch (e) { }
+    try { const r = await fetch(POOL_URL); if (r.ok) { POOL = (await r.json()).models || null; if (tab === 'coach') renderPaper(); } } catch (e) { }
   }
   const scoreMark = key => (S.scoreAccepted || {})[key];   // 'trusted' | 'benched' | undefined
   const benchedKeys = () => Object.entries(S.scoreAccepted || {}).filter(([, v]) => v === 'benched').map(([k]) => k);
@@ -1306,7 +1329,7 @@
     return `<div class=card><h3>Scorecard <span class=tag>model ${esc(sc.model)} · learns from every closed trade</span></h3>
       <p class=small>Each setup type is judged by your closed paper trades and live trades tagged "followed plan" (in R, after fees), next to the replay on past candles and <b>everyone's</b> results (optional, anonymous, self-reported until a later check). Mistakes, rule breaks and data problems never count against a setup. The Everyone column does not change your size or alerts.</p>
       ${rows ? `<div class=sc-phone><div class=scr-h><span>Replay</span><span>Paper</span><span>Live</span><span>All</span></div>${phone}</div><table class=sc-desk><thead><tr><th>Setup</th><th class=num>Replay</th><th class=num>Your paper</th><th class=num>Your live</th><th class=num>Everyone</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class=mu>No closed trades under this model yet. Paper trade the setups, or plan live trades with "Plan it", and they show up here.</p>'}
-      ${sc.unlinked ? `<p class="small warn">${sc.unlinked} closed live trade(s) aren't linked to a setup: pick one in Positions → Closed (journal).</p>` : ''}
+      ${sc.unlinked ? `<p class="small warn">${sc.unlinked} closed live trade(s) aren't linked to a setup: pick one in Desk → Manage → Closed (journal).</p>` : ''}
       <details ${fold('sc:how')}><summary class=small><b>How it decides</b> (rules fixed Nov 1, 2026, before any results)</summary><p class=small>Under ${C.SCORE_RULES.minN} trades: <b>gathering</b>, too few to tell. With ${C.SCORE_RULES.minN}+: <b>proven</b> if the whole 95% range of the average R is above 0; <b>disproven</b> if it's all below 0; <b>below replay</b> if it's all below the replay's average (execution or the edge fading); otherwise <b>unclear</b>. A change is only a suggestion: you accept it. ★ trusted setups are marked and listed first; benched ones stop sending phone alerts. Nothing here ever changes your size. When the model's rules change it gets a new version (now ${esc(sc.model)}), and its record starts fresh so old and new rules never mix.</p></details>
       ${tagRows || sesRows ? `<details ${fold('sc:patterns')}><summary class=small><b>Your patterns</b></summary><table><tr><th>Live trades by tag</th><th class=num>Result</th></tr>${tagRows || '<tr><td colspan=2 class=mu>No live trades yet.</td></tr>'}</table>
         <table style="margin-top:6px"><tr><th>All trades by session (NY time)</th><th class=num>Result</th></tr>${sesRows}</table>
@@ -1522,7 +1545,7 @@
     const out = accts.map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned }), w = C.weighIdea(u, A, S.positions.filter(p => p.acct === a.id), now, { leverage: C.levMap(a) }), name = esc(a.label || C.planOf(a).name);
       return w.ok && w.size && w.size.qty > 0 ? `<b class=up>${name}: fits</b>, size ${w.size.qty} (${usd(w.size.lossAtStop)} at stop)` : `<b class=warn>${name}: not now</b> (${w.rules.filter(r => !r.ok).map(r => esc(r.t)).join(', ') || 'size 0'})`; });
     $(`[data-weighout="${b.dataset.weigh}"]`).innerHTML = out.join('<br>') || '<span class=mu>Add an account on the Desk first.</span>'; });
-  $('#setupBox').addEventListener('click', e => { const b = e.target.closest('[data-plan]'); if (!b) return; posDraft = JSON.parse(b.dataset.plan); $('#manualBox').open = true; switchTab('pos'); });
+  $('#setupBox').addEventListener('click', e => { const b = e.target.closest('[data-plan]'); if (!b) return; posDraft = JSON.parse(b.dataset.plan); openDeskManual(); });
   function switchTab(t) { document.querySelector(`#tabs button[data-tab="${t}"]`).click(); }
 
   // ---------- Desk ----------
@@ -1568,9 +1591,53 @@
       ['Spent on evals', usd(D.cost), `this month ${usd(monthCost)}${budgetMsg}`], ['Payouts received', usd(D.paid)],
       ['Program net', `<span class="${cls(D.net)}">${pnlTxt(D.net)}</span>`, 'payouts − all fees']
     ].map(x => `<div class="stat${['Spent on evals', 'Payouts received', 'Program net'].includes(x[0]) ? ' desk-x' : ''}"><div class=k>${x[0]}</div><div class=v>${x[1]}</div>${x[2] ? `<div class="k">${x[2]}</div>` : ''}</div>`).join('') + (MKT ? `<div class="small desk-x" style="grid-column:1/-1;margin-top:4px">${weatherLine()}</div>` : (loadMarket(), ''));
-    if (!S.accounts.length) { $('#deskList').innerHTML = '<div class=card><p>No accounts yet. Add your prop evaluation or funded account. Rules default to the official plan values (Advanced: 9% target, 3% daily, 3% max).</p></div>'; return; }
-    const order = { eval: 0, funded: 0, passed: 1, breached: 2, closed: 3 };
-    $('#deskList').innerHTML = S.accounts.slice().sort((a, b) => order[a.phase] - order[b.phase]).map(a => acctCard(a, D.states[a.id])).join('');
+    if (!S.accounts.length) $('#deskList').innerHTML = '<div class=card><p>No accounts yet. Add your prop evaluation or funded account. Rules default to the official plan values (Advanced: 9% target, 3% daily, 3% max).</p></div>';
+    else {
+      const order = { eval: 0, funded: 0, passed: 1, breached: 2, closed: 3 };
+      $('#deskList').innerHTML = S.accounts.slice().sort((a, b) => order[a.phase] - order[b.phase]).map(a => acctCard(a, D.states[a.id])).join('');
+    }
+    renderDeskPositions(); renderDeskIdeas();
+    const manualPanel = $('#deskManualPanel'), managerPanel = $('#deskPositionManager');
+    if (manualPanel && !manualPanel.hidden && posFormDirty) { renderPosForm(); posFormDirty = false; }
+    if (managerPanel && !managerPanel.hidden) renderPositions();
+  }
+  function renderDeskPositions() {
+    const box = $('#deskOpenPositions'); if (!box) return;
+    const now = Date.now(), open = S.positions.filter(p => !p.closed);
+    if (!open.length) { box.innerHTML = '<p class="small mu">No personal open positions logged. Import a screenshot or use Add manually.</p>'; return; }
+    box.innerHTML = open.map(p => {
+      const price = pnlPrice(p.sym), net = price != null ? C.netIfClosed(p, price, now) : null, a = acctById(p.acct);
+      const account = a ? (a.label || C.planOf(a).name) : 'Account not found';
+      return `<div class="desk-preview-row desk-position-row">
+        <div class="desk-preview-head"><div class="desk-preview-title"><b class="${p.side === 'long' ? 'bull' : 'bear'}">${esc(p.sym)} ${esc(String(p.side || '').toUpperCase())}</b><span class=tag>${C.openQty(p)} @ ${px(p.entry)}</span><span class="small mu">${esc(account)}</span></div>
+          <div class="desk-preview-result ${net == null ? 'mu' : cls(net)}"><span class="small mu">Net if closed now</span> ${net == null ? '—' : pnlTxt(net)}</div></div>
+        <div class=desk-preview-values><span>Price ${px(price)}</span><span>Stop ${px(p.stop)}</span><span>TP1 ${px(p.tp1)} / TP2 ${px(p.tp2)}</span><span>${esc(p.setup || 'Unspecified')} · ${esc(C.tfName(p.tf))}</span></div>
+      </div>`;
+    }).join('');
+  }
+  function renderDeskIdeas() {
+    const box = $('#deskIdeas'); if (!box) return;
+    const meta = $('#deskIdeasMeta');
+    if (!scanAll.at) {
+      meta.textContent = scanAll.running ? 'Scanning the Market…' : 'Waiting for the first short-term Market scan';
+      box.innerHTML = `<p class="small mu">${scanAll.running ? 'The top ideas will appear when the scan finishes.' : 'The Market scanner runs automatically while the app is open. No current scan is being shown yet.'}</p>`;
+      return;
+    }
+    const rows = (scanAll.ranked || []).filter(r => !r.gone).sort((a, b) => a.rank - b.rank).slice(0, 5);
+    meta.textContent = `${scanAll.running ? 'Refreshing · ' : ''}Last scan ${fmtTime(scanAll.at, true)} · ${scanAll.rows.length} short-term setups`;
+    if (!rows.length) {
+      box.innerHTML = `<p class="small mu">No short-term setups on the latest scan. No trade is a valid answer.</p>${scanAll.errors.length ? `<p class="small warn">${esc(scanAll.errors.slice(0, 3).join(' · '))}</p>` : ''}`;
+      return;
+    }
+    box.innerHTML = rows.map(r => {
+      const u = r.u, lc = liveOf(u), vd = verdictOf(u), grade = C.alertGrade(u);
+      const vClass = vd.verdict === 'ELIGIBLE' ? 'up' : vd.verdict === 'NO TRADE' ? 'dn' : 'warn';
+      const lClass = lc.status === 'valid' ? 'up' : lc.status === 'invalid' ? 'dn' : 'warn';
+      const lText = lc.status === 'valid' ? 'Valid now' : lc.status === 'invalid' ? 'Not valid now' : `Partly valid ${lc.passed}/${lc.total}`;
+      const entry = lc.order === 'none' ? 'Past stop' : `${lc.order === 'market' ? 'Entry ~' : 'Limit'} ${lc.entry != null ? px(lc.entry) : '—'}`;
+      return `<div class="desk-preview-row desk-idea-row"><div class="desk-preview-head"><div class="desk-preview-title"><span class=rank>#${r.rank}</span><b class="${u.dir === 'long' ? 'bull' : 'bear'}">${esc(u.dir.toUpperCase())}</b><b>${esc(C.base(u.sym))}</b><span class="small mu">${u.kind === 'sweep' ? 'Sweep' : 'FVG'} · ${esc(C.tfName(u.tf))}</span></div><span class="tag ${vClass}">${esc(vd.verdict)}</span></div>
+        <div class=desk-preview-values><span>${entry}</span><span>Stop ${px(u.stop)}</span><span>Target ${px(u.target)}</span><span>R:R ${lc.rr != null ? lc.rr.toFixed(1) + 'R' : '—'}</span><span class="tag ${lClass}">${lText}</span><span class="tag ${grade.ok ? 'up' : 'mu'}">${grade.ok ? 'Alert grade' : 'Below grade'}</span></div></div>`;
+    }).join('');
   }
   function acctCard(a, s) {
     const live = a.phase === 'eval' || a.phase === 'funded';
@@ -1579,19 +1646,20 @@
     const barC = u => (u > 0.66 ? 'bar dang' : u > 0.33 ? 'bar risk' : 'bar');
     const prof = C.PROFILES.map(p => `<button data-prof="${p.id}" data-acct="${a.id}" class="${p.id === s.profile.id ? 'on' : ''}" title="${esc(p.note)}">${p.name} ${p.riskPct}%</button>`).join('');
     const wins = s.winsToPass ? [1.5, 2, 3].map(r => `${s.winsToPass(r)} at ${r}R`).join(', ') : '';
+    const kvr = (label, value, extra = '') => `<div class="desk-kv-row${extra ? ' ' + extra : ''}"><span class="desk-kv-label">${label}</span><div class="desk-kv-value">${value}</div></div>`;
     return `<div class=card>
       <div class=acct-head><div><b>${esc(a.label || (s.plan.name + ' ' + usd(a.size)))}</b> <span class=tag>${a.phase}</span> <span class="tag">${s.plan.name}: target ${pct(s.plan.target, 0)}, daily ${pct(s.plan.mdl, 0)}, max ${pct(s.plan.mdd, 0)} static</span></div>
       <div class=row style="margin:0"><button class="btn sm" data-act="reconcile" data-id="${a.id}">Match platform balance</button><button class="btn sm" data-act="edit" data-id="${a.id}">Edit</button><button class="btn sm" data-act="resetday" data-id="${a.id}">Reset my day</button></div></div>
       ${live ? `<div class=kv>
-        <div><span>Equity (live, ${esc(pnlQuote(a.sym || T().sym).basis)})</span><b>${usd(s.equity)}</b>${s.priceComplete ? '' : ' <span class=dn small>price missing: valued at stop</span>'}</div>
-        <div><span>Balance (closed)</span>${usd(s.balance)}</div>
-        ${a.platformEq ? `<div><span>Platform equity (imported ${esc(fmtTime(a.platformEq.t, true))})</span>${usd(a.platformEq.v)}${Date.now() - a.platformEq.t < 15 * 60e3 ? ` <span class="small ${Math.abs(s.equity - a.platformEq.v) > a.size * 0.001 ? 'warn' : 'mu'}">app ${s.equity - a.platformEq.v >= 0 ? '+' : ''}${usd(s.equity - a.platformEq.v)}</span>` : ' <span class="small mu">older than 15 min</span>'}</div>` : ''}
-        <div><span>Open P&L</span><b class="${cls(s.upnl)}">${pnlTxt(s.upnl)}</b> <span class=small>fees ${usd(-s.feesOpen)}</span></div>
-        <div><span>Room to breach (${s.binding} limit)</span><b class="${s.room < s.profRisk * 2 ? 'dn' : ''}">${usd(s.room)}</b> (${pct(s.roomPct)})</div>
-        ${a.phase === 'eval' ? `<div><span>To target ${usd(s.targetBal)}</span>${usd(s.toTarget)} · ${pct(Math.max(0, s.progress), 0)} done (on equity)</div>` : `<div><span>Payout available (est.)</span>${usd(s.payoutAvail)}</div>`}
-        <div><span>If every stop fills</span>${s.riskKnown ? `<b class="${s.stopsBreach ? 'dn' : ''}">${usd(s.equityIfStopped)}</b>${s.stopsBreach ? ' BREACH' : ''}` : '<b class=dn>Unknown: a position has no stop</b>'}</div>
-        <div class=desk-x><span>Exposure / margin used</span>${usd(s.notional)} · ${s.leverage.toFixed(2)}x · margin ${usd(s.usedMargin)} of ${usd(s.equity)}</div>
-        <div><span>Today</span>${s.tradesToday} trades · ${s.winsToday} wins · ${s.lossesToday} losses${s.unknownToday ? ` (${s.unknownToday} result unknown)` : ''}</div>
+        ${kvr(`Equity (live, ${esc(pnlQuote(a.sym || T().sym).basis)})`, `<b>${usd(s.equity)}</b>${s.priceComplete ? '' : ' <span class="dn small">price missing: valued at stop</span>'}`)}
+        ${kvr('Balance (closed)', usd(s.balance))}
+        ${a.platformEq ? kvr(`Platform equity (imported ${esc(fmtTime(a.platformEq.t, true))})`, `${usd(a.platformEq.v)}${Date.now() - a.platformEq.t < 15 * 60e3 ? ` <span class="small ${Math.abs(s.equity - a.platformEq.v) > a.size * 0.001 ? 'warn' : 'mu'}">app ${s.equity - a.platformEq.v >= 0 ? '+' : ''}${usd(s.equity - a.platformEq.v)}</span>` : ' <span class="small mu">older than 15 min</span>'}`) : ''}
+        ${kvr('Open P&L', `<b class="${cls(s.upnl)}">${pnlTxt(s.upnl)}</b> <span class=small>fees ${usd(-s.feesOpen)}</span>`)}
+        ${kvr(`Room to breach (${esc(s.binding)} limit)`, `<b class="${s.room < s.profRisk * 2 ? 'dn' : ''}">${usd(s.room)}</b> (${pct(s.roomPct)})`)}
+        ${a.phase === 'eval' ? kvr(`To target ${usd(s.targetBal)}`, `${usd(s.toTarget)} · ${pct(Math.max(0, s.progress), 0)} done (on equity)`) : kvr('Payout available (est.)', usd(s.payoutAvail))}
+        ${kvr('If every stop fills', s.riskKnown ? `<b class="${s.stopsBreach ? 'dn' : ''}">${usd(s.equityIfStopped)}</b>${s.stopsBreach ? ' BREACH' : ''}` : '<b class=dn>Unknown: a position has no stop</b>')}
+        ${kvr('Exposure / margin used', `${usd(s.notional)} · ${s.leverage.toFixed(2)}x · margin ${usd(s.usedMargin)} of ${usd(s.equity)}`, 'desk-x')}
+        ${kvr('Today', `${s.tradesToday} trades · ${s.winsToday} wins · ${s.lossesToday} losses${s.unknownToday ? ` (${s.unknownToday} result unknown)` : ''}`)}
       </div>
       <div class=small>Daily floor ${usd(s.dailyFloor)} (3% of ${usd(s.dayStart)} at 00:30 UTC) · used ${pct(dU, 0)}</div><div class="${barC(dU)}"><i style="width:${dU * 100}%"></i></div>
       <div class=small>Max floor ${usd(s.maxFloor)} (static${a.ddLimit ? ', from platform' : ''}) · used ${pct(mU, 0)}</div><div class="${barC(mU)}"><i style="width:${mU * 100}%"></i></div>
@@ -1600,7 +1668,7 @@
       <p class=small>${esc(s.profile.note)} Per trade <b>${usd(s.profRisk)}</b> · next trade may risk <b>${usd(s.nextRisk)}</b> · about <b>${s.lossesToBreach}</b> losses of room${wins ? ` · wins to pass: ${wins}` : ''} · max ${s.profile.maxTrades} trades/day, stop after ${s.profile.stopAfterLosses} losses.</p></div>
       ${a.phase === 'eval' ? passOddsHtml(a, s) : ''}
       ${(w => w.length ? `<p class=small>Orders: ${w.map(pl => `${esc(pl.sym)} ${pl.side} ${pl.orderType !== 'market' ? 'limit @ ' + px(pl.entry) : 'market'} ${pl.status === 'placed' ? '<b>working</b> (counts in risk and margin, not equity)' : 'planned only (counts nothing)'}`).join(' · ')}</p>` : '')(S.planned.filter(pl => pl.acct === a.id))}
-      ${(m => m.length ? `<div class=warns>${m.map(x => `<div class=warn>Missing: ${esc(x.text)}. Import it in Positions → 📷 Import screenshots.</div>`).join('')}</div>` : '')(C.missingInfo(a, [T().sym]).filter(x => !S.positions.some(p => p.acct === a.id && !p.closed && p.sym === x.sym)))}
+      ${(m => m.length ? `<div class=warns>${m.map(x => `<div class=warn>Missing: ${esc(x.text)}. Add it on Desk with Import or Add manually.</div>`).join('')}</div>` : '')(C.missingInfo(a, [T().sym]).filter(x => !S.positions.some(p => p.acct === a.id && !p.closed && p.sym === x.sym)))}
       ${s.warnings.length ? `<div class=warns>${s.warnings.map(w => `<div class="${w.lvl}">${esc(w.text)}</div>`).join('')}</div>` : ''}` : `<p class=small>Final balance ${usd(s.balance)}.</p>`}
       <p class="small mu desk-x">Cost ${usd(s.cost)} · payouts ${usd(s.paid)} · net ${usd(s.net)} ·
         <a href="#" data-act="cost" data-id="${a.id}">+ cost</a> · <a href="#" data-act="payout" data-id="${a.id}">+ payout</a></p>
@@ -1648,6 +1716,28 @@
     }
   });
   $('#addAcct').onclick = () => acctForm(null);
+  const deskPanelButtons = { deskManualPanel: 'deskManualToggle', deskPositionManager: 'deskPositionsMore' };
+  function showDeskPanel(panelId, open) {
+    const panel = $('#' + panelId), button = $('#' + deskPanelButtons[panelId]); if (!panel || !button) return;
+    for (const [otherId, otherButtonId] of Object.entries(deskPanelButtons)) if (otherId !== panelId) {
+      const other = $('#' + otherId), otherButton = $('#' + otherButtonId);
+      if (other) other.hidden = true;
+      if (otherButton) otherButton.setAttribute('aria-expanded', 'false');
+    }
+    panel.hidden = !open; button.setAttribute('aria-expanded', String(open));
+    if (open) {
+      if (panelId === 'deskManualPanel' && posFormDirty) { renderPosForm(); posFormDirty = false; }
+      if (panelId === 'deskPositionManager') renderPositions();
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+  function toggleDeskPanel(panelId) { const panel = $('#' + panelId); if (panel) showDeskPanel(panelId, panel.hidden); }
+  function openDeskManual() { switchTab('desk'); showDeskPanel('deskManualPanel', true); }
+  function openDeskManager() { switchTab('desk'); showDeskPanel('deskPositionManager', true); }
+  $('#deskImportToggle').onclick = () => { $('#impFiles').click(); };
+  $('#deskManualToggle').onclick = () => toggleDeskPanel('deskManualPanel');
+  $('#deskPositionsMore').onclick = () => toggleDeskPanel('deskPositionManager');
+  $('#deskIdeasMore').onclick = () => { switchTab('market'); setTimeout(() => { const el = $('#scanAllBox'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 80); };
   function acctForm(a) {
     const isNew = !a;
     a = a || { id: uid(), plan: 'advanced', size: 5000, fee: 20, addon90: false, phase: 'eval', profile: 'steady', created: Date.now(), label: '' };
@@ -1672,21 +1762,36 @@
       <p class="small mu">Presets fill in the firm's published rules (the prop platform checked Nov 1, 2026). For another firm pick "Other firm" and type its target and loss limits from its rules page.</p>
       ${T().budget ? `<p class="small warn">Monthly eval budget: ${usd(T().budget)}. Only money left after bills, your cushion and your weekly buy.</p>` : ''}
       <div class=row style="margin-top:10px"><button class="btn pri" id=afOk>Save</button><button class=btn data-close>Cancel</button>${isNew ? '' : '<button class="btn bad" id=afDel>Delete</button>'}</div>`);
-    const autoFee = () => { const pk = $('#afPlan').value, z = +$('#afSize').value; const base = C.PLANS[pk].price[z]; if (base != null) $('#afFee').value = +(base * ($('#afAdd').checked ? 1 + C.ADDON_90 : 1)).toFixed(2);
-      const P = C.PLANS[pk]; $('#afT').value = (P.target * 100).toFixed(2); $('#afL').value = (P.mdl * 100).toFixed(2); $('#afD').value = (P.mdd * 100).toFixed(2); };
-    $('#afPlan').onchange = () => { autoFee(); $('#afLevNote').firstChild.textContent = 'Leverage: ' + ($('#afPlan').value === 'custom' ? 'read from your screenshots (import the order screen that shows it)' : 'matches the venue (the prop platform: BTC 10x, ETH/SOL/XRP 5x, HYPE/WLD 3x)'); }; $('#afSize').onchange = autoFee; $('#afAdd').onchange = autoFee;
+    const initialRules = { target: $('#afT').value, mdl: $('#afL').value, mdd: $('#afD').value };
+    const autoFee = () => { const pk = $('#afPlan').value, z = +$('#afSize').value; const base = C.PLANS[pk].price[z]; if (base != null) $('#afFee').value = +(base * ($('#afAdd').checked ? 1 + C.ADDON_90 : 1)).toFixed(2); };
+    $('#afPlan').onchange = () => { autoFee(); const P = C.PLANS[$('#afPlan').value]; $('#afT').value = (P.target * 100).toFixed(2); $('#afL').value = (P.mdl * 100).toFixed(2); $('#afD').value = (P.mdd * 100).toFixed(2); $('#afLevNote').firstChild.textContent = 'Leverage: ' + ($('#afPlan').value === 'custom' ? 'read from your screenshots (import the order screen that shows it)' : 'matches the venue (the prop platform: BTC 10x, ETH/SOL/XRP 5x, HYPE/WLD 3x)'); }; $('#afSize').onchange = autoFee; $('#afAdd').onchange = autoFee;
     $('#afOk').onclick = () => {
-      a.plan = $('#afPlan').value; a.size = +$('#afSize').value; a.fee = num($('#afFee').value) || 0; a.addon90 = $('#afAdd').checked;
-      a.phase = $('#afPhase').value; a.label = $('#afLabel').value.trim();
-      const P = C.PLANS[a.plan];
+      const next = { plan: $('#afPlan').value, size: +$('#afSize').value, fee: num($('#afFee').value) || 0, addon90: $('#afAdd').checked,
+        phase: $('#afPhase').value, label: $('#afLabel').value.trim() };
+      const P = C.PLANS[next.plan];
       const tg = C.parseRulePct($('#afT').value, 0.5, 50), ml = C.parseRulePct($('#afL').value, 0.5, 20), md = C.parseRulePct($('#afD').value, 0.5, 20);
       const bad = [['Target', tg], ['Daily loss', ml], ['Max drawdown', md]].filter(x => x[1].error);
       if (bad.length) { alert(bad.map(x => `${x[0]} ${x[1].error}. Leave it blank to use the plan default.`).join('\n')); return; }
       const keep = (r, d) => (r.value == null || Math.abs(r.value - d) < 1e-9 ? undefined : r.value);
-      a.target = keep(tg, P.target); a.mdl = keep(ml, P.mdl); a.mdd = keep(md, P.mdd);
+      // The form rounds for display; do not change a more precise saved rule merely by editing the label or size.
+      const rule = (key, id, parsed, def) => next.plan === a.plan && $(id).value === initialRules[key] ? a[key] : keep(parsed, def);
+      next.target = rule('target', '#afT', tg, P.target); next.mdl = rule('mdl', '#afL', ml, P.mdl); next.mdd = rule('mdd', '#afD', md, P.mdd);
       const rm = C.parseResetUtc($('#afReset').value || '00:30'); if (rm == null) { alert('Daily reset must be HH:MM in UTC, like 00:30 or 22:00.'); return; }
-      a.resetMin = rm === 30 ? undefined : rm;
-      const d = Date.parse($('#afDate').value); if (!isNaN(d)) a.created = d;
+      next.resetMin = rm === 30 ? undefined : rm;
+      const d = Date.parse($('#afDate').value); if (!isNaN(d)) next.created = d;
+      const identityChanged = next.plan !== a.plan || next.size !== +a.size || next.phase !== a.phase;
+      const nextRules = C.planOf(next), oldRules = C.planOf(a);
+      const clearFloor = a.ddLimit > 0 && (identityChanged || Math.abs(nextRules.mdd - oldRules.mdd) > 1e-9);
+      const clearTarget = a.targetEq > 0 && (identityChanged || Math.abs(nextRules.target - oldRules.target) > 1e-9);
+      if (clearFloor || clearTarget) {
+        const changes = [];
+        if (clearFloor) changes.push(`Imported drawdown limit ${usd(a.ddLimit)} will be removed; the selected rules give ${usd(next.size * (1 - nextRules.mdd))}.`);
+        if (clearTarget) changes.push(`Imported target equity ${usd(a.targetEq)} will be removed; the selected rules give ${usd(next.size * (1 + nextRules.target))}.`);
+        if (!confirm(changes.join('\n') + '\n\nCheck the account and these rules against the platform before saving. Re-import current limits after saving. Continue?')) return;
+      }
+      Object.assign(a, next);
+      if (clearFloor) delete a.ddLimit;
+      if (clearTarget) delete a.targetEq;
       if (isNew) S.accounts.push(a);
       const cap = liveAccts().reduce((s, x) => s + x.size, 0);
       save(); closeModal(); renderAll(true);
@@ -1899,85 +2004,446 @@
   });
 
   // ---------- Import from the prop platform (screenshots or text) ----------
-  let ocrWorker = null, lastImport = null, lastSyncSummary = null;
+  let activeOcr = null, importSeq = 0, lastImport = null, lastSyncSummary = null, importShots = null;
   function loadScript(src) { return new Promise((res, rej) => { const el = document.createElement('script'); el.src = src; el.onload = res; el.onerror = () => rej(new Error('could not load ' + src)); document.head.appendChild(el); }); }
-  async function ocr(file) {
-    if (!window.Tesseract) await loadScript('vendor/tesseract/tesseract.min.js');
-    if (!ocrWorker) ocrWorker = await Tesseract.createWorker('eng', 1, { workerPath: 'vendor/tesseract/worker.min.js', corePath: 'vendor/tesseract/', langPath: 'vendor/tesseract/lang', gzip: true });
-    const r = await ocrWorker.recognize(file);
-    return r.data.text;
+  function disposeOcrWorker(session, worker) {
+    if (!worker || session.disposed.has(worker) || session.nativeStopped) return;
+    session.disposed.add(worker);
+    try { if (typeof worker.terminate === 'function') Promise.resolve(worker.terminate()).catch(() => {}); } catch (_) { /* best-effort cleanup */ }
   }
+  function stopOcr(session, reason) {
+    if (!session || session.controller.signal.aborted) return;
+    session.reason = reason || new Error('Import cancelled.');
+    session.controller.abort();
+    if (session.worker) disposeOcrWorker(session, session.worker);
+    else if (session.nativeWorker && !session.nativeStopped) {
+      session.nativeStopped = true;
+      try { session.nativeWorker.terminate(); } catch (_) { /* best-effort cleanup */ }
+    }
+    if (activeOcr === session) activeOcr = null;
+  }
+  // The pinned Tesseract factory creates its native Worker synchronously, but exposes the wrapper only after initialization.
+  // Capture that native handle only during the factory call so a stalled initialization can be cancelled too.
+  function createOcrWorker(session) {
+    const NativeWorker = window.Worker;
+    function TrackedWorker(...args) { const worker = new NativeWorker(...args); session.nativeWorker = worker; return worker; }
+    Object.setPrototypeOf(TrackedWorker, NativeWorker); TrackedWorker.prototype = NativeWorker.prototype;
+    window.Worker = TrackedWorker;
+    try { return Tesseract.createWorker('eng', 1, { workerPath: 'vendor/tesseract/worker.min.js', corePath: 'vendor/tesseract/', langPath: 'vendor/tesseract/lang', gzip: true, workerBlobURL: false }); }
+    finally { window.Worker = NativeWorker; }
+  }
+  function ocrDeadline(session, promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const signal = session.controller.signal;
+      if (signal.aborted) { reject(session.reason); return; }
+      const cancel = () => { clearTimeout(timer); signal.removeEventListener('abort', cancel); reject(session.reason); };
+      const timer = setTimeout(() => stopOcr(session, new Error(label + ' took too long. Try fewer or clearer screenshots.')), ms);
+      signal.addEventListener('abort', cancel, { once: true });
+      Promise.resolve(promise).then(value => { clearTimeout(timer); signal.removeEventListener('abort', cancel); resolve(value); }, error => { clearTimeout(timer); signal.removeEventListener('abort', cancel); reject(error); });
+    });
+  }
+  async function ocr(file, session, pageMode) {
+    if (!session.init) session.init = (async () => {
+      if (!window.Tesseract) await loadScript('vendor/tesseract/tesseract.min.js');
+      if (session.controller.signal.aborted) throw session.reason;
+      const worker = await createOcrWorker(session);
+      if (session.controller.signal.aborted) { disposeOcrWorker(session, worker); throw session.reason; }
+      session.worker = worker;
+      return worker;
+    })();
+    const worker = await ocrDeadline(session, session.init, 90000, 'Starting the screenshot reader');
+    if (typeof worker.setParameters === 'function') await ocrDeadline(session, worker.setParameters({ tessedit_pageseg_mode: String(pageMode == null ? 3 : pageMode) }), 10000, 'Preparing the screenshot reader');
+    const result = await ocrDeadline(session, worker.recognize(file), 60000, 'Reading a screenshot');
+    return result.data.text;
+  }
+  function clearImportShots() { (importShots || []).forEach(s => { if (s.url) URL.revokeObjectURL(s.url); }); importShots = null; }
+  // Local-only, bounded crop readings. Keep the original image and its OCR unchanged.
+  function enhanceStopImage(file, session, region) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file), img = new Image();
+      const abort = () => { done(); reject(session.reason); };
+      const done = () => { img.onload = img.onerror = null; session.controller.signal.removeEventListener('abort', abort); URL.revokeObjectURL(url); };
+      session.controller.signal.addEventListener('abort', abort, { once: true });
+      img.onerror = () => { done(); reject(new Error('image could not be decoded')); };
+      img.onload = () => {
+        try {
+          const w = img.naturalWidth, h = img.naturalHeight;
+          if (!w || !h || w * h > 20000000) throw new Error('image is too large to process safely');
+          const tall = h > w * 1.2;
+          const top = region === 'overview' ? (tall ? Math.floor(h * 0.035) : 0) : (tall ? Math.floor(h * 0.30) : 0);
+          const ch = region === 'overview' ? (tall ? Math.floor(h * 0.16) : h) : (tall ? h - top : h);
+          const scale = Math.min(2, Math.sqrt(4000000 / (w * ch)));
+          const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.floor(w * scale)); canvas.height = Math.max(1, Math.floor(ch * scale));
+          const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (!ctx) throw new Error('image processing unavailable');
+          ctx.drawImage(img, 0, top, w, ch, 0, 0, canvas.width, canvas.height);
+          const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height), a = pixels.data;
+          for (let i = 0; i < a.length; i += 4) {
+            const redMark = region === 'overview' && a[i] > 210 && a[i + 1] < 55 && a[i + 2] < 55;
+            const grey = redMark ? 0 : 0.299 * a[i] + 0.587 * a[i + 1] + 0.114 * a[i + 2];
+            const v = 255 - Math.max(0, Math.min(255, (grey - 128) * 1.5 + 128));
+            a[i] = a[i + 1] = a[i + 2] = v;
+          }
+          ctx.putImageData(pixels, 0, 0); done();
+          canvas.toBlob(blob => { if (blob) resolve(blob); else reject(new Error('image processing failed')); }, 'image/png');
+        } catch (e) { done(); reject(e); }
+      };
+      img.src = url;
+    });
+  }
+  function openImportPanel() { const panel = $('#importCard'); panel.hidden = false; panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
   async function importFiles(files) {
-    const st = $('#impStatus'); const texts = []; let newest = 0;
+    const run = ++importSeq, st = $('#impStatus'); const texts = [], shots = []; let oldest = Infinity;
+    stopOcr(activeOcr);
+    const session = { controller: new AbortController(), disposed: new Set(), worker: null, init: null, reason: null };
+    activeOcr = session;
+    clearImportShots();
+    lastImport = null; $('#impPreview').innerHTML = ''; $('#impText').hidden = true; openImportPanel();
     try {
       for (let i = 0; i < files.length; i++) {
         st.textContent = `Reading screenshot ${i + 1} of ${files.length}… (first time downloads the reader, ~7 MB)`;
-        texts.push(await ocr(files[i])); newest = Math.max(newest, files[i].lastModified || 0);
+        const text = await ocr(files[i], session); if (run !== importSeq) return;
+        const shot = { text, enhanced: '', overview: '', enhancementFailed: false, url: null, manualDetail: null };
+        const sheet = C.stopSheetFields(text);
+        if (sheet.looks || sheet.order) {
+          st.textContent = `Checking stop/target details in screenshot ${i + 1} of ${files.length}…`;
+          let image = null;
+          try { image = await ocrDeadline(session, enhanceStopImage(files[i], session), 20000, 'Preparing a screenshot'); }
+          catch (e) { if (session.controller.signal.aborted) throw e; shot.enhancementFailed = true; }
+          if (run !== importSeq) return;
+          if (image) { shot.enhanced = await ocr(image, session, 6); if (run !== importSeq) return; }
+        }
+        const originalParsed = C.parsePropScreen(text);
+        if (originalParsed.account.equity == null && /\b(?:Advanced|Intermediate|Starter|Lite)[ \t]+(?:Eval|Funded)\b|\bTotal[ \t]+equity\b|\bAccount[ \t]+equity\b/i.test(text)) {
+          let image = null;
+          try { image = await ocrDeadline(session, enhanceStopImage(files[i], session, 'overview'), 20000, 'Preparing an account-overview crop'); }
+          catch (e) { if (session.controller.signal.aborted) throw e; }
+          if (run !== importSeq) return;
+          if (image) { shot.overview = await ocr(image, session, 6); if (run !== importSeq) return; }
+        }
+        texts.push(text); shots.push(shot); if (files[i].lastModified > 0) oldest = Math.min(oldest, files[i].lastModified);
       }
-    } catch (e) { st.innerHTML = `<span class=dn>Couldn't read the screenshot: ${esc(e.message)}</span>`; return; }
-    showImport(texts.join('\n'), newest || Date.now());
-    autoSample(lastImport && lastImport.r, texts.join('\n'));
+    } catch (e) { if (run === importSeq) st.innerHTML = `<span class=dn>Couldn't read the screenshot: ${esc(e.message)}</span>`; return; }
+    finally { stopOcr(session); }
+    if (run !== importSeq) return;
+    try {
+      importShots = shots;
+      shots.forEach((shot, i) => { shot.url = URL.createObjectURL(files[i]); });
+      showImport(texts.join('\n\u001e\n'), Number.isFinite(oldest) ? oldest : null);
+    } catch (_) { clearImportShots(); lastImport = null; $('#impPreview').innerHTML = ''; st.textContent = 'Could not prepare screenshot review. Try again or enter the details manually.'; }
   }
   $('#impFiles').onchange = e => { if (e.target.files.length) importFiles([...e.target.files]); e.target.value = ''; };
-  $('#impPasteBtn').onclick = () => { const t = $('#impText'); t.hidden = false; t.focus(); };
-  $('#impText').addEventListener('input', e => { if (e.target.value.trim().length > 20) showImport(e.target.value, Date.now()); });
+  $('#impPasteBtn').onclick = () => { importSeq++; stopOcr(activeOcr); clearImportShots(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impStatus').textContent = ''; const t = $('#impText'); openImportPanel(); t.hidden = false; t.focus(); };
+  $('#impClose').onclick = () => { importSeq++; stopOcr(activeOcr); clearImportShots(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impStatus').textContent = ''; $('#impText').value = ''; $('#impText').hidden = true; $('#importCard').hidden = true; };
+  $('#impText').addEventListener('input', e => { importSeq++; stopOcr(activeOcr); clearImportShots(); lastImport = null; $('#impPreview').innerHTML = ''; if (e.target.value.trim().length > 20) showImport(e.target.value, null); else $('#impStatus').textContent = ''; });
   document.addEventListener('paste', e => {
-    if (tab !== 'pos') return;
+    if (tab !== 'desk') return;
     const f = [...(e.clipboardData && e.clipboardData.files || [])].filter(x => /^image\//.test(x.type));
     if (f.length) { e.preventDefault(); importFiles(f); }
   });
-  // Automatic reader samples (owner's choice, Nov 1 2026): when the reader misses something on a screenshot, send the
-  // screen's layout (every digit 9, identifiers removed; never the picture) so the reader can be fixed. Off switch in
-  // Settings. Each layout is sent once per device. Fire and forget: a failure never affects the import.
-  const SAMPLE_URL = 'https://kraken-prop-desk.jbyerstemp.workers.dev/sample', SAMPLE_KEY = 'kpd_samples';
-  function autoSample(r, text) {
-    if (!r || F.demo || !shareEnabled('shareLayout') || holdOf(SAMPLE_HOLD)) return;
-    const smp = C.sampleFor(r, text, FEEDBACK_PUBLIC ? 'public' : 'private'); if (!smp) return;
-    let seen; try { seen = JSON.parse(localStorage.getItem(SAMPLE_KEY)) || []; } catch (e) { seen = []; }
-    const id = C.fnv(smp.layout); if (seen.includes(id)) return;
-    fetch(SAMPLE_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(smp), keepalive: true })
-      .then(x => { if (x.ok) { seen.push(id); try { localStorage.setItem(SAMPLE_KEY, JSON.stringify(seen.slice(-200))); } catch (e) { } } else if (x.status === 403) setHold(SAMPLE_HOLD, 7 * 86400e3, 'origin'); }).catch(() => { });
-  }
-  // Which account a screenshot belongs to: its name on screen, else the one picked, else the one synced last, else the only one.
+  // Automatic OCR-text sharing is paused: generic redaction cannot guarantee removal of names and identifiers.
+  const SAMPLE_KEY = 'kpd_samples'; // retained only so Erase all removes legacy local data
+  // An identified screenshot is guessed only from an exact account match, never from another account's previous choice.
   function impAcctGuess(A) {
     const elig = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded');
-    return (A.label && elig.find(x => x.label === A.label)) || acctById(($('#impAcct') || {}).value) || acctById(T().lastImpAcct) || (elig.length === 1 ? elig[0] : null);
+    return A.label ? elig.find(x => x.label === A.label) || null : acctById(T().lastImpAcct) || (elig.length === 1 ? elig[0] : null);
   }
-  function showImport(text, shotTime) {
-    const r = C.parsePropScreen(text, Date.now()); lastImport = { r, shotTime, text };
+  const importStateSignature = () => JSON.stringify({ accounts: S.accounts, positions: S.positions, planned: S.planned });
+  function hasAccountNumbers(account, text) {
+    if (['equity', 'balance', 'upnl', 'target', 'dailyLimit', 'drawdownLimit'].some(k => Number.isFinite(account[k]))) return true;
+    // These two legacy fields use a looser parser: don't let a malformed prefix certify an image.
+    return [['usedMargin', 'Used'], ['availMargin', 'Available']].some(([key, label]) => Number.isFinite(account[key]) &&
+      new RegExp('^[ \\t]*' + label + '[ \\t]+margin[ \\t]+(?:\\d{1,3}(?:,\\d{3})+|\\d+)\\.\\d+(?:[ \\t]+(?:USD|USDT|USDC))?[ \\t]*$', 'im').test(text || ''));
+  }
+  function manualAccountShotCandidates(shots) {
+    return (shots || []).map((shot, index) => ({ shot, index, parsed: C.parsePropScreen(shot.text), sheet: C.stopSheetFields(shot.text) }))
+      .filter(x => !x.sheet.order && !x.parsed.historyEvidence && !x.parsed.ledgerEvidence && (x.parsed.account.plan || hasAccountNumbers(x.parsed.account, x.shot.text) || /\b(?:Balance|Equity)\b/i.test(x.shot.text)));
+  }
+  function addStopImageReviews(r, shots) {
+    r.ocrReviews = []; r.ocrIssues = [];
+    if (!shots || !shots.length) return;
+    // Rebuild detail evidence per image so a permissive legacy parse cannot survive beside a stricter retry.
+    r.details = []; r.orders = [];
+    (shots || []).forEach((shot, index) => {
+      const fields = C.stopSheetFields(shot.text), original = C.parsePropScreen(shot.text), directEquity = C.directOverviewEquity(shot.overview);
+      const equityNote = directEquity ? ` · direct screenshot equity: ${directEquity.raw} USD (review only; not used to sync)` : '';
+      if ((original.numericIssues || []).length) {
+        r.ocrIssues.push(`Screenshot ${index + 1}: ${[...new Set(original.numericIssues)].join(' ')} Retake it, or select the other screenshots again without it.`);
+      }
+      if (fields.order || original.orders.length) {
+        const orderRead = C.recoverOrderSheet(shot.text, shot.enhanced);
+        if (orderRead.status === 'recovered') r.orders.push(orderRead.order);
+        const orderStatusNote = orderRead.status !== 'recovered' ? ' Some order details could not be verified across the original and focused reading.'
+          : !orderRead.order.status ? ' Fill status is not visible, so this will not be counted as an open position.' : '';
+        r.ocrIssues.push(`Screenshot ${index + 1}: this is an order screenshot, not an open-position list. Order-sheet sync is temporarily paused; use a current positions screenshot instead.${orderStatusNote}`);
+        r.ocrReviews.push({ index, summary: (orderRead.status === 'recovered' ? 'Order details reviewed; sync paused' : 'Order screenshot; details unclear; sync paused') + equityNote, url: shot.url, kind: 'general', directEquity });
+        return;
+      }
+      if (shot.manualDetail && fields.looks) {
+        const m = shot.manualDetail;
+        const matches = r.positionCoverage === 'complete' ? r.positions.filter(q => q.side === m.side && q.sym === m.sym && q.qty === m.qty && C.samePx(q.entry, m.entry)) : [];
+        const q = matches.length === 1 ? matches[0] : null;
+        const validLevels = q && Number.isFinite(m.sl) && m.sl > 0 && Number.isFinite(m.tp) && m.tp > 0 &&
+          (q.side === 'long' ? m.sl < q.entry && m.tp > q.entry : m.sl > q.entry && m.tp < q.entry) && C.manualStopMatches(shot.text, shot.enhanced, m);
+        if (!validLevels) {
+          r.ocrIssues.push(`Screenshot ${index + 1}: manually entered stop/target values conflict with readable screenshot evidence or no longer match exactly one position in the complete list. Review the position list and detail screenshot again.`);
+          r.ocrReviews.push({ index, summary: 'Manual stop/target entry does not match the current list', url: shot.url, kind: 'general', directEquity });
+          return;
+        }
+        const d = { side: q.side, sym: q.sym, base: C.base(q.sym), qty: q.qty, entry: q.entry, sl: m.sl, tp: m.tp, manual: true };
+        r.details.push(d);
+        if (original.unreadableDetails) r.unreadableDetails = Math.max(0, r.unreadableDetails - 1);
+        r.ocrReviews.push({ index, detail: d, shown: { sl: String(d.sl), tp: String(d.tp), entry: String(d.entry) }, url: shot.url, manual: true, directEquity });
+        return;
+      }
+      if (!fields.looks) {
+        r.details.push(...original.details);
+        // An account heading alone identifies no content and cannot certify the rest of an image was read.
+        const manualAccountOnly = !!shot.manualAccount && !fields.order && !original.historyEvidence && !original.positions.length && !original.flat && !original.details.length && !original.fills.length && !original.closedRows.length && !original.ledger.length && !original.orders.length;
+        const recognized = original.positions.length || original.flat || original.details.length || original.fills.length || original.closedRows.length || original.ledger.length || original.orders.length || hasAccountNumbers(original.account, shot.text) || Object.keys(original.leverage || {}).length || manualAccountOnly;
+        if (!recognized) r.ocrIssues.push(`Screenshot ${index + 1} could not be read. Retake it or select the other screenshots again without it.`);
+        const summary = original.positionCoverage === 'complete' ? (original.flat ? 'Empty positions list read' : `${original.positions.length} open position(s) read`)
+          : original.details.length ? 'Position details read' : original.orders.length ? 'Order details read' : original.fills.length || original.closedRows.length || original.ledger.length ? 'Trade or ledger details read'
+          : recognized ? 'Account information read; no position details read' : 'No reliable information read';
+        r.ocrReviews.push({ index, summary: summary + equityNote, url: shot.url, kind: 'general', directEquity });
+        return;
+      }
+      const result = C.recoverStopSheet(shot.text, shot.enhanced), before = original.details;
+      if (result.status === 'order') {
+        r.ocrIssues.push(`Screenshot ${index + 1}: this is an order screenshot, not an open-position list. Order-sheet sync is temporarily paused; use a current positions screenshot instead.`);
+        r.ocrReviews.push({ index, summary: 'Order screenshot; sync paused' + equityNote, url: shot.url, kind: 'general', directEquity });
+        return;
+      }
+      if (result.status === 'recovered' && before.length <= 1) {
+        const d = result.detail, old = before[0];
+        if (old && (old.side !== d.side || old.sym !== d.sym || old.qty !== d.qty || ['sl', 'tp', 'entry'].some(k => old[k] != null && (fields[k].value !== old[k] || d[k] !== old[k])))) {
+          r.ocrIssues.push(`Screenshot ${index + 1}: the stop/target readings disagree. Retake it or enter the values manually.`);
+        } else {
+          r.details.push(Object.assign({}, old || {}, d, { price: old ? old.price : null, openedMs: old ? old.openedMs : null, openFee: old ? old.openFee : null, orderId: old ? old.orderId : null }));
+          if (original.unreadableDetails) r.unreadableDetails = Math.max(0, r.unreadableDetails - 1);
+          r.ocrReviews.push({ index, detail: d, shown: result.shown, url: shot.url, enhanced: !!shot.enhanced, directEquity });
+        }
+      } else {
+        const manualRequest = result.status === 'unreadable' && r.positionCoverage === 'complete' && r.positions.length > 0;
+        if (!manualRequest) r.ocrIssues.push(`Screenshot ${index + 1}: its stop/target cannot be identified reliably. Retake it or enter details manually after a complete positions list is readable.`);
+        r.ocrReviews.push({ index, summary: 'Stop/target details cannot be identified reliably', url: shot.url, kind: 'general', directEquity, manualRequest });
+      }
+    });
+    const manualAccounts = (shots || []).map((shot, index) => ({ shot, index })).filter(x => x.shot.manualAccount);
+    if (manualAccounts.length > 1) r.ocrIssues.push('Manually entered account values came from more than one screenshot. Keep one current screenshot per account snapshot.');
+    else if (manualAccounts.length === 1) {
+      const { shot, index } = manualAccounts[0], m = shot.manualAccount;
+      const same = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= Math.max(0.005, Math.abs(a) * 1e-9);
+      const conflicts = r.orderEvidence || r.historyEvidence || r.ledgerEvidence || r.accountConflict || (r.numericIssues || []).length || !C.manualAccountMatches(shot.text, shot.overview, m) ||
+        m.balance != null && r.balance != null && !same(m.balance, r.balance) ||
+        m.equity != null && r.account.equity != null && !same(m.equity, r.account.equity);
+      if (conflicts) r.ocrIssues.push(`Screenshot ${index + 1}: manual account values conflict with readable account evidence or cannot be checked safely. Review the original; order/history/Ledger and ambiguous OCR cannot be overridden.`);
+      else {
+        if (m.balance != null && r.balance == null && r.account.balance == null) { r.balance = m.balance; r.account.balance = m.balance; r.account.balanceFrom = 'manual-screenshot'; r.account.balanceManualRaw = m.balanceRaw; }
+        if (m.equity != null && r.account.equity == null) { r.account.equity = m.equity; r.account.equitySource = 'manual-screenshot'; r.account.equityManualRaw = m.equityRaw; }
+        const review = r.ocrReviews.find(v => v.index === index);
+        if (review) { review.manualAccount = true; review.summary = `${review.summary ? review.summary + ' · ' : ''}missing account values entered manually from this screenshot (not OCR)`; }
+      }
+    }
+    if (!r.unreadableDetails) r.warnings = r.warnings.filter(w => !w.startsWith('Some stop/target screenshots could not be linked'));
+  }
+  function manualPrice(raw) {
+    const m = /^\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)\s*(?:USD)?\s*$/i.exec(String(raw || ''));
+    const v = m ? Number(m[1].replace(/,/g, '')) : null;
+    return Number.isFinite(v) && v > 0 ? v : null;
+  }
+  function askMissingStopDetails(index) {
+    const imp = lastImport, shot = importShots && importShots[index];
+    if (!imp || !shot || !imp.r.ocrReviews.some(v => v.index === index && v.manualRequest)) return;
+    const sequence = importSeq, shots = importShots;
+    if (imp.r.positionCoverage !== 'complete' || !imp.r.positions.length) { alert('A complete current positions list is required before these details can be matched.'); return; }
+    const opts = imp.r.positions.map((q, i) => `<option value="${i}">${esc(q.side)} ${q.qty} ${esc(C.base(q.sym))} @ ${px(q.entry)}</option>`).join('');
+    showModal(`<h3>Enter the missing stop and target</h3><p class=small>Choose the exact matching position from the complete list, then copy both labeled prices from this screenshot. These values are manual—not OCR—and are not inferred. Order and History screenshots cannot be imported here.</p>
+      <div class=form><label>Position from the readable list<select id=missingDetailPosition>${opts}</select></label>
+      <label>Stop loss price (USD)<input id=missingDetailStop type=text inputmode=decimal autocomplete=off placeholder="e.g. 45,600.00 USD"></label>
+      <label>Take-profit price (USD)<input id=missingDetailTarget type=text inputmode=decimal autocomplete=off placeholder="e.g. 55,000.00 USD"></label></div>
+      <label class=chk><input id=missingDetailSource type=checkbox> I copied both labeled values from this position-detail screenshot.</label>
+      <div class=row><button class="btn pri" id=missingDetailSave>Use these manual values</button><button class=btn data-close>Cancel</button></div>`);
+    $('#missingDetailSave').onclick = () => {
+      if (lastImport !== imp || importSeq !== sequence || importShots !== shots || importStateSignature() !== imp.signature) { closeModal(); alert('The import or Desk changed. Reopen the current screenshot review; nothing was saved.'); return; }
+      const q = imp.r.positions[Number($('#missingDetailPosition').value)], sl = manualPrice($('#missingDetailStop').value), tp = manualPrice($('#missingDetailTarget').value);
+      if (!q || !sl || !tp || !$('#missingDetailSource').checked) { alert('Choose a position, enter both positive USD prices, and confirm they came from this screenshot.'); return; }
+      if (q.side === 'long' ? !(sl < q.entry && tp > q.entry) : !(sl > q.entry && tp < q.entry)) { alert('Those prices do not fit the position side and entry. Check the screenshot; nothing was changed.'); return; }
+      shot.manualDetail = { side: q.side, sym: q.sym, qty: q.qty, entry: q.entry, sl, tp };
+      const { text, shotTime, choice } = imp; closeModal(); showImport(text, shotTime, choice);
+    };
+  }
+  function askMissingAccountValues() {
+    const imp = lastImport, shots = importShots || [];
+    if (!imp || imp.r.orderEvidence || imp.r.historyEvidence || imp.r.ledgerEvidence || imp.r.accountConflict || (imp.r.numericIssues || []).length) return;
+    const sequence = importSeq;
+    const missing = [];
+    if (imp.r.balance == null && imp.r.account.balance == null) missing.push(['balance', 'Balance']);
+    if (imp.r.account.equity == null) missing.push(['equity', 'Equity']);
+    if (!missing.length) return;
+    const candidates = manualAccountShotCandidates(shots);
+    if (!candidates.length) { alert('No non-order account screenshot is available for manual values. Select the account overview again.'); return; }
+    const opts = candidates.map(x => `<option value="${x.index}">Screenshot ${x.index + 1}</option>`).join('');
+    const fields = missing.map(([key, label]) => `<label>${label} (USD)<input id="manualAccount${key}" type=text inputmode=decimal autocomplete=off placeholder="e.g. 5,043.21 USD"></label>`).join('');
+    showModal(`<h3>Enter missing account values</h3><p class=small>Choose one non-order account screenshot and copy the missing values directly from it. USD only; do not use the Balance + UP&amp;L estimate. These values are manual, not OCR, and cannot replace ambiguous or conflicting readings.</p>
+      <div class=form><label>Source screenshot<select id=manualAccountImage>${opts}</select>${fields}</div>
+      <label class=chk><input id=manualAccountSource type=checkbox> I copied every value above from this same account screenshot.</label>
+      <div class=row><button class="btn pri" id=manualAccountSave>Use these manual values</button><button class=btn data-close>Cancel</button></div>`);
+    $('#manualAccountSave').onclick = () => {
+      if (lastImport !== imp || importSeq !== sequence || importShots !== shots || importStateSignature() !== imp.signature) { closeModal(); alert('The import or Desk changed. Reopen the current screenshot review; nothing was saved.'); return; }
+      const index = Number($('#manualAccountImage').value), shot = shots[index], values = Object.fromEntries(missing.map(([key]) => { const raw = $('#manualAccount' + key).value.trim(); return [key, manualPrice(raw) == null ? null : { value: manualPrice(raw), raw }]; }));
+      if (!shot || !$('#manualAccountSource').checked || missing.some(([key]) => !values[key])) { alert('Choose the source screenshot, enter every missing positive USD value, and confirm they came from that one image.'); return; }
+      shot.manualAccount = shot.manualAccount || {};
+      for (const [key] of missing) { shot.manualAccount[key] = values[key].value; shot.manualAccount[key + 'Raw'] = values[key].raw; }
+      const { text, shotTime, choice } = imp; closeModal(); showImport(text, shotTime, choice);
+    };
+  }
+  function importSizeMismatch(acct, account) {
+    if (!acct || !(acct.size > 0)) return false;
+    const rules = C.planOf(acct), evidence = account.limitEvidence || {}, drawdown = evidence.drawdown || [], target = evidence.target || [];
+    // A single limit may be a legitimate custom absolute rule, so never infer a size from it alone.
+    // With both kinds present, any unique supported-size conflict requires manual verification,
+    // even if the other value is custom or anomalous and both match saved absolute overrides.
+    const customRulesKnown = acct.plan !== 'custom' || (Number.isFinite(acct.target) && acct.target >= 0.005 && acct.target <= 0.5 && Number.isFinite(acct.mdd) && acct.mdd >= 0.005 && acct.mdd <= 0.2);
+    if (acct.phase === 'eval' && C.PLANS[acct.plan] && customRulesKnown && drawdown.length && target.length) {
+      const infer = (v, factor) => {
+        const matches = C.SIZES.filter(size => Number.isFinite(v) && Math.abs(v - size * factor) < 0.5);
+        return matches.length === 1 ? matches[0] : null;
+      };
+      const inferred = drawdown.map(v => infer(v, 1 - rules.mdd)).concat(target.map(v => infer(v, 1 + rules.target)));
+      if (inferred.some(size => size != null && size !== +acct.size)) return true;
+    }
+    const floor = acct.ddLimit > 0 ? acct.ddLimit : Number.isFinite(rules.mdd) ? acct.size * (1 - rules.mdd) : null;
+    const goal = acct.targetEq > 0 ? acct.targetEq : Number.isFinite(rules.target) ? acct.size * (1 + rules.target) : null;
+    return drawdown.some(v => !Number.isFinite(v) || !Number.isFinite(floor) || Math.abs(v - floor) >= 0.5) ||
+      (acct.phase === 'eval' && target.some(v => !Number.isFinite(v) || !Number.isFinite(goal) || Math.abs(v - goal) >= 0.5));
+  }
+  function importReviewIssues(acct, r, isNew) {
+    const issues = [], open = acct ? S.positions.filter(p => p.acct === acct.id && !p.closed) : [];
+    // A positive estimate never supplies money or approves sync. Contradictory
+    // readings from one screenshot must still block preview AND apply.
+    for (const [index, shot] of (importShots || []).entries()) {
+      const estimate = C.overviewEquityEstimate(shot.text), direct = estimate && estimate.directEquity;
+      if (direct && (direct.status === 'conflict' || direct.hasConflict)) issues.push(`Screenshot ${index + 1}: displayed Balance + UP&L conflicts with direct Equity. Retake it; estimated values cannot resolve this conflict.`);
+      if (!C.overviewCropMatches(shot.text, shot.overview)) issues.push(`Screenshot ${index + 1}: the focused equity reading conflicts with or cannot be checked against this screenshot's account values. Retake it before syncing.`);
+    }
+    const completeList = r.positionCoverage === 'complete';
+    if (r.positionEvidenceConflict || r.positionCoverage === 'incomplete') issues.push('The screenshot position list is incomplete or conflicts with other position evidence. Do not sync until a current full list is readable.');
+    const size = isNew && r.account.plan ? C.sizeFromLimits(r.account.plan, r.account.drawdownLimit, r.account.target) : null;
+    const sizeAccount = isNew && size ? { plan: r.account.plan, phase: r.account.phase || 'eval', size } : acct;
+    if (importSizeMismatch(sizeAccount, r.account)) issues.push('The screenshot account size or limits do not match the selected account, or their match cannot be verified. Verify the account size and custom limits manually on the platform before syncing.');
+    issues.push(...(r.numericIssues || []));
+    if (r.orderEvidence || (r.orders || []).length) issues.push('Order-sheet sync is temporarily paused for safety. Import the current positions list without order sheets instead.');
+    if (r.historyEvidence || r.fills.length || (r.closedRows || []).length) issues.push('Trades history and closed-position result sync are temporarily paused for safety. Use a current positions list without history rows.');
+    if (r.ledgerEvidence || (r.ledger || []).length || r.account.balanceFrom === 'ledger') issues.push('Ledger sync is temporarily paused until source timestamps and event identities can be verified. Use current account and position screenshots without Ledger.');
+    if (r.unreadableDetails) issues.push('A stop/target screenshot could not be identified. Retake it or enter its values manually before syncing.');
+    issues.push(...(r.ocrIssues || []));
+    if (r.balance == null && (r.fills.length || r.details.length || (r.closedRows || []).length)) issues.push('A current balance is needed before updating position details or trade history. Include a clear full positions screenshot with equity or a direct balance.');
+    let projected = open.map(p => ({ p, side: p.side, sym: p.sym, qty: C.openQty(p), entry: p.entry, stop: p.stop }));
+    if (completeList) {
+      const plan = C.planSync(open, r.positions, r.closedRows);
+      if (r.balance == null && (plan.add.length || plan.partial.length || plan.close.length)) issues.push('A current balance is needed before adding, resizing, or closing app positions. Include a clear full positions screenshot with equity or a direct balance.');
+      if (plan.add.some(q => plan.close.some(x => x.pos.sym === q.sym && x.pos.side === q.side && C.samePx(x.pos.entry, q.entry)))) issues.push('A position size increased; update it manually before importing this list.');
+      if (r.positions.some(q => open.filter(p => p.sym === q.sym && p.side === q.side && C.samePx(p.entry, q.entry)).length > 1)) issues.push('Multiple saved positions match one screenshot row; resolve the duplicates before syncing.');
+      if (open.some(p => r.positions.filter(q => p.sym === q.sym && p.side === q.side && C.samePx(p.entry, q.entry) && C.openQty(p) + 1e-9 >= q.qty).length > 1)) issues.push('Multiple screenshot rows match the same saved position. Resolve the ambiguity before syncing.');
+      if (acct && C.ambiguousPlannedMatches(S.planned.filter(x => x.acct === acct.id), plan.add)) issues.push('Screenshot positions have ambiguous planned-trade matches. Resolve the plans manually before syncing.');
+      const detailedStop = q => r.details.some(d => d.sl > 0 && d.side === q.side && d.sym === q.sym && Math.abs(d.qty - q.qty) < 1e-9 && (d.entry == null || C.samePx(d.entry, q.entry)) && r.positions.filter(p => p.side === d.side && p.sym === d.sym && Math.abs(p.qty - d.qty) < 1e-9 && (d.entry == null || C.samePx(d.entry, p.entry))).length === 1);
+      const detailedTarget = q => r.details.some(d => d.tp > 0 && d.side === q.side && d.sym === q.sym && Math.abs(d.qty - q.qty) < 1e-9 && (d.entry == null || C.samePx(d.entry, q.entry)) && r.positions.filter(p => p.side === d.side && p.sym === d.sym && Math.abs(p.qty - d.qty) < 1e-9 && (d.entry == null || C.samePx(d.entry, p.entry))).length === 1);
+      if (r.positions.some(q => q.slEvidence === false && detailedStop(q))) issues.push('The position list and detail screen disagree about whether a stop exists. Verify the current position before syncing.');
+      if (r.positions.some(q => q.tpEvidence === false && detailedTarget(q))) issues.push('The position list and detail screen disagree about whether a take-profit exists. Verify the current position before syncing.');
+      if (plan.keep.concat(plan.partial).some(k => !k.snap.hasSL && !detailedStop(k.snap) && (k.pos.stop != null || k.pos.platformSL === true))) issues.push('A saved stop could not be confirmed in the current screenshot. Check it on the platform before syncing.');
+      if (acct && plan.add.some(q => { const pl = C.matchPlanned(S.planned.filter(x => x.acct === acct.id), q); return pl && pl.stop != null && !q.hasSL && !detailedStop(q); })) issues.push('A planned stop could not be confirmed in the screenshot. Check it on the platform before syncing.');
+      projected = plan.keep.concat(plan.partial).map(k => ({ p: k.pos, side: k.snap.side, sym: k.snap.sym, qty: k.snap.qty, entry: k.snap.entry, stop: k.pos.stop }))
+        .concat(plan.add.map(q => { const pl = acct && C.matchPlanned(S.planned.filter(x => x.acct === acct.id), q); return { p: null, side: q.side, sym: q.sym, qty: q.qty, entry: q.entry, stop: pl ? pl.stop : null }; }));
+    }
+    const detailValues = new Map();
+    if (acct || isNew) for (const d of r.details) {
+      const candidates = projected.filter(p => p.side === d.side && p.sym === d.sym && Math.abs(p.qty - d.qty) < 1e-9 && (d.entry == null || C.samePx(p.entry, d.entry)));
+      if (candidates.length !== 1) { issues.push('A position detail sheet does not uniquely match the selected account. Check its coin, side, size and entry.'); continue; }
+      const p = candidates[0];
+      if (d.sl != null && (!(d.sl > 0) || !Number.isFinite(d.sl)) || d.tp != null && (!(d.tp > 0) || !Number.isFinite(d.tp))) issues.push('A stop or target price could not be read as a valid positive number.');
+      const seen = detailValues.get(p) || { stops: new Set(), targets: new Set(), openTimes: new Set() };
+      if (d.sl != null) seen.stops.add(d.sl); if (d.tp != null) seen.targets.add(d.tp); if (d.openedMs != null) seen.openTimes.add(d.openedMs);
+      detailValues.set(p, seen);
+      if (seen.stops.size > 1 || seen.targets.size > 1) issues.push('Position detail screenshots show conflicting stop or target prices. Use one current value.');
+      if (seen.openTimes.size > 1) issues.push('Position detail screenshots show conflicting Open times for the same position. Verify its timestamp before syncing.');
+      if (d.sl != null && p.stop != null && (p.side === 'short' ? d.sl > p.stop : d.sl < p.stop)) issues.push('A screenshot shows a stop farther away than the saved stop. Check the platform stop before syncing.');
+    }
+    return [...new Set(issues)];
+  }
+  function showImport(text, shotTime, selected) {
+    const r = C.parsePropScreen(text, Date.now());
+    addStopImageReviews(r, importShots);
     const A = r.account, st = $('#impStatus');
-    if (!r.positions.length && !r.details.length && !r.fills.length && A.equity == null && A.balance == null && !(r.ledger || []).length && !Object.keys(r.leverage || {}).length && !(r.orders || []).length) { st.innerHTML = '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
+    if (!r.positions.length && !r.flat && !r.details.length && !r.fills.length && !hasAccountNumbers(A, text) && !(r.ledger || []).length && !(r.closedRows || []).length && !Object.keys(r.leverage || {}).length && !(r.orders || []).length && !r.ocrReviews.length) { lastImport = null; clearImportShots(); st.innerHTML = r.unreadableDetails ? '<span class=dn>Could not link the stop/target screenshot to a position. Its prices were not imported; check them manually.</span>' : '<span class=dn>Nothing recognisable. Use your prop platform\'s account screen and its positions list.</span>'; $('#impPreview').innerHTML = ''; return; }
     st.textContent = '';
+    const incomplete = r.positionCoverage === 'incomplete' || r.positionCoverage === 'unknown';
     const size = A.plan ? C.sizeFromLimits(A.plan, A.drawdownLimit, A.target) : null;
-    const g0 = impAcctGuess(A), opts = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded').map(a => `<option value="${a.id}" ${(A.label ? a.label === A.label : g0 && a.id === g0.id) ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
-    const newOpt = A.plan && size ? `<option value="new" ${!S.accounts.some(a => a.label === A.label) ? 'selected' : ''}>+ New: ${esc(A.label || A.plan)} (${usd(size)})</option>` : '';
-    const ageMin = (Date.now() - shotTime) / 60000;
+    const eligible = S.accounts.filter(a => a.phase === 'eval' || a.phase === 'funded'), g0 = impAcctGuess(A), canCreate = !!(A.plan && size);
+    let choice = selected !== undefined ? selected : g0 ? g0.id : canCreate && A.label ? 'new' : '';
+    if (choice !== 'new' && !eligible.some(a => a.id === choice) || choice === 'new' && !canCreate) choice = '';
+    const selectedAcct = eligible.find(a => a.id === choice) || null;
+    const accountId = text => /\b(?:Advanced|Intermediate|Starter|Lite)[ \t]*(?:Eval|Funded)\w*[ \t]*#?[ \t]*(\d+)(?![\d,.])/i.exec(text || '');
+    const pickedId = selectedAcct && accountId(selectedAcct.label), screenshotId = accountId(A.label);
+    const accountMismatch = !!(selectedAcct && (A.plan && selectedAcct.plan && A.plan !== selectedAcct.plan || A.phase && selectedAcct.phase && A.phase !== selectedAcct.phase || pickedId && screenshotId && pickedId[1] !== screenshotId[1]));
+    const reviewIssues = importReviewIssues(selectedAcct, r, choice === 'new');
+    const blocked = incomplete || r.accountConflict || accountMismatch || !choice || reviewIssues.length > 0;
+    const opts = `<option value="" ${!choice ? 'selected' : ''}>Choose an account</option>` + eligible.map(a => `<option value="${esc(a.id)}" ${a.id === choice ? 'selected' : ''}>${esc(a.label || C.planOf(a).name + ' ' + usd(a.size))}</option>`).join('');
+    const newOpt = canCreate ? `<option value="new" ${choice === 'new' ? 'selected' : ''}>+ New: ${esc(A.label || A.plan)} (${usd(size)})</option>` : '';
+    lastImport = { r, shotTime, text, choice, blocked, signature: importStateSignature() };
+    // This is display-only: never add it to the parsed import or use it to authorize a sync.
+    let equityEstimate = null;
+    if (importShots && importShots.length === 1 && typeof C.overviewEquityEstimate === 'function') {
+      try { equityEstimate = C.overviewEquityEstimate(importShots[0].text); } catch (_) { /* advisory unavailable */ }
+    }
+    const manualAccountMissing = [];
+    if (r.balance == null && A.balance == null) manualAccountMissing.push('balance');
+    if (A.equity == null) manualAccountMissing.push('equity');
+    const showManualAccountAction = manualAccountMissing.length > 0 && !(r.numericIssues || []).length && !r.accountConflict && !r.orderEvidence && !r.historyEvidence && !r.ledgerEvidence && manualAccountShotCandidates(importShots).length > 0;
+    const equityConflict = equityEstimate && (equityEstimate.directEquity === 'conflict' || (equityEstimate.directEquity && (equityEstimate.directEquity.status === 'conflict' || equityEstimate.directEquity.hasConflict)));
+    const equityUnknown = equityEstimate && equityEstimate.directEquity && equityEstimate.directEquity.status === 'unknown';
+    const ageMin = shotTime != null ? (Date.now() - shotTime) / 60000 : null;
+    const retainedStops = selectedAcct ? S.positions.filter(p => p.acct === selectedAcct.id && !p.closed && p.stop != null).map(p => `${esc(p.side)} ${esc(C.base(p.sym))} @ ${px(p.entry)}: ${px(p.stop)}`) : [];
+    if (selectedAcct && r.positionCoverage === 'complete') for (const q of C.planSync(S.positions.filter(p => p.acct === selectedAcct.id && !p.closed), r.positions, r.closedRows).add) { const pl = C.matchPlanned(S.planned.filter(x => x.acct === selectedAcct.id), q); if (pl && pl.stop != null) retainedStops.push(`${esc(q.side)} ${esc(C.base(q.sym))} @ ${px(q.entry)}: ${px(pl.stop)} (planned)`); }
     $('#impPreview').innerHTML = `<div class=kv>
-        <div><span>Account</span>${esc(A.label || '—')}</div><div><span>Equity</span>${A.equity != null ? usd(A.equity) : '—'}</div>
+        <div><span>Account</span>${esc(A.label || '—')}</div><div><span>Equity</span>${A.equity != null ? A.equitySource === 'manual-screenshot' ? esc(A.equityManualRaw || usd(A.equity)) : usd(A.equity) : '—'}${A.equitySource === 'manual-screenshot' ? ' <span class=mu>(entered manually from screenshot)</span>' : ''}</div>
         <div><span>Daily loss limit</span>${A.dailyLimit != null ? usd(A.dailyLimit) : '—'}</div><div><span>Drawdown limit</span>${A.drawdownLimit != null ? usd(A.drawdownLimit) : '—'}</div>
-        <div><span>Open P&amp;L (sum)</span>${r.upnlSum != null ? usd(r.upnlSum) : '— (not on screen)'}</div><div><span>Balance${A.balanceFrom === 'ledger' ? ' (Ledger, newest row)' : A.balance != null ? ' (read directly)' : ' (equity − open P&amp;L)'}</span>${r.balance != null ? usd(r.balance) : '—'}</div>${A.usedMargin != null ? `<div><span>Used margin</span>${usd(A.usedMargin)}</div>` : ''}</div>
-      ${r.positions.length ? `<table><tr><th>Side</th><th class=num>Qty</th><th class=num>Entry</th><th class=num>P&amp;L</th><th>Stop</th></tr>${r.positions.map(p => `<tr><td class="${p.side === 'short' ? 'dn' : 'up'}">${esc(p.side)} ${esc(p.base)}</td><td class=num>${p.qty}</td><td class=num>${px(p.entry)}</td><td class="num ${cls(p.upnl)}">${p.upnl != null ? usd(p.upnl) : '—'}</td><td>${p.hasSL ? 'SL on platform' : '<b class=dn>NO SL</b>'}${p.hasTP ? ' · TP' : ''}</td></tr>`).join('')}</table>` : ''}
-      ${(() => { const ac = acctById(($('#impAcct') || {}).value) || S.accounts.find(x => x.label && x.label === A.label); if (!ac || !(r.positions.length || r.flat)) return '';
+        <div><span>Target equity</span>${A.target != null ? usd(A.target) : '—'}</div>
+        <div><span>Open P&amp;L (sum)</span>${r.upnlSum != null ? usd(r.upnlSum) : '— (not on screen)'}</div>${A.upnl != null ? `<div><span>Open P&amp;L (read directly)</span>${usd(A.upnl)}</div>` : ''}<div><span>Balance${A.balanceFrom === 'manual-screenshot' ? ' (entered manually from screenshot)' : A.balanceFrom === 'ledger' ? ' (Ledger, newest row)' : A.balanceFrom === 'same-list' ? ' (equity − P&amp;L, same screenshot)' : A.balance != null ? ' (read directly)' : ' (equity − open P&amp;L)'}</span>${r.balance != null ? A.balanceFrom === 'manual-screenshot' ? esc(A.balanceManualRaw || usd(r.balance)) : usd(r.balance) : '—'}</div>${A.usedMargin != null ? `<div><span>Used margin</span>${usd(A.usedMargin)}</div>` : ''}${A.availMargin != null ? `<div><span>Available margin</span>${usd(A.availMargin)}</div>` : ''}</div>
+      ${equityEstimate ? `<div class="small" data-equity-advisory><b>Estimated equity from displayed Balance + UP&amp;L</b><br>Balance ${esc(equityEstimate.balanceRaw)} USD + UP&amp;L ${esc(equityEstimate.pnlRaw)} USD = ${esc(equityEstimate.estimateRaw)} USD${equityConflict ? '<br><b class=warn>Warning: displayed direct equity conflicts with this estimate. Check the screenshot; neither is verified.</b>' : equityUnknown ? '<br><b class=warn>Warning: a direct equity reading is unclear. Check the screenshot; this estimate is not verified.</b>' : ''}<br><span class=mu>On-device review only. Displayed Balance or UP&amp;L may be rounded, so this estimate is approximate. It is not automatically saved, used for syncing, or used to replace any account value.</span></div>` : ''}
+      ${showManualAccountAction ? `<p class=small><button class="btn sm" type=button id=manualAccountOpen>Enter missing Balance/Equity</button><br><span class=mu>Only missing values from one selected non-order account screenshot can be entered. Ambiguous readings cannot be overridden.</span></p>` : ''}
+      ${r.positions.length ? `<table><tr><th>Side</th><th class=num>Qty</th><th class=num>Entry</th><th class=num>P&amp;L</th><th>Stop</th></tr>${r.positions.map(p => `<tr><td class="${p.side === 'short' ? 'dn' : 'up'}">${esc(p.side)} ${esc(p.base)}</td><td class=num>${p.qty}</td><td class=num>${px(p.entry)}</td><td class="num ${cls(p.upnl)}">${p.upnl != null ? usd(p.upnl) : '—'}</td><td>${p.hasSL ? 'SL on platform' : p.slEvidence === false ? '<b class=dn>No SL shown</b>' : '<span class=warn>SL not read</span>'}${p.hasTP ? ' · TP' : ''}</td></tr>`).join('')}</table>` : ''}
+      ${(() => { const ac = selectedAcct; if (!ac || incomplete || !(r.positions.length || r.flat)) return '';
         const P = C.planSync(S.positions.filter(p => p.acct === ac.id && !p.closed), r.positions, r.closedRows);
-        const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} @ ${px(q.entry)}${C.matchPlanned(S.planned.filter(x => x.acct === ac.id), q) ? ' <b>= your planned setup: becomes live</b>' : ''}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} @ ${px(k.pos.entry)}`));
-        P.close.forEach(c => li.push(`<b class=dn>− Closed</b> ${esc(c.pos.side)} ${c.pos.qty} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result counted in balance'}`));
+        const li = []; P.add.forEach(q => li.push(`<b class=up>+ New</b> ${esc(q.side)} ${q.qty} ${esc(C.base(q.sym))} @ ${px(q.entry)}${C.matchPlanned(S.planned.filter(x => x.acct === ac.id), q) ? ' <b>= your planned setup: becomes live</b>' : ''}`)); P.partial.forEach(k => li.push(`<b class=warn>~ Partly closed</b> ${esc(k.pos.side)} ${k.closedQty} of ${C.openQty(k.pos)} ${esc(C.base(k.pos.sym))} @ ${px(k.pos.entry)}`));
+        P.close.forEach(c => li.push(`<b class=dn>− Closed in app</b> ${esc(c.pos.side)} ${C.openQty(c.pos)} ${esc(C.base(c.pos.sym))} @ ${px(c.pos.entry)}${c.row ? ` · result <span class="${cls(c.row.realized)}">${usd(c.row.realized)}</span>` : ' · result not read'}`));
         return `<p class=small><b>Changes:</b> ${li.length ? '' : 'none to positions'}${P.keep.length ? ` · ${P.keep.length} unchanged` : ''}</p>${li.length ? '<div class=small>' + li.join('<br>') + '</div>' : ''}`; })()}
-      ${(() => { const ac = impAcctGuess(A); if (!ac) return ''; const K = correctionPlan(ac, r); if (!K.length) return '';
+      ${retainedStops.length ? `<p class=small><b>Saved and planned stops to verify on your platform:</b><br>${retainedStops.join('<br>')}</p>` : ''}
+      ${(() => { const ac = selectedAcct; if (!ac) return ''; const K = correctionPlan(ac, r); if (!K.length) return '';
         return `<p class=small><b>Corrections to closed trades</b> (your screenshot wins over the log; old values kept):<br>${K.map(c => `<b class=warn>✎ Fixes</b> ${esc(c.pos.side)} ${c.pos.qty} ${esc(C.base(c.pos.sym))} @ ${px(c.pos.entry)} closed ${fmtTime(c.pos.closed.t, true)}: exit ${c.from.price != null ? px(c.from.price) : '—'} → <b>${px(c.price)}</b>, result ${c.from.realized != null ? usd(c.from.realized) : '—'} → <b>${usd(c.realized != null ? c.realized : C.realizedFor(c.pos, c.pos.qty, c.price, c.t))}</b> · from ${esc(c.by)}`).join('<br>')}</p>`; })()}
-      ${(() => { const ac = impAcctGuess(A); if (!ac || !(r.orders || []).some(o => (o.type === 'stop' || o.type === 'take-profit') && o.status !== 'working')) return '';
-        const P = orderFillPlan(ac, r), li = P.actions.map(a => `<b class=${a.order.type === 'stop' ? 'dn' : 'up'}>${a.full ? '✓ Closes' : '~ Partly closes'}</b> ${esc(a.pos.side)} ${a.pos.qty} ${esc(C.base(a.pos.sym))} @ ${px(a.pos.entry)}: ${a.order.type === 'stop' ? 'stop' : 'take-profit'} ${a.qty} @ ${px(a.price)}${a.priceKnown ? '' : ' <span class=warn>(order price; a stop can fill worse: a Trades screenshot gives the real fill)</span>'} · matched by ${esc(a.by)}${a.order.orderId ? ' · ID ' + esc(a.order.orderId) : ''}${a.t ? '' : ' · <span class=warn>fill time not on screen: dated at the screenshot</span>'}`)
-          .concat(P.skipped.map(k => `<span class=mu>Skipped ${esc(k.order.type)} ${k.order.qty} @ ${px(k.order.price)}: ${esc(k.why)}</span>`));
-        return li.length ? `<p class=small><b>Take-profit / stop fills:</b><br>${li.join('<br>')}</p>` : ''; })()}
       ${(r.orders || []).length ? `<p class=small><b>Orders read</b> (not positions):<br>${r.orders.map(o => `${o.type === 'limit' ? 'Limit' : o.type === 'market' ? 'Market' : esc(o.type)} ${o.side === 'long' ? 'buy' : 'sell'} ${o.qty} ${esc(o.base)} @ ${px(o.price)} · <b class="${o.status === 'filled' ? 'up' : o.status === 'cancelled' ? 'mu' : 'warn'}">${o.status === 'working' ? 'working, ' + (o.filledPct || 0) + '% filled' : o.status === 'partial' ? o.filledPct + '% filled' : o.status || 'status not on screen'}</b>${o.tp != null ? ' · TP ' + px(o.tp) : ''}${o.sl != null ? ' · SL ' + px(o.sl) : ' · <b class=dn>no SL read</b>'}${o.openedMs ? ' · placed ' + fmtTime(o.openedMs, true) : ''}`).join('<br>')}</p>` : ''}
       ${r.leverage && Object.keys(r.leverage).length ? `<p class=small><b>Leverage read:</b> ${Object.entries(r.leverage).map(([k, v]) => esc(k) + ' ' + v + 'x').join(', ')} (saved to the account)</p>` : ''}
       ${r.ledger && r.ledger.length ? `<p class=small><b>Ledger read:</b> ${r.ledger.length} row(s)${r.ledgerOk ? ', every running balance adds up' : ''} · swap fees ${usd(r.ledgerSum.swap)} · trades and commissions ${usd(r.ledgerSum.trade)}</p>` : ''}
       ${r.fills.length ? `<p class=small><b>Trades read:</b> ${r.fills.length} fill(s) · ${r.fills.filter(f => f.action === 'open' && f.t != null).length} opening today${r.fills.some(f => f.t == null) ? ' (older dated rows kept for history)' : ''}</p>` : ''}
       ${r.details.length ? `<table><tr><th>Position details read</th><th class=num>Size</th><th class=num>Stop</th><th class=num>Target</th><th>Opened</th></tr>${r.details.map(d => `<tr><td class="${d.side === 'short' ? 'dn' : 'up'}">${esc(d.side)} ${esc(d.base)}${d.entry ? ' @ ' + px(d.entry) : ''}</td><td class=num>${d.qty}</td><td class=num>${d.sl != null ? px(d.sl) : '—'}</td><td class=num>${d.tp != null ? px(d.tp) : '—'}</td><td class=small>${d.openedMs ? fmtTime(d.openedMs, true) : '—'}</td></tr>`).join('')}</table>` : ''}
+      ${r.ocrReviews.map(v => `<div class="small" style="margin:10px 0"><b>Screenshot ${v.index + 1}: ${v.detail ? `${esc(v.detail.side)} ${v.detail.qty} ${esc(v.detail.base)}` : esc(v.summary)}</b>${v.detail ? `<br>Stop: <b>${v.shown.sl != null ? esc(v.shown.sl) : 'not read'}</b> · Target: <b>${v.shown.tp != null ? esc(v.shown.tp) : 'not read'}</b>${v.shown.entry != null ? ' · Entry: ' + esc(v.shown.entry) : ''}<br><span class=mu>${v.manual ? 'Entered manually from this screenshot; not OCR.' : v.enhanced ? 'Checked with an enhanced on-device reading.' : 'Read from the original image.'} Compare every digit and the position with your platform.</span>` : '<br><span class=mu>Check the original. If a position, stop, target or other important detail was missed, do not sync; retake or enter it manually.</span>'}${v.manualRequest ? `<br><button class="btn sm" type=button data-manual-shot="${v.index}">Enter missing stop and target</button><br><span class=mu>Manual entry is available only because this batch includes a complete readable positions list. Your input still must match the selected position and pass the existing safety checks.</span>` : ''}${v.url ? `<details><summary>View original screenshot ${v.index + 1}</summary><img src="${esc(v.url)}" alt="Original screenshot ${v.index + 1} for comparison" style="display:block;max-width:100%;height:auto"></details>` : ''}<label class="chk"><input type=checkbox data-imp-shot-confirm="${v.index}"> I compared this screenshot with the platform and the preview, and no important details were missed.</label></div>`).join('')}
       ${!r.positions.length && !r.flat ? '<p class=small>No position list in these screenshots: your open positions stay as they are' + (r.details.length ? '; details are added to the matching ones.' : '.') + '</p>' : ''}
+      ${incomplete ? '<p class="small warn"><b>Not ready to sync:</b> the open-position list could not be verified as complete. Include a clear screenshot showing the positions count and every open position. Nothing will be changed until the full list can be reviewed.</p>' : ''}
+      ${r.accountConflict ? '<p class="small warn"><b>Not ready to sync:</b> these screenshots appear to name different accounts. Import one account at a time.</p>' : ''}
+      ${accountMismatch ? '<p class="small warn"><b>Not ready to sync:</b> the selected account does not match the account named in the screenshot.</p>' : ''}
+      ${reviewIssues.map(issue => `<p class="small warn"><b>Not ready to sync:</b> ${esc(issue)}</p>`).join('')}
       ${r.warnings.map(w => `<p class="small warn">${esc(w)}</p>`).join('')}
-      ${ageMin > 10 ? `<p class="small warn">These screenshots are ${Math.round(ageMin)} min old. Prices may have moved; the balance is still right if no trade closed since.</p>` : ''}
-      <div class=row style="margin-top:8px"><select id=impAcct>${opts}${newOpt}</select><button class="btn pri" id=impGo>Looks right: sync</button></div>
-      <p class="small mu">Sync sets this account's equity, balance, daily loss limit, drawdown limit and target to your platform's, replaces its open positions with these (keeping your notes on ones that match), and marks missing ones as closed on your platform.</p>`;
+      ${text.includes('\u001e') && r.balance == null ? '<p class="small mu">Balance is not inferred from different screenshots; an existing balance stays unchanged unless a direct balance is read.</p>' : ''}
+      ${ageMin > 10 ? `<p class="small warn">The oldest file timestamp is approximately ${Math.round(ageMin)} min old. Verify that the position list and account figures are still current.</p>` : ''}
+      <p class="small mu">File timestamps may not be the capture time. Check that every screenshot shows the current account and positions.</p>
+      <label class="chk small"><input type=checkbox id=impConfirm> I checked that the account, balances, open positions, stop and target prices above match the platform right now.</label>
+      <div class=row style="margin-top:8px"><select id=impAcct aria-label="Account for screenshot import">${opts}${newOpt}</select><button class="btn pri" id=impGo disabled>Looks right: sync</button></div>
+      <p class="small mu">Sync updates this account's app records and marks missing positions as closed in the app. It never opens, closes, or changes a trade on the exchange.</p>`;
+    $('#impAcct').onchange = e => showImport(text, shotTime, e.target.value);
+    const updateImportReady = () => { const checks = [...$('#impPreview').querySelectorAll('[data-imp-shot-confirm]')]; $('#impGo').disabled = blocked || !$('#impConfirm').checked || checks.length !== r.ocrReviews.length || checks.some(c => !c.checked); };
+    $('#impConfirm').onchange = updateImportReady;
+    $('#impPreview').querySelectorAll('[data-imp-shot-confirm]').forEach(c => { c.onchange = updateImportReady; });
+    $('#impPreview').querySelectorAll('[data-manual-shot]').forEach(b => { b.onclick = () => askMissingStopDetails(Number(b.dataset.manualShot)); });
+    const accountManualButton = $('#manualAccountOpen'); if (accountManualButton) accountManualButton.onclick = () => askMissingAccountValues();
     $('#impGo').onclick = () => applyImport();
   }
   const appliedOrderIds = acct => S.positions.filter(p => p.acct === acct.id).flatMap(p => (p.partials || []).map(x => x.orderId).concat(p.closed ? [p.closed.orderId] : [])).filter(Boolean);
@@ -2038,9 +2504,21 @@
     return plan;
   }
   function applyImport() {
+    if (!lastImport || lastImport.blocked || !$('#impConfirm').checked) { alert('This import is not ready to sync. Check the warnings, selected account and current-data confirmation.'); return; }
+    if (lastImport.r.orderEvidence || (lastImport.r.orders || []).length) { alert('Order-sheet sync is paused. Import a current position list without order screenshots.'); return; }
+    if (lastImport.r.historyEvidence || lastImport.r.fills.length || (lastImport.r.closedRows || []).length) { alert('Trade-history and closed-position result sync are paused.'); return; }
+    if (lastImport.r.ledgerEvidence || (lastImport.r.ledger || []).length || lastImport.r.account.balanceFrom === 'ledger') { alert('Ledger sync is paused until source timestamps can be verified.'); return; }
+    if (lastImport.r.positionEvidenceConflict || lastImport.r.positionCoverage === 'incomplete') { alert('This screenshot batch does not prove a complete current position list. Retake it before syncing.'); return; }
+    const shotChecks = [...$('#impPreview').querySelectorAll('[data-imp-shot-confirm]')];
+    if (shotChecks.length !== (lastImport.r.ocrReviews || []).length || shotChecks.some(c => !c.checked)) { alert('Compare and confirm each screenshot before syncing.'); return; }
+    if ($('#impAcct').value !== lastImport.choice || importStateSignature() !== lastImport.signature) {
+      const { text, shotTime } = lastImport; showImport(text, shotTime, $('#impAcct').value);
+      alert('Your Desk changed since this preview. Review the refreshed import before syncing.'); return;
+    }
     const { r, shotTime } = lastImport, A = r.account, now = Date.now();
     let acct;
     const sel = $('#impAcct').value;
+    if (importReviewIssues(sel === 'new' ? null : acctById(sel), r, sel === 'new').length) { alert('This import is not ready to sync. Check its warnings before continuing.'); return; }
     if (sel === 'new') {
       const size = C.sizeFromLimits(A.plan, A.drawdownLimit, A.target);
       acct = { id: uid(), plan: A.plan, size, fee: (C.PLANS[A.plan].price || {})[size] || 0, addon90: false, phase: A.phase || 'eval', profile: 'steady', created: now, label: A.label || '' };
@@ -2051,11 +2529,11 @@
     // Snapshot sync: the platform's numbers are the truth as of NOW (balance = equity - open P&L doesn't move with price).
     const t = now;
     const before = C.accountState(acct, S.positions, prices(), now, { orders: S.planned });
-    if (r.balance != null) acct.anchor = { t, bal: r.balance };
+    if (r.balance != null) acct.anchor = Object.assign({ t, bal: r.balance }, A.balanceFrom === 'manual-screenshot' ? { source: 'manual-screenshot' } : {});
     if (A.dailyLimit != null) acct.dayStartOverride = { reset: C.lastReset(t, acct.resetMin), bal: A.dailyLimit / (1 - C.planOf(acct).mdl) };
     if (A.drawdownLimit > 0) acct.ddLimit = A.drawdownLimit;
     if (A.target > 0 && acct.phase === 'eval') acct.targetEq = A.target;
-    if (A.equity > 0) acct.platformEq = { t, v: A.equity, appBefore: before.equity };
+    if (A.equity > 0) acct.platformEq = Object.assign({ t, v: A.equity, appBefore: before.equity }, A.equitySource === 'manual-screenshot' ? { source: 'manual-screenshot' } : {});
     if (r.leverage && Object.keys(r.leverage).length) acct.leverage = Object.assign({}, acct.leverage, r.leverage);   // leverage as the venue shows it
     // Use the data given (owner's choice, Nov 1): when the screenshot shows the position list (or a flat account),
     // the app's open positions become exactly that list. A match (side + coin + entry) keeps his notes/stop/TP and
@@ -2070,14 +2548,14 @@
     if (reconcile) {
       // Same plan the preview showed (C.planSync), so what he approved is exactly what is applied.
       plan = C.planSync(open, r.positions, r.closedRows);
-      for (const k of plan.keep) { k.pos.platformSL = k.snap.hasSL; k.pos.platformTP = k.snap.hasTP; }
+      for (const k of plan.keep) { k.pos.platformSL = k.snap.slEvidence != null ? k.snap.slEvidence : null; k.pos.platformTP = k.snap.tpEvidence != null ? k.snap.tpEvidence : null; }
       // Partly closed on the platform: keep the history, add the closed part (its result is already in the imported balance).
-      for (const k of plan.partial) { const p = k.pos; p.partials = (p.partials || []).concat({ t: t - 1, qty: k.closedQty, price: null, realized: 0, resultKnown: false, synced: true }); p.platformSL = k.snap.hasSL; p.platformTP = k.snap.hasTP; }
+      for (const k of plan.partial) { const p = k.pos; p.partials = (p.partials || []).concat({ t: t - 1, qty: k.closedQty, price: null, realized: 0, resultKnown: false, synced: true }); p.platformSL = k.snap.slEvidence != null ? k.snap.slEvidence : null; p.platformTP = k.snap.tpEvidence != null ? k.snap.tpEvidence : null; }
       for (const q of plan.add) {
         const pl = C.matchPlanned(S.planned.filter(x => x.acct === acct.id), q);
-        if (pl) { S.positions.push(liveFromPlan(pl, { entry: q.entry, qty: q.qty, stop: pl.stop, opened: t - 2, openedUnknown: true, source: 'screen-import' })); S.planned = S.planned.filter(x => x.id !== pl.id); continue; }
+        if (pl) { const p = liveFromPlan(pl, { entry: q.entry, qty: q.qty, stop: pl.stop, opened: t - 2, openedUnknown: true, source: 'screen-import' }); p.platformSL = q.slEvidence != null ? q.slEvidence : null; p.platformTP = q.tpEvidence != null ? q.tpEvidence : null; S.positions.push(p); S.planned = S.planned.filter(x => x.id !== pl.id); continue; }
         S.positions.push({ id: uid(), acct: acct.id, sym: q.sym, side: q.side, qty: q.qty, entry: q.entry, stop: null, origStop: null, tp1: null, tp2: null,
-          tf: 15, setup: 'Imported', thesis: '', opened: t - 2, openedUnknown: true, partials: [], stopHist: [], platformSL: q.hasSL, platformTP: q.hasTP, source: 'screen-import' });
+          tf: 15, setup: 'Imported', thesis: '', opened: t - 2, openedUnknown: true, partials: [], stopHist: [], platformSL: q.slEvidence != null ? q.slEvidence : null, platformTP: q.tpEvidence != null ? q.tpEvidence : null, source: 'screen-import' });
       }
       for (const { pos: p, row } of plan.close)
         p.closed = { t: t - 1, price: row ? row.exit : null, realized: row ? row.realized : 0, resultKnown: !!row,
@@ -2121,18 +2599,17 @@
     let setN = 0; const unmatched = [];
     for (const d of r.details) {
       let cands = S.positions.filter(p => p.acct === acct.id && !p.closed && p.side === d.side && p.sym === d.sym && Math.abs(C.openQty(p) - d.qty) < 1e-9);
-      if (d.entry != null && cands.some(p => C.samePx(p.entry, d.entry))) cands = cands.filter(p => C.samePx(p.entry, d.entry));
-      const p = cands.find(x => x.stop == null) || cands[0];
-      if (!p) { unmatched.push(`${d.side} ${d.qty} ${d.base}`); continue; }
+      if (d.entry != null) cands = cands.filter(p => C.samePx(p.entry, d.entry));
+      if (cands.length !== 1) { unmatched.push(`${d.side} ${d.base}: detail did not match exactly one position`); continue; }
+      const p = cands[0];
       if (d.orderId && !p.orderId) p.orderId = d.orderId;
-      if (cands.length > 1) unmatched.push(`${d.qty} ${d.base}: ${cands.length} positions share this size, applied to one; check them`);
       if (d.sl != null && d.sl !== p.stop) {
         const wider = p.stop != null && (p.side === 'short' ? d.sl > p.stop : d.sl < p.stop);
-        if (wider) p.widened = true;
-        p.stopHist.push({ t, stop: d.sl, why: wider ? 'moved farther on platform (import)' : 'from platform (import)' });
+        if (wider) { unmatched.push(`${d.base}: screenshot stop is farther away; check the platform`); continue; }
+        (p.stopHist = p.stopHist || []).push({ t, stop: d.sl, why: d.manual ? 'entered manually from platform screenshot' : 'from platform (import)' });
         p.stop = d.sl; if (p.origStop == null) p.origStop = d.sl;
       }
-      if (d.tp != null && d.tp !== p.tp1) { (p.tpHist = p.tpHist || []).push({ t, tp: d.tp, why: 'from platform (import)' }); p.tp1 = d.tp; }
+      if (d.tp != null && d.tp !== p.tp1) { (p.tpHist = p.tpHist || []).push({ t, tp: d.tp, why: d.manual ? 'entered manually from platform screenshot' : 'from platform (import)' }); p.tp1 = d.tp; }
       if (d.sl != null) p.platformSL = true; if (d.tp != null) p.platformTP = true;
       if (d.openedMs && d.openedMs <= now) { p.opened = d.openedMs; p.openedUnknown = false; }
       setN++;
@@ -2141,8 +2618,8 @@
     // (it's compared with the live estimate now; an older shot would bake price drift into the calibration).
     const withPx = r.positions.find(q => q.price > 0) || r.details.find(q => q.price > 0);
     if (withPx && now - shotTime < 2 * 60000) { const qq = pnlQuote(withPx.sym); if (qq.raw && Math.abs(withPx.price / qq.raw - 1) < 0.01) S.calib.push({ t, sym: withPx.sym, prop: withPx.price, est: qq.raw }); }
-    save(); ensureFeeds(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impText').value = ''; $('#impText').hidden = true;
-    const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' size updated', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${ordN.placed ? ` · ${ordN.placed} plan(s) now working orders` : ''}${ordN.added ? ` · ${ordN.added} working order(s) added` : ''}${ordN.filled ? ` · ${ordN.filled} order(s) filled → open` : ''}${ordN.cancelled ? ` · ${ordN.cancelled} cancelled order(s) removed` : ''}${L.fills ? ` · ${L.fills} new fill(s)` : ''}${L.story ? ` · ${L.story} open time(s) from fills` : ''}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} off, now matched` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
+    save(); ensureFeeds(); clearImportShots(); lastImport = null; $('#impPreview').innerHTML = ''; $('#impText').value = ''; $('#impText').hidden = true;
+    const L = lastSyncSummary; $('#impStatus').innerHTML = `<b class=up>Synced ${esc(acct.label || 'account')}</b>: ${reconcile ? [L.add && L.add + ' new', L.partial && L.partial + ' size updated', L.close && L.close + ' closed', L.keep && L.keep + ' unchanged'].filter(Boolean).join(', ') || 'no positions' : 'positions unchanged'}${ordN.placed ? ` · ${ordN.placed} plan(s) now working orders` : ''}${ordN.added ? ` · ${ordN.added} working order(s) added` : ''}${ordN.filled ? ` · ${ordN.filled} order(s) filled → open` : ''}${ordN.cancelled ? ` · ${ordN.cancelled} cancelled order(s) removed` : ''}${L.fills ? ` · ${L.fills} new fill(s)` : ''}${L.story ? ` · ${L.story} open time(s) from fills` : ''}${L.diff != null ? ` · app was ${L.diff >= 0 ? '+' : ''}${usd(L.diff)} different from the screenshot before sync (live prices can move)` : ''}${setN ? `, ${setN} position detail(s)` : ''}.` + (unmatched.length ? ` <span class=warn>Not matched: ${esc(unmatched.join('; '))}</span>` : '');
     posFormDirty = true; autoPush('import'); toast('Synced. The coach can score it.', 'coach', 'View in Coach');
   }
 
@@ -2288,12 +2765,12 @@
           </details></div>`;
       }).join('');
       $('#coachBox').innerHTML = `<div class=pair><div class=pair-main>${simpleReviews || '<div class=card><h3>Account review</h3><p class=mu>No open accounts.</p></div>'}</div><div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div></div>
-        ${simpleCards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
+        ${simpleCards || '<div class=card><p class=mu>No open positions. Log one on Desk and the coach will score it here.</p></div>'}
         ${marketCardHtml()}`;
       return;
     }
     $('#coachBox').innerHTML = reviews + `<div class=card><h3>Account risk</h3>${acctHtml || '<p class=mu>No open accounts.</p>'}</div>
-      ${cards || '<div class=card><p class=mu>No open positions. Log one on the Positions tab and the coach will score it here.</p></div>'}
+      ${cards || '<div class=card><p class=mu>No open positions. Log one on Desk and the coach will score it here.</p></div>'}
       ${marketCardHtml()}
 
       <p class="small mu">Score 1–5 is a rule checklist (stop, breach line, 1h/4h structure, entry-TF break, levels before target, your BE rule), not a win probability. It never suggests widening a stop. Updates every few seconds while this page is open; it does not watch when the app is closed.</p>`;
@@ -2327,16 +2804,50 @@
     saveAndSync('stops'); renderAll(true);
   });
   // Monitor hand-off. Build the watch file (positions, stops, limits; no keys).
-  function buildWatch() {
-    const keep = ['id', 'label', 'plan', 'size', 'phase', 'profile', 'leverage', 'resetMin', 'target', 'mdl', 'mdd', 'ddLimit', 'targetEq', 'dayResetAt', 'fills', 'anchor', 'dayStartOverride', 'created'];
-    const accts = liveAccts().map(a => Object.fromEntries(keep.filter(k => a[k] !== undefined).map(k => [k, a[k]])));
-    const pos = S.positions.filter(p => !p.closed && accts.some(a => a.id === p.acct)).map(p => ({ id: p.id, acct: p.acct, sym: p.sym, side: p.side, qty: p.qty, entry: p.entry,
-      stop: p.stop, origStop: p.origStop, tp1: p.tp1, tp2: p.tp2, tf: p.tf, opened: p.opened, openedUnknown: !!p.openedUnknown, platformSL: !!p.platformSL, partials: p.partials || [], partialAt: p.partialAt != null ? p.partialAt : null }));
-    return { v: 1, updated: Date.now(), symbols: T().symbols, rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice(), benched: benchedKeys() }, calib: S.calib.slice(-10), accounts: accts, positions: pos, orders: S.planned.filter(x => x.status === 'placed').map(x => ({ acct: x.acct, sym: x.sym, side: x.side, qty: x.qty, entry: x.entry, stop: x.stop, tp1: x.tp1, status: 'placed', placedAt: x.placedAt })) };
+  const WATCH_SALT_KEY = 'kpd_watch_salt';
+  function monitorSalt() {
+    let salt = localStorage.getItem(WATCH_SALT_KEY);
+    if (!/^[a-f0-9]{64}$/i.test(salt || '')) {
+      const bytes = new Uint8Array(32); crypto.getRandomValues(bytes); salt = [...bytes].map(x => x.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem(WATCH_SALT_KEY, salt);
+    }
+    return salt;
+  }
+  async function monitorAlias(kind, rawId) {
+    if (!['account', 'position', 'paper-account', 'paper-trade'].includes(kind) || !['string', 'number'].includes(typeof rawId) || String(rawId).length > 128) throw new Error('invalid local join key');
+    if (!crypto.subtle || typeof TextEncoder === 'undefined') throw new Error('secure local hashing unavailable');
+    const bytes = new TextEncoder().encode(monitorSalt() + '|' + kind + '|' + String(rawId));
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return 'pd_' + [...digest].slice(0, 16).map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  async function buildWatch() {
+    // Backup values are user-controlled. Hash join keys locally and recursively allowlist model/risk fields.
+    const sourceAccounts = liveAccts(), accountIds = new Map();
+    for (const a of sourceAccounts) accountIds.set(String(a.id), await monitorAlias('account', a.id));
+    const accts = sourceAccounts.map(a => Object.assign({}, a, { id: accountIds.get(String(a.id)) }));
+    const pos = await Promise.all(S.positions.filter(p => !p.closed && accountIds.has(String(p.acct))).map(async p =>
+      Object.assign({}, p, { id: await monitorAlias('position', p.id), acct: accountIds.get(String(p.acct)) })));
+    const orders = await Promise.all(S.planned.filter(x => x.status === 'placed' && accountIds.has(String(x.acct))).map(async x =>
+      Object.assign({}, x, { acct: accountIds.get(String(x.acct)) })));
+    return C.modelWatchProjection({ v: 1, updated: Date.now(), symbols: T().symbols,
+      rules: { beAt1R: !!T().beAt1R, traits: (T().alertTraits || []).slice(), benched: benchedKeys() },
+      calib: S.calib.slice(-10), accounts: accts, positions: pos, orders });
+  }
+  async function buildPaperWatch() {
+    const sourceAccounts = S.paperAccts.filter(a => a && a.status === 'active'), accountIds = new Map();
+    for (const a of sourceAccounts) accountIds.set(String(a.id), await monitorAlias('paper-account', a.id));
+    const accounts = sourceAccounts.map(a => ({ id: accountIds.get(String(a.id)), plan: a.plan, size: a.size, phase: a.phase, profile: a.profile, status: 'active' }));
+    const trades = await Promise.all(S.paper.filter(t => t && !t.remote).map(async t => ({
+      id: await monitorAlias('paper-trade', t.id), acct: accountIds.get(String(t.acct)), sym: t.sym, side: t.side, status: t.status,
+      entry: t.entry, stop: t.stop, stop0: t.stop0, target: t.target, opened: t.opened, placedAt: t.placedAt,
+      closed: t.closed, exit: t.exit, qty: t.qty, setupKey: t.setupKey
+    })));
+    return C.modelPaperProjection({ updated: Date.now(), accounts, trades });
   }
   // Auto-send: GitHub fine-grained token (this repo only, Contents read/write), kept in its own key so backups never include it.
   const GH_KEY = 'kpd_gh';
-  const ghRepo = () => (T().monRepo || '').trim();
+  const GH_REPO_KEY = 'kpd_gh_repo';
+  const ghRepo = () => { try { const v = (localStorage.getItem(GH_REPO_KEY) || '').trim(); return /^[\w.-]+\/[\w.-]+$/.test(v) ? v : ''; } catch (e) { return ''; } };
   const ghFile = () => `https://api.github.com/repos/${ghRepo()}/contents/monitor/watch.json`;
   const ghToken = () => { try { return localStorage.getItem(GH_KEY) || ''; } catch (e) { return ''; } };
   async function pushFile(file, obj, msg) {
@@ -2354,7 +2865,8 @@
     const tok = ghToken(); if (!tok) return { ok: false, msg: 'no key' };
     if (!/^[\w.-]+\/[\w.-]+$/.test(ghRepo())) return { ok: false, msg: 'set your monitor repo (owner/name) in Settings' };
     const H = { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json' };
-    const body = JSON.stringify(buildWatch(), null, 1);
+    let body; try { body = JSON.stringify(await buildWatch(), null, 1); }
+    catch (e) { return { ok: false, msg: 'secure local model payload could not be prepared' }; }
     const b64 = btoa(unescape(encodeURIComponent(body)));
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -2376,7 +2888,7 @@
   }
   $('#sendMon').onclick = async () => {
     if (ghToken()) { $('#monStatus').textContent = 'Sending…'; const r = await pushWatch('manual'); $('#monStatus').innerHTML = r.ok ? `<b class=up>Monitor updated ${fmtTime(Date.now())}</b>` : `<span class=dn>${esc(r.msg)}</span>`; return; }
-    const txt = JSON.stringify(buildWatch(), null, 1);
+    let txt; try { txt = JSON.stringify(await buildWatch(), null, 1); } catch (e) { $('#monStatus').textContent = 'Could not create a secure monitor model payload on this device.'; return; }
     try { await navigator.clipboard.writeText(txt); $('#monStatus').innerHTML = '<b class=up>Copied.</b> On GitHub: select all, paste, then "Commit changes". (Add a GitHub key in Settings to make this automatic.)'; }
     catch (e) { showModal(`<h3>Copy this</h3><textarea style="min-height:300px">${esc(txt)}</textarea><button class=btn data-close>Close</button>`); }
     if (ghRepo()) window.open(`https://github.com/${ghRepo()}/edit/main/monitor/watch.json`, '_blank'); else alert('Set your monitor repo (owner/name) in Settings first.');
@@ -2438,17 +2950,16 @@
         </ol>
         ${ntTopic() ? '<p class="small mu">Alerts are sent while Prop Desk is open (iPhone pauses web apps in the background). For 24/7 alerts, see the <a href="MONITOR-SETUP.md" target=_blank>24/7 setup guide</a>. Keep the channel name private: anyone with it can read your alerts. <a href="#" id=ntOff>Turn off / new channel</a></p>' : '<p class="small mu">Want alerts even when the app is closed? See the <a href="MONITOR-SETUP.md" target=_blank>24/7 setup guide</a>.</p>'}
       </div>
-      <div class=card><h3>24/7 monitor key</h3><p class=small>Paste a GitHub fine-grained key for <b>your monitor repo only</b>${ghRepo() ? ' (' + esc(ghRepo()) + ')' : ''}, permission <b>Contents: Read and write</b>. Then every import and trade change updates the monitor by itself. The key stays on this phone and is never in backups.</p>
+      <div class=card><h3>24/7 monitor key</h3><p class=small>Paste a GitHub fine-grained key for <b>your monitor repo only</b>${ghRepo() ? ' (' + esc(ghRepo()) + ')' : ''}, permission <b>Contents: Read and write</b>. Then every import and trade change updates the monitor by itself. Screenshots and OCR stay on this device; the private monitor receives only structured trading/model fields with salted opaque account/position keys, not your account labels, personal notes or screenshots. The key and repository destination stay on this phone and outside backups. Re-enter the repo once after this update if it was previously configured.</p>
       <label class=small style="display:block;margin-bottom:6px">Monitor repo (owner/name)<input id=ghRepo value="${esc(ghRepo())}" placeholder="you/your-monitor-repo" style="width:100%"></label><div class=row><input id=ghTok type=password placeholder="${ghToken() ? 'Key saved (paste to replace)' : 'github_pat_…'}" style="flex:1;min-width:180px"><button class="btn sm" id=ghSave>Save &amp; test</button>${ghToken() ? '<button class="btn sm bad" id=ghDel>Remove</button>' : ''}</div><p class=small id=ghStat>${S.lastPush ? 'Last update ' + fmtTime(S.lastPush, true) : ''}</p></div>
       <div class=card><h3>Shared learning pool</h3>
-      <p class=small>Optional. Your accounts, sizes, balances and notes stay on this device. Nothing here places a trade or changes your size, alerts, or trust and bench marks.</p>
+      <p class=small>Optional and separate from the private monitor sync above. Shared learning never receives account labels, account IDs, sizes, balances, notes, screenshots or OCR text. Nothing here places a trade or changes your size, alerts, or trust and bench marks.</p>
       <label class=chk><input type=checkbox id=stShareRes ${shareWanted('shareResults') ? 'checked' : ''}> Add my closed trades to the shared pool</label>
       <p class="small mu">Each closed trade sends the setup type, model version, result in R, and the tag. The source is hand paper, automatic paper, or live. Paper trades also send the coin, timeframe, long or short, entry, stop, target, and the open and close times rounded to the hour, so they can be checked later on public candles. Live trades send no prices and no times. Never the size, dollars, balance, account, or notes. This browser has a random id; the server keeps only a salted hash of it. Only "followed plan" trades are counted.</p>
-      <label class=chk><input type=checkbox id=stShare ${shareWanted('shareLayout') ? 'checked' : ''}> When a screenshot isn't fully read, send its layout</label>
-      <p class="small mu">Layout text only: every number becomes 9, and account numbers and emails are removed. Never the picture, your balances, sizes or prices. Each layout is sent once.</p>
+      <label class=chk><input type=checkbox id=stShare disabled> Screenshot layout sharing is temporarily paused</label>
+      <p class="small mu">For privacy, no OCR text or screenshot layout is sent while this feature is paused. Screenshots are read on this device.</p>
       <p class=small>Anonymous id: <b class=mono>${peekInstall() ? esc(peekInstall().slice(0, 8)) + '…' : 'created when trade sharing is on'}</b> <button class="btn sm" id=stNewId type=button>Reset anonymous id</button></p>
       ${(h => h ? `<p class="small warn">Trade sharing is paused (${esc(h.why)}) until ${esc(new Date(h.until).toISOString().slice(0, 16).replace('T', ' '))} UTC. <button class="btn sm" id=stRetry type=button>Try again</button></p>` : '')(holdOf(SHARE_HOLD))}
-      ${(h => h ? `<p class="small warn">Screenshot layouts were refused by the server (${esc(h.why)}). Copies of the app on other websites can't send layouts. <button class="btn sm" id=stRetryLay type=button>Try layouts again</button></p>` : '')(holdOf(SAMPLE_HOLD))}
       </div>
       <div class=card><h3>Backup</h3><p class=small>Everything lives in this browser only. Export a backup now and then.</p>
       <div class=row><button class=btn id=stExp>Export backup</button><label class="btn">Import<input type=file id=stImp accept=application/json hidden></label><button class="btn bad" id=stClr>Erase all</button></div></div>
@@ -2464,7 +2975,7 @@
     $('#stNewId').onclick = () => { if (!confirm('Reset the anonymous id? This browser will count as a new contributor. Trades already in the pool stay there.')) return; installId(true); renderSettings(); };
     if ($('#stRetry')) $('#stRetry').onclick = () => { clearHold(SHARE_HOLD); sendResults(); renderSettings(); };
     if ($('#stRetryLay')) $('#stRetryLay').onclick = () => { clearHold(SAMPLE_HOLD); renderSettings(); };
-    $('#ghRepo').onchange = e => { const v = e.target.value.trim(); if (/^[\w.-]+\/[\w.-]+$/.test(v)) { T().monRepo = v; save(); } else alert('Use owner/repo, like you/prop-desk.'); };
+    $('#ghRepo').onchange = e => { const v = e.target.value.trim(); if (/^[\w.-]+\/[\w.-]+$/.test(v)) { try { localStorage.setItem(GH_REPO_KEY, v); } catch (x) { alert('Could not store the monitor destination on this device.'); } } else alert('Use owner/repo, like you/prop-desk.'); };
     $('#ghSave').onclick = async () => { const v = $('#ghTok').value.trim(); if (!/^(github_pat_|ghp_)\w+/.test(v)) { alert('That doesn\'t look like a GitHub key.'); return; }
       try { localStorage.setItem(GH_KEY, v); } catch (e) { } $('#ghStat').textContent = 'Testing…'; const r = await pushWatch('key test');
       $('#ghStat').innerHTML = r.ok ? '<b class=up>Works. The monitor now updates automatically.</b>' : `<span class=dn>${esc(r.msg)}</span>`; if (!r.ok) { try { localStorage.removeItem(GH_KEY); } catch (e) { } } };
@@ -2505,8 +3016,8 @@
     if ($('#ntTest')) $('#ntTest').onclick = async () => { $('#ntStat').textContent = 'Sending…'; const ok = await ntSend('Prop Desk test', 'Alerts are working. You\'ll only hear from me when something changes.', 3);
       $('#ntStat').innerHTML = ok ? '<b class=up>Sent. Check ntfy.</b>' : '<b class=dn>Couldn\'t send. Check your connection.</b>'; };
     if ($('#ntOff')) $('#ntOff').onclick = e => { e.preventDefault(); if (confirm('Stop alerts and forget this channel? You can make a new one.')) { try { localStorage.removeItem(NT_KEY); localStorage.removeItem(MEM_KEY); } catch (x) { } renderSettings(); } };
-    $('#stExp').onclick = () => { const b = new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `prop-desk-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
-    $('#stImp').onchange = async e => { try { const j = JSON.parse(await e.target.files[0].text()); if (!Array.isArray(j.accounts) || !Array.isArray(j.positions)) throw 0; if (confirm('Replace current data with this backup?')) { S = Object.assign({}, DEF, j); S.settings = Object.assign({}, DEF.settings, j.settings || {}); save(); location.reload(); } } catch (x) { alert('Not a Prop Desk backup file.'); } };
+    $('#stExp').onclick = () => { const backup = JSON.parse(JSON.stringify(S)); C.scrubMonitorConfig(backup); const b = new Blob([JSON.stringify(backup, null, 1)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `prop-desk-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
+    $('#stImp').onchange = async e => { try { const j = JSON.parse(await e.target.files[0].text()); if (!Array.isArray(j.accounts) || !Array.isArray(j.positions)) throw 0; if (confirm('Replace current data with this backup?')) { S = Object.assign({}, DEF, j); S.settings = Object.assign({}, DEF.settings, j.settings || {}); C.scrubMonitorConfig(S); save(); location.reload(); } } catch (x) { alert('Not a Prop Desk backup file.'); } };
     $('#stClr').onclick = () => { if (confirm('Erase all accounts, positions and settings on this device?')) { localStorage.removeItem(KEY); localStorage.removeItem(INSTALL_KEY); localStorage.removeItem(RESULT_KEY); localStorage.removeItem(SAMPLE_KEY); localStorage.removeItem(SHARE_HOLD); localStorage.removeItem(SAMPLE_HOLD); location.reload(); } };
   }
 
@@ -2524,9 +3035,7 @@
     runCoach();
     if (tab === 'chart') renderChart(true);
     if (tab === 'desk') renderDesk();
-    if (tab === 'paper') renderPaper();
-    if (tab === 'pos') { if (posFormDirty) { renderPosForm(); posFormDirty = false; } renderPositions(); }
-    if (tab === 'coach') renderCoach();
+    if (tab === 'coach') { renderCoach(); renderPaper(); }
     if (tab === 'set' && full) renderSettings();
     refreshSub();
   }
@@ -2537,11 +3046,11 @@
 
   function askShare() {
     if (T().shareConsent === 'yes' || T().shareConsent === 'no') return;
-    const res = shareWanted('shareResults'), lay = shareWanted('shareLayout');
+    const res = shareWanted('shareResults');
     showModal(`<div data-consent><h3>Share anonymous results?</h3>
       <p class=small>Nothing is sent until you save this choice. Untick anything you don't want to share. You can change it any time in Settings. It does not change your trade size, alerts, or trust and bench marks.</p>
       <label class=chk style="align-items:flex-start"><input type=checkbox id=cRes ${res ? 'checked' : ''} style="margin-top:3px"> <span><b>Closed trades.</b> Setup type, model version, result in R, tag, and whether it was a hand paper trade, an automatic paper trade, or live. Paper trades also send the coin, timeframe, long or short, entry, stop, target, and open/close times rounded to the hour (so they can be checked on public candles). Live trades send no prices. Never size, dollars, balance, account, or notes. A random id for this browser is included; the server stores only a salted hash.</span></label>
-      <label class=chk style="align-items:flex-start"><input type=checkbox id=cLay ${lay ? 'checked' : ''} style="margin-top:3px"> <span><b>Screenshot layouts.</b> Only when a screenshot isn't fully read. The text layout, with every number replaced by 9 and emails and account numbers removed. Never the picture.</span></label>
+      <label class=chk style="align-items:flex-start"><input type=checkbox id=cLay disabled style="margin-top:3px"> <span><b>Screenshot layouts.</b> Temporarily paused for privacy; no OCR text or layout is sent.</span></label>
       <div class=row style="margin-top:10px"><button class="btn pri" id=cSave type=button>Save my choice</button></div></div>`);
     $('#cSave').onclick = () => { setShareFlag('shareResults', $('#cRes').checked); setShareFlag('shareLayout', $('#cLay').checked); save(); closeModal(); };
   }
