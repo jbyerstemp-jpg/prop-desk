@@ -50,7 +50,6 @@
     <div id="chart"></div>
     <canvas id="overlay"></canvas>
     <div class="small" id="haNote" hidden style="position:absolute;left:6px;bottom:34px;z-index:3;background:rgba(0,0,0,.75);padding:2px 6px;border-radius:4px;font-size:11px">Heikin Ashi view · candles are averaged · "Price" line = real price</div>
-    <div class="fsinfo" id="fsInfo"></div>
     <button class="btn sm fsx" id="fsExit">✕ Exit</button>
     <div class="small fsx fsw" id="fsWake"></div>
     <button class="btn sm fsx fsm" id="fsMiss">🔍 Coach</button>
@@ -82,7 +81,7 @@
   <div id="deskTotals" class="totals"></div>
   <div class="row"><button class="btn" id="addAcct">+ Add prop account</button></div>
   <div id="deskList"></div>
-  <section class="card desk-section" id="deskOpenCard">
+  <section class="card desk-section">
     <div class="desk-section-head"><h3>My open positions</h3><div class="desk-section-actions">
       <button type="button" class="btn sm" id="deskImportToggle" aria-label="Import screenshots">📷 Import</button>
       <input type="file" id="impFiles" accept="image/*" multiple hidden>
@@ -103,7 +102,7 @@
     </div>
     <div id="deskOpenPositions"></div>
   </section>
-  <section class="card desk-section" id="deskIdeasCard">
+  <section class="card desk-section">
     <div class="desk-section-head"><div><h3>Top 5 short-term ideas</h3><div class="small mu" id="deskIdeasMeta"></div></div>
       <button type="button" class="btn sm" id="deskIdeasMore">View all in Market</button></div>
     <p class="small mu desk-idea-disclaimer"><span class="tag warn">Untested watchlist, not a signal</span> Check the gates and your rules in the full Market cards before considering an idea.</p>
@@ -117,7 +116,7 @@
     <p class="small mu" id="monBlurb">After you import screenshots, send the monitor a copy so it can watch your positions around the clock and alert your phone (ntfy) only when something changes.</p>
     <div class="row"><button class="btn pri" id="sendMon">Send to monitor</button><span class="small" id="monStatus"></span></div></div>
   </div>
-  <div class="row" id="coachTools">
+  <div class="row">
     <button class="btn" id="copyClaude">Copy snapshot for Claude</button>
     <label class="chk"><input type="checkbox" id="notifyChk"> Phone alert when a score drops to 2 or less (while the app is open)</label>
   </div>

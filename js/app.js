@@ -782,14 +782,20 @@
       if (k.loading) return `<div class=sc><b>${esc(C.base(k.sym))}</b> <span class=mu>${k.have ? `needs ${PDTrend.WARM + 2} days of daily candles, has ${k.have}` : 'loading daily candles…'}</span></div>`;
       const st = k.state, d = st.rule; if (!d) return `<div class=sc><b>${esc(C.base(k.sym))}</b> <b>Flat</b> <span class=small>· close ${px(st.close)} between the 20-day (${px(st.fast)}) and 50-day (${px(st.slow)}) rules: no long-term trade. No trade is a valid answer.</span></div>`;
       const entry = k.price != null && Math.abs(k.price / st.close - 1) <= 0.15 ? k.price : st.close, stop = entry - d * 2 * st.atr;
-      const sizes = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned });
+      const sizeRows = liveAccts().map(a => { const A = C.accountState(a, S.positions, P, now, { orders: S.planned });
         const z = C.sizeFor({ sym: k.sym, entry, stop, risk: A.nextRisk, equity: A.equity, usedMargin: A.usedMargin, symNotional: A.openBySym[k.sym] || 0, leverage: C.levMap(a) });
-        const dc = C.directionCheck(d > 0 ? 'long' : 'short', k.sym, (analyses[k.sym] || analyze(k.sym)).struct, S.positions, a.id);
-        return `${esc(a.label || 'Account')}: ${z && z.qty > 0 ? `size ${z.qty} (${usd(z.lossAtStop)} at the stop, ${esc(A.profile.name)} pace)` : '<span class=warn>no room for a new trade</span>'}${dc.known && !dc.ok ? ` · <span class=warn>your both-ways rule says no: ${esc(dc.reasons.join('; '))}</span>` : ''}`; }).join('<br>');
+        const dc = C.directionCheck(d > 0 ? 'long' : 'short', k.sym, (analyses[k.sym] || analyze(k.sym)).struct, S.positions, a.id), label = a.label || 'Account';
+        return { label, account: esc(label), qty: z && z.qty > 0 ? String(z.qty) : '',
+          note: `${esc(label)}: ${z && z.qty > 0 ? `${usd(z.lossAtStop)} at the stop · ${esc(A.profile.name)} pace` : '<span class=warn>no room for a new trade</span>'}${dc.known && !dc.ok ? ` · <span class=warn>your both-ways rule says no: ${esc(dc.reasons.join('; '))}</span>` : ''}` };
+      });
+      const sizes = sizeRows.map(x => x.note).join('<br>');
+      const sizeBoxes = sizeRows.some(x => x.qty) ? priceBoxes(sizeRows.filter(x => x.qty).map(x => [`Size · ${esc(C.base(k.sym))} · ${x.account}`, x.qty, x.qty])) : '';
       const paper = k.open ? `paper position ${k.open.dir === d ? 'already open this way' : 'open the OTHER way (exits at the next close)'}${k.openR != null ? ' · ' + (k.openR >= 0 ? '+' : '') + k.openR.toFixed(2) + 'R' : ''}` : k.preOpen ? `this trend trade started ${fmtTime(k.preOpen.t * 1000, true)}, before your paper start, so the paper record joins at the next fresh signal` : 'the paper record opens it at the next daily open';
       return `<div class=sc><div class=sc-h><b class="${d > 0 ? 'bull' : 'bear'}">${d > 0 ? 'LONG' : 'SHORT'}</b> <b>${esc(C.base(k.sym))}</b> <span>Daily trend</span></div>
-        <div class=small>Entry about ${px(entry)} (next daily open) · stop ${px(stop)} (2× daily ATR, never widened) · exit when a daily close goes ${d > 0 ? 'below' : 'above'} the 20-day (now ${px(st.fast)}) · no fixed target: it rides the trend</div>
-        <div class=small>${sizes || '<span class=mu>Add an account on the Desk to see sizes.</span>'}</div><div class="small mu">${esc(paper)}</div></div>`; }).join('');
+        <div class=small>Entry reference ${px(entry)} (estimate; the next daily open can differ) · stop ${px(stop)} (2× daily ATR, never widened) · exit when a daily close goes ${d > 0 ? 'below' : 'above'} the 20-day (now ${px(st.fast)}) · no fixed target: it rides the trend</div>
+        ${priceBoxes([['Entry estimate', cpVal(entry), px(entry)], ['Stop', cpVal(stop), px(stop)]])}
+        <div class="small mu">Copyable values are estimates. Size is calculated per active account from this entry/stop and current account risk; verify before placing manually.</div>
+        <div class=small>${sizes || '<span class=mu>Add an account on the Desk to see sizes.</span>'}</div>${sizeBoxes}<div class="small mu">${esc(paper)}</div></div>`; }).join('');
     return cards + `<p class=small><b>Evidence:</b> <span class="tag up">passed 10-year backtest · label 3</span> +0.069R a trade after costs, 42% winners, mostly from longs, weaker since 2021. Paper record: ${n}/30 closed trades. Worst backtest stretch −28R, so it doesn't fit a 3% evaluation drawdown unless risk per trade is tiny; fine for funded or own money if you choose. Ideas only: your plan, stop and size decide.</p>`;
   }
   function renderScanAll() {
