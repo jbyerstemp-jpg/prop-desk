@@ -711,8 +711,12 @@
     $('#biasBox').innerHTML = `<table class="stack"><tr><th>TF</th><th>Bias</th><th>Swings</th><th>Last break</th></tr>${rows}</table>
       <p class=small>${sum}</p><p class="small mu">Bias = last close through a confirmed swing (2 candles each side). BOS = with the trend, CHoCH = flip. Mechanical, not a prediction.</p>`;
     const lv = A.levels.slice().sort((a, b) => b.price - a.price);
-    $('#levelBox').innerHTML = p == null ? '<p class=mu>Waiting for price…</p>' : `<table>${lv.map(l => `<tr><td>${esc(l.name)}</td><td class=num>${px(l.price)}</td><td class="num ${cls(l.price - p)}">${((l.price - p) / p * 100).toFixed(2)}%</td></tr>`).join('')}</table>
-      ${A.orb ? `<p class=small>ORB (${T().orbAnchor === 'ny' ? '9:30 NY' : T().orbAnchor === 'exchange' ? '00:30 UTC' : '00:00 UTC'}, ${T().orbMin}m): ${px(A.orb.low)}–${px(A.orb.high)} · ${A.orb.complete ? (A.orb.breakout ? `broke <b class="${A.orb.breakout.dir === 'up' ? 'bull' : 'bear'}">${A.orb.breakout.dir}</b> at ${fmtTime(A.orb.breakout.time * 1000)}` : 'no breakout close yet') : 'still forming'}</p>` : ''}`;
+    const levelRows = lv.length ? lv.map(l => `<tr><td>${esc(l.name)}</td><td class=num>${px(l.price)}</td><td class="num ${p == null ? 'mu' : cls(l.price - p)}">${p == null ? '—' : ((l.price - p) / p * 100).toFixed(2) + '%'}</td></tr>`).join('')
+      : `<tr><td colspan="3" class=mu>${p == null ? 'Waiting for daily and intraday candles…' : 'No key levels in current candle history.'}</td></tr>`;
+    $('#levelBox').innerHTML = `<table><tr><th>Level</th><th class=num>Price</th><th class=num>Distance</th></tr>${levelRows}</table>
+      ${p == null ? '<p class="small mu">Distance unavailable until a fresh price is available.</p>' : ''}
+      ${A.orb ? `<p class=small>ORB (${T().orbAnchor === 'ny' ? '9:30 NY' : T().orbAnchor === 'exchange' ? '00:30 UTC' : '00:00 UTC'}, ${T().orbMin}m): ${px(A.orb.low)}–${px(A.orb.high)} · ${A.orb.complete ? (A.orb.breakout ? `broke <b class="${A.orb.breakout.dir === 'up' ? 'bull' : 'bear'}">${A.orb.breakout.dir}</b> at ${fmtTime(A.orb.breakout.time * 1000)}` : 'no breakout close yet') : 'still forming'}</p>` : ''}
+      <p class="small mu">Prior-day/week, session, opening-range, and VWAP prices for chart and Coach context—not signals by themselves.</p>`;
     try { renderOpenPlan(T().sym); } catch (e) { const b = $('#openBox'); if (b) b.innerHTML = '<p class="small warn">Open plan error: ' + esc(e.message || String(e)) + '</p>'; }
     const fv = [];
     for (const iv of [15, 60, 240]) for (const g of (A.fvg[iv] || [])) fv.push(Object.assign({ iv }, g));
@@ -737,6 +741,11 @@
       <td class=small>${[0.5, 0.618, 0.786].map(r => px(L.fibs.find(f => f.r === r).price)).join(' · ')}</td></tr>`).join('')}</table>
       <p class="small mu">Impulse = ≥3× ATR, mostly one-way (≥50% efficiency), ≤60 bars, broke the last swing. * = end not confirmed yet (may extend). Leg disappears if price trades back through its start. Volume (the exchange only): × = vs the median of the 20 bars before; continuation signs = heavy leg + light pullback; reversal warning = pullback as heavy as the leg, or a 2×+ bar closing against it near the turn. Untested: fib and volume reads are not backtested.</p>`
       : '<p class=mu>No clean impulse leg on 15m / 1h / 4h right now.</p>';
+  }
+  function renderMarketPanels() {
+    const A = curA = analyze(T().sym);
+    renderChartPanels(A);
+    renderDataCheck();
   }
   let lastUps = [], chartMem = {}, scanMem = {};
   // ---------- Scan all coins: the full model on every coin (FVG + sweeps, both ways, alert grade, traits, profile) ----------
@@ -1473,7 +1482,7 @@
       <p class="small mu">${esc(BT.source)}. ${d(BT.period.from)}–${d(BT.period.to)}, held-out from ${d(BT.period.heldOutFrom)}. ${esc(BT.rules)} Grey = under 20 setups, too few to judge. Past results on one venue; not a promise and not a probability for your next trade. Avg R and held-out avg matter more than win rate.</p>`;
   }
   loadTrack(); setInterval(loadTrack, 600e3);
-  // ---------- Momentum & context traits: grades (monitor/traits.json) + what each says now + choose alert filters ----------
+  // ---------- Momentum & context traits: automatic context plus optional 24/7 notification filters ----------
   let TR = null, trAt = 0;
   async function loadTraits() { if (Date.now() - trAt < 600e3) return; trAt = Date.now();
     try { const r = await fetch('monitor/traits.json', { cache: 'no-store' }); TR = r.ok ? await r.json() : null; } catch (e) { TR = null; } }
@@ -1485,12 +1494,12 @@
     const on = new Set(T().alertTraits || []), byId = {}; for (const t of (TR && TR.traits) || []) byId[t.id] = t;
     const gc = g => g === 'A' || g === 'B' ? 'up' : g === 'C' ? '' : g === 'I' ? 'mu' : 'dn';
     const rows = PDTraits.TRAITS.map(t => { const g = byId[t.id], now = x ? t.side(x, prof) : null, fd = g && g.filter.V4, dd = g && g.direction;
-      return `<tr><td class=small><label class=chk><input type=checkbox data-trait="${t.id}" ${on.has(t.id) ? 'checked' : ''}> <b>${t.id}</b> ${esc(t.name)}</label><div class=mu>${esc(t.rule)}</div></td>
+      return `<tr><td class=small><label class=chk title="Optional 24/7 setup-notification filter; this trait is monitored when unchecked."><input type=checkbox data-trait="${t.id}" aria-label="Optional 24/7 alert filter for ${t.id}" ${on.has(t.id) ? 'checked' : ''}> <b>${t.id}</b> ${esc(t.name)}</label><div class=mu>${esc(t.rule)}</div></td>
         <td class="small ${now === 'long' ? 'bull' : now === 'short' ? 'bear' : 'mu'}">${now || 'no view'}</td>
         <td class="num ${gc(dd && dd.grade.grade)}" title="${esc(dd ? dd.grade.why : '')}">${dd ? dd.grade.grade : '—'}${dd && dd.held ? `<div class="small mu">${dd.held.hit}% right</div>` : ''}</td>
         <td class="num ${gc(fd && fd.grade.grade)}" title="${esc(fd ? fd.grade.why : '')}">${fd ? fd.grade.grade : '—'}${fd && fd.held && fd.held.n ? `<div class="small mu">${fd.held.avgR >= 0 ? '+' : ''}${fd.held.avgR}R (${fd.held.n})</div>` : ''}</td></tr>`; }).join('');
-    box.innerHTML = `<table><tr><th>Trait (tick = filter my phone alerts)</th><th>Says now (${esc(sym)})</th><th class=num>Direction grade</th><th class=num>Filter grade</th></tr>${rows}</table>
-      <p class="small mu">Written down before testing; graded on held-out data. Direction = was its side right 24h later (${TR ? TR.direction.hours : '?'} past hours, all coins). Filter = average R of alert-grade setups it agrees with (held-out). A/B = held up in both periods, C = small, D = periods disagree, F = worse or a coin flip, I = too few cases. ${on.size ? `<b>Phone setup alerts now need: ${esc([...on].join(' + '))} to agree.</b>` : 'No filter ticked: all alert-grade setups are sent.'} Past results on Coinbase data, not probabilities.</p>`;
+    box.innerHTML = `<table><tr><th>Trait · optional 24/7 alert filter</th><th>Now (${esc(sym)}; closed 1h)</th><th class=num>Direction grade</th><th class=num>Filter grade</th></tr>${rows}</table>
+      <p class="small mu"><b>Automatic monitoring:</b> all eight traits are calculated automatically; no box is needed to monitor them. The current side uses closed candles; the 24/7 monitor also checks them in the background. The boxes are optional filters for 24/7 setup notifications only: every checked trait must agree with the setup direction. They do not change setup grades, Market scan results, or auto-paper trades, and they do not create trait-only alerts. Written down before testing; grades use held-out historical data. Direction = was its side right 24h later (${TR ? TR.direction.hours : '?'} past hours, all coins). Filter = average R of alert-grade setups it agrees with (held-out). A/B = held up in both periods, C = small, D = periods disagree, F = worse or a coin flip, I = too few cases. ${on.size ? `<b>Optional 24/7 setup notifications require ${esc([...on].join(' + '))} to agree.</b>` : 'No trait filters selected; trait settings do not suppress setup notifications.'} Past Coinbase results are context, not probabilities.</p>`;
   }
   $('#traitBox') && $('#traitBox').addEventListener('change', e => { const c = e.target.closest('[data-trait]'); if (!c) return;
     const set = new Set(T().alertTraits || []); c.checked ? set.add(c.dataset.trait) : set.delete(c.dataset.trait); T().alertTraits = [...set]; save(); saveAndSync('alert filters'); renderTraits(T().sym); });
@@ -3034,6 +3043,7 @@
     lastFull = now;
     runCoach();
     if (tab === 'chart') renderChart(true);
+    if (tab === 'market') renderMarketPanels();
     if (tab === 'desk') renderDesk();
     if (tab === 'coach') { renderCoach(); renderPaper(); }
     if (tab === 'set' && full) renderSettings();
