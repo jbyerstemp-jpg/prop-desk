@@ -1,5 +1,5 @@
 # Prop Desk: brief for regular Claude chats
-Public brief for Prop Desk, a hobby project. (updated 2026-11-06, main 6ff76e3). Don't edit by hand.
+Public brief for Prop Desk, a hobby project. (updated 2026-11-06, main f059469). Don't edit by hand.
 
 ## How chats work (owner, Nov 2 2026)
 - This is a talk-only session: brainstorm, plan, review ideas or trades. You can't run code or change the repo here, so don't write code unless he asks for a snippet.
