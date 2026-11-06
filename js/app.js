@@ -387,8 +387,10 @@
     $('#indAllM').onchange = e => { T().indOff = !e.target.checked; save(); initChart(); lastDataKey = ''; renderChart(true); };
     document.querySelectorAll('[data-lay]').forEach(x => x.onchange = () => { T().layers[x.dataset.lay] = x.checked; save(); initChart(); lastDataKey = ''; renderChart(true); }); };
 
-  // Full screen: real fullscreen where supported, CSS fill on iPhone.
+  // Prefer native fullscreen, but keep the CSS fill unless the browser actually reports this chart as fullscreen.
   const wrap = $('#chartWrap');
+  let nativeFsActive = false;
+  const currentFullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
   // Keep the screen on while the chart is full screen (owner, Nov 2): Screen Wake Lock API. The phone drops the lock when the app goes
   // to the background, so it's taken again on return while still full screen. Where it isn't supported, say so instead of pretending.
   let wakeLock = null;
@@ -401,6 +403,7 @@
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wrap.classList.contains('fs') && !wakeLock) keepAwake(true); });
   function enterFs() {
+    nativeFsActive = currentFullscreenElement() === wrap;
     wrap.classList.add('fs'); scheduleFrame(); keepAwake(true);
     const r = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
     if (r) { try { const p = r.call(wrap); if (p && p.catch) p.catch(() => { scheduleFrame(); }); } catch (e) { scheduleFrame(); } }
@@ -408,8 +411,11 @@
     setTimeout(drawOverlay, 300);
   }
   function exitFs() {
+    const nativeActive = currentFullscreenElement() === wrap;
+    nativeFsActive = false;
     wrap.classList.remove('fs'); scheduleFrame(); keepAwake(false);
-    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => { });
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (nativeActive && exit) { try { const p = exit.call(document); if (p && p.catch) p.catch(() => { }); } catch (e) { } }
     setTimeout(drawOverlay, 300);
   }
   $('#fsBtn').onclick = enterFs; $('#fsExit').onclick = exitFs;
@@ -417,7 +423,13 @@
   // edge, price scale automatic again. Chart settings (indicators, type, timeframe) are untouched.
   function resetView() { if (!chart) return; try { chart.timeScale().resetTimeScale(); chart.timeScale().scrollToRealTime(); chart.priceScale('right').applyOptions({ autoScale: true }); if (extra.vol) chart.priceScale('vol').applyOptions({ autoScale: true }); } catch (e) { } drawOverlay(); }
   $('#resetView').onclick = resetView; $('#fsReset').onclick = resetView;
-  document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && wrap.classList.contains('fs')) { wrap.classList.remove('fs'); keepAwake(false); } scheduleFrame(); setTimeout(drawOverlay, 200); });
+  function onFullscreenChange() {
+    if (currentFullscreenElement() === wrap) nativeFsActive = true;
+    else if (nativeFsActive) { nativeFsActive = false; wrap.classList.remove('fs'); keepAwake(false); }
+    scheduleFrame(); setTimeout(drawOverlay, 200);
+  }
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && wrap.classList.contains('fs')) { e.preventDefault(); exitFs(); return; }
     if (e.key === 'f' && tab === 'chart' && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) wrap.classList.contains('fs') ? exitFs() : enterFs();
