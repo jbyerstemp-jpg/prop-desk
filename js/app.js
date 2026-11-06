@@ -387,10 +387,28 @@
     $('#indAllM').onchange = e => { T().indOff = !e.target.checked; save(); initChart(); lastDataKey = ''; renderChart(true); };
     document.querySelectorAll('[data-lay]').forEach(x => x.onchange = () => { T().layers[x.dataset.lay] = x.checked; save(); initChart(); lastDataKey = ''; renderChart(true); }); };
 
-  // Prefer native fullscreen, but keep the CSS fill unless the browser actually reports this chart as fullscreen.
+  // Phones use an app-owned CSS overlay: iOS native fullscreen can exit unexpectedly, and fixed descendants of the scrolling main can be clipped.
+  // Desktop keeps native fullscreen. The phone chart is temporarily portaled to body so the app chrome cannot cover or clip its Exit control.
   const wrap = $('#chartWrap');
   let nativeFsActive = false;
   const currentFullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  let fullscreenHome = null;
+  const usesCssMobileFullscreen = () => !!(window.matchMedia && window.matchMedia('(max-width:899px)').matches);
+  function liftChartForFullscreen() {
+    if (fullscreenHome || !wrap.parentNode || !document.body) return;
+    fullscreenHome = document.createComment('chartWrap fullscreen home');
+    wrap.parentNode.insertBefore(fullscreenHome, wrap);
+    document.body.appendChild(wrap);
+  }
+  function restoreChartAfterFullscreen() {
+    if (!fullscreenHome) return;
+    const parent = fullscreenHome.parentNode;
+    if (parent) {
+      parent.insertBefore(wrap, fullscreenHome);
+      parent.removeChild(fullscreenHome);
+    }
+    fullscreenHome = null;
+  }
   // Keep the screen on while the chart is full screen (owner, Nov 2): Screen Wake Lock API. The phone drops the lock when the app goes
   // to the background, so it's taken again on return while still full screen. Where it isn't supported, say so instead of pretending.
   let wakeLock = null;
@@ -403,11 +421,14 @@
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wrap.classList.contains('fs') && !wakeLock) keepAwake(true); });
   function enterFs() {
+    if (wrap.classList.contains('fs')) return;
+    const cssMobile = usesCssMobileFullscreen();
     nativeFsActive = currentFullscreenElement() === wrap;
+    if (cssMobile) liftChartForFullscreen();
     wrap.classList.add('fs'); scheduleFrame(); keepAwake(true);
-    const r = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+    const r = cssMobile ? null : (wrap.requestFullscreen || wrap.webkitRequestFullscreen);
     if (r) { try { const p = r.call(wrap); if (p && p.catch) p.catch(() => { scheduleFrame(); }); } catch (e) { scheduleFrame(); } }
-    try { screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => { }); } catch (e) { }
+    if (!cssMobile) { try { screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => { }); } catch (e) { } }
     setTimeout(drawOverlay, 300);
   }
   function exitFs() {
@@ -415,8 +436,14 @@
     nativeFsActive = false;
     wrap.classList.remove('fs'); scheduleFrame(); keepAwake(false);
     const exit = document.exitFullscreen || document.webkitExitFullscreen;
-    if (nativeActive && exit) { try { const p = exit.call(document); if (p && p.catch) p.catch(() => { }); } catch (e) { } }
-    setTimeout(drawOverlay, 300);
+    const restore = () => { restoreChartAfterFullscreen(); scheduleFrame(); setTimeout(drawOverlay, 300); };
+    if (nativeActive && exit) {
+      try {
+        const p = exit.call(document);
+        if (p && typeof p.then === 'function') { p.then(restore, restore); return; }
+      } catch (e) { }
+    }
+    restore();
   }
   $('#fsBtn').onclick = enterFs; $('#fsExit').onclick = exitFs;
   // Reset view (owner, Nov 3 2026): back to the normal view after zooming or dragging too far: default bar spacing, latest candles at the right
@@ -425,7 +452,7 @@
   $('#resetView').onclick = resetView; $('#fsReset').onclick = resetView;
   function onFullscreenChange() {
     if (currentFullscreenElement() === wrap) nativeFsActive = true;
-    else if (nativeFsActive) { nativeFsActive = false; wrap.classList.remove('fs'); keepAwake(false); }
+    else if (nativeFsActive) { nativeFsActive = false; wrap.classList.remove('fs'); restoreChartAfterFullscreen(); keepAwake(false); }
     scheduleFrame(); setTimeout(drawOverlay, 200);
   }
   document.addEventListener('fullscreenchange', onFullscreenChange);
