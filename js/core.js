@@ -1754,9 +1754,15 @@
   /* Paper trading (owner's request, Nov 1 2026): try setups with no money, same rules as the replay test, to build a record.
      Opened at the live price when he taps (a market fill). Closed automatically at the stop or target: bars after the open are
      checked first (a bar touching both counts as the STOP), then the live price. Result in R after 0.04%/side fees and swap. */
+  /* Minimum paper stop (owner's request, Nov 7 2026, after H30): round-trip fees are 2 x FEES.commission of the entry, so a stop closer than
+     8 x commission (0.32%) lets fees alone eat more than 25% of 1R, and a near-zero stop turns one fee into a -12R "loss".
+     Derived from the fee constant, not fitted to results. It only refuses new paper trades; it never widens or moves a stop. */
+  const PAPER_MIN_STOP = 8 * FEES.commission;
+  function paperStopTooTight(entry, stop) { return !(entry > 0) || stop == null || Math.abs(entry - stop) / entry < PAPER_MIN_STOP - 1e-12; }
   function paperOpen(idea, px, nowMs, meta) {
     const d = idea.dir === 'short' ? -1 : 1;
     if (!(px > 0) || idea.stop == null || d * (px - idea.stop) <= 0) return null;          // already past the stop: no trade
+    if (paperStopTooTight(px, idea.stop)) return null;                                      // stop too close: fees would dominate
     return { id: 'pp' + nowMs.toString(36) + Math.floor(Math.random() * 1e4).toString(36), sym: idea.sym, side: d > 0 ? 'long' : 'short', kind: idea.kind || 'manual',
       tf: String(idea.tf || ''), entry: px, plannedEntry: idea.entry, stop: idea.stop, stop0: idea.stop, target: idea.target != null ? idea.target : null,
       opened: nowMs, status: 'open', mfe: 0, mae: 0, text: idea.text || '', meta: meta || {}, log: [{ t: nowMs, what: 'opened at ' + fmtPx(px) }] };
@@ -1771,6 +1777,7 @@
   function paperLimit(idea, nowMs, meta) {
     const d = idea.dir === 'short' ? -1 : 1;
     if (!(idea.entry > 0) || idea.stop == null || d * (idea.entry - idea.stop) <= 0) return null;
+    if (paperStopTooTight(idea.entry, idea.stop)) return null;
     return { id: 'pp' + nowMs.toString(36) + Math.floor(Math.random() * 1e4).toString(36), sym: idea.sym, side: d > 0 ? 'long' : 'short', kind: idea.kind || 'manual',
       tf: String(idea.tf || ''), entry: idea.entry, plannedEntry: idea.entry, stop: idea.stop, stop0: idea.stop, target: idea.target != null ? idea.target : null,
       opened: nowMs, placedAt: nowMs, status: 'pending', order: 'limit', mfe: 0, mae: 0, text: idea.text || '', meta: meta || {}, log: [{ t: nowMs, what: 'limit placed at ' + fmtPx(idea.entry) }] };
@@ -3042,7 +3049,7 @@
     return walk(root);
   }
 
-  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, ambiguousPlannedMatches, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, reconcileSourceFacts, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, stopSheetFields, recoverStopSheet, manualStopMatches, recoverOrderSheet, parsePropScreen, overviewEquityEstimate, directOverviewEquity, overviewCropMatches, manualAccountMatches, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
+  const Core = { passOdds, LABEL_RANK, LABEL_NAMES, evidenceLabel, costHurdle, cardVerdict, rankBoard, paperLimit, paperStopTooTight, PAPER_MIN_STOP, paperOrders, coachVerdict, LESSON_FLAGS, LESSON_TAGS, lessons, tradeReview, alertWorthy, liveCheck, sortLive, rrOf, limitFill, tradeId, dedupeSetups, orderPlan, setupUse, matchPlanned, ambiguousPlannedMatches, outcomeOf, tradeOutcome, samePx, levMap, levInfo, missingInfo, MODELS, MODEL, modelAt, SCORE_RULES, SETUP_CHOICES, setupKey, setupLabel, liveR, tradeRecords, statsR, statsAgg, scoreStatus, scorecard, tradePatterns, resultPayload, shareOffered, shareLive, replayByKey, redactSample, issueLink, SAMPLE_REASONS, sampleReasons, layoutSample, fnv, alertGate, alertQueue, alertSettle, resetAlert, lossAlert, stopMove, openAlert, fillHistory, directionCheck, TRADE_TAGS, planSync, parseResetUtc, tradeSnapshot, planOrderFills, planCorrections, ledgerTimeline, linkLedger, reconcileSourceFacts, heikinAshi, ema, entryCheck, scanSetups, weighIdea, confirmElsewhere, sweepSetups, marketOpenTag, impulseLegs, FIBS, rvol, volumeRead, levelPlan, alertGrade, paperOpen, paperStep, paperR, paperStats, autoPaperPick, autoPaperTrade, paperPositions, paperSize, accountReview, parseIsoUtc, propEstimate, consensus, calibration, feedTally, feedReport, stopSheetFields, recoverStopSheet, manualStopMatches, recoverOrderSheet, parsePropScreen, overviewEquityEstimate, directOverviewEquity, overviewCropMatches, manualAccountMatches, sizeFromLimits, PLANS, SIZES, FEES, CAPITAL_CAP, ADDON_90, LEVERAGE, MAX_NOTIONAL, maxNotional, parseRulePct, ledger, feeEvents, rollovers, PROFILES, SESSIONS, profileById, lastReset, nextReset,
     tzParts, base, levCap, qtyDp, openQty, grossPnl, fundingEst, openFeesPaid, netIfClosed, realizedFor, rMultiple,
     realizedOfPos, planOf, accountState, deskTotals, sizeFor, atr, swings, structure, fvgs, liveFvgs, vwapSince,
     sessionRanges, openingRange, keyLevels, OPEN, openDays, trend4h, openTrade, openRead, openPlan, health, setupsToWatch, fmtUsd, fmtPx, tfName, uiView };
