@@ -1,11 +1,11 @@
 # Prop Desk: brief for regular Claude chats
-Public brief for Prop Desk, a hobby project. (updated 2026-11-06, main 4558278). Don't edit by hand.
+Public brief for Prop Desk, a hobby project. (updated 2026-11-08, main f03dc1f). Don't edit by hand.
 
 ## How chats work (owner, Nov 2 2026)
 - This is a talk-only session: brainstorm, plan, review ideas or trades. You can't run code or change the repo here, so don't write code unless he asks for a snippet.
 - Owner: a hobby trader who wants plain English, answer first, short. Give direct links for every website step.
 - Brainstorm rules: reflect ideas back plainly, poke holes against his rules below, at most one question, number the ideas. On "Distill": numbered list with what, why, open questions, size (small / medium / big) and rule clashes.
-- Before he leaves, if anything should reach the master repo, end with ONE block he can paste into a Claude Code session:
+- Before he leaves, if anything should be saved, prepare ONE block for the user’s own repository he can paste into a Claude Code session:
 ```
 FOR THE MASTER REPO (from chat, <date>)
 Save ideas: <numbered distilled ideas>
@@ -48,4 +48,4 @@ As of Nov 6, 2026: short-term FVG/sweep entries have not beaten random after cos
 - Keep public app changes on sanitized, owner-reviewed pull requests; do not change Cloudflare Access without an owner request.
 
 ## Cold start (any AI)
-This is the public copy of the brief, published by pull request the owner approves. Read it, follow the rules above, then ask the owner what to do next. Work done in a chat goes back to the master repo through the FOR THE MASTER REPO block.
+This is the public copy of the brief, published by pull request the owner approves. Read it, follow the rules above, then ask the owner what to do next. Work done in a chat goes back to the user's own repository through the FOR THE MASTER REPO block.
