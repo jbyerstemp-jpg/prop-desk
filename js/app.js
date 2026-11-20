@@ -892,6 +892,7 @@
     const op = C.orderPlan(u.entry, px, u.stop, u.dir, analyses[u.sym] && analyses[u.sym].atr ? analyses[u.sym].atr[60] : null);
     if (op && op.type === 'none') { alert('Price is already past this setup\'s stop. No paper trade.'); return; }
     const isLimit = op && op.type === 'limit';
+    if (C.paperStopTooTight(isLimit ? u.entry : px, u.stop)) { alert(`Stop is closer than ${(C.PAPER_MIN_STOP * 100).toFixed(2)}% of the entry: fees alone would eat over a quarter of 1R. No paper trade.`); return; }
     const t = isLimit ? C.paperLimit(u, Date.now(), paperMeta(u)) : C.paperOpen(u, px, Date.now(), paperMeta(u)); if (!t) { alert('Price is already past this setup\'s stop. No paper trade.'); return; }
     if (!isLimit) t.order = 'market';
     const pa = paperAcct();
@@ -2381,7 +2382,7 @@
       if (!C.overviewCropMatches(shot.text, shot.overview)) issues.push(`Screenshot ${index + 1}: the focused equity reading conflicts with or cannot be checked against this screenshot's account values. Retake it before syncing.`);
     }
     const completeList = r.positionCoverage === 'complete';
-    if (r.positionEvidenceConflict || r.positionCoverage === 'incomplete') issues.push('The screenshot position list is incomplete or conflicts with other position evidence. Do not sync until a current full list is readable.');
+    if (r.positionEvidenceConflict || ['incomplete', 'unknown'].includes(r.positionCoverage)) issues.push('The screenshot position list is incomplete or conflicts with other position evidence. Do not sync until a current full list is readable.');
     const size = isNew && r.account.plan ? C.sizeFromLimits(r.account.plan, r.account.drawdownLimit, r.account.target) : null;
     const sizeAccount = isNew && size ? { plan: r.account.plan, phase: r.account.phase || 'eval', size } : acct;
     if (importSizeMismatch(sizeAccount, r.account)) issues.push('The screenshot account size or limits do not match the selected account, or their match cannot be verified. Verify the account size and custom limits manually on the platform before syncing.');
@@ -2562,7 +2563,7 @@
     if (lastImport.r.orderEvidence || (lastImport.r.orders || []).length) { alert('Order-sheet sync is paused. Import a current position list without order screenshots.'); return; }
     if (lastImport.r.historyEvidence || lastImport.r.fills.length || (lastImport.r.closedRows || []).length) { alert('Trade-history and closed-position result sync are paused.'); return; }
     if (lastImport.r.ledgerEvidence || (lastImport.r.ledger || []).length || lastImport.r.account.balanceFrom === 'ledger') { alert('Ledger sync is paused until source timestamps can be verified.'); return; }
-    if (lastImport.r.positionEvidenceConflict || lastImport.r.positionCoverage === 'incomplete') { alert('This screenshot batch does not prove a complete current position list. Retake it before syncing.'); return; }
+    if (lastImport.r.positionEvidenceConflict || ['incomplete', 'unknown'].includes(lastImport.r.positionCoverage)) { alert('This screenshot batch does not prove a complete current position list. Retake it before syncing.'); return; }
     const shotChecks = [...$('#impPreview').querySelectorAll('[data-imp-shot-confirm]')];
     if (shotChecks.length !== (lastImport.r.ocrReviews || []).length || shotChecks.some(c => !c.checked)) { alert('Compare and confirm each screenshot before syncing.'); return; }
     if ($('#impAcct').value !== lastImport.choice || importStateSignature() !== lastImport.signature) {
